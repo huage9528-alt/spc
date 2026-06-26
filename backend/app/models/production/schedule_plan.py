@@ -49,4 +49,5 @@ class ProductionSchedulePlan(Base):
         Index("ix_production_schedule_dept_date", "department", "plan_date"),
         Index("ix_production_schedule_order_product", "order_no", "product_code"),
         Index("ix_production_schedule_active_line", "order_no", "line_no", "product_code", "is_active"),
+        Index("ix_production_schedule_active_product_date", "is_active", "product_code", "plan_date"),
     )
