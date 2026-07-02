@@ -85,6 +85,12 @@ export const authApi = {
     api.put('/basicdata/auth/preferences', { font_size_scale }),
 }
 
+export const permissionApi = {
+  tree: () => api.get('/permissions/tree'),
+  list: () => api.get('/permissions'),
+  routeMap: () => api.get('/permissions/route-map'),
+}
+
 // ============ 供应链驾驶舱 ============
 export const dashboardApi = {
   getSummary: () => api.get('/dashboard/summary'),
@@ -222,18 +228,34 @@ export const productionApi = {
   listSchedulePlans: (params: Record<string, any>) => api.get('/production/schedule-plans', { params }),
   createSchedulePlan: (data: Record<string, any>) => api.post('/production/schedule-plans', data),
   updateSchedulePlan: (id: number, data: Record<string, any>) => api.put(`/production/schedule-plans/${id}`, data),
-  deleteSchedulePlan: (id: number) => api.delete(`/production/schedule-plans/${id}`),
+  getDeleteSchedulePlanPreview: (id: number, params?: Record<string, any>) =>
+    api.get(`/production/schedule-plans/${id}/delete-preview`, { params }),
+  confirmDeleteSchedulePlan: (id: number, data: { reason?: string; execute_backfill?: boolean }) =>
+    api.post(`/production/schedule-plans/${id}/delete-confirm`, data),
+  deleteSchedulePlan: (id: number, params?: Record<string, any>) =>
+    api.delete(`/production/schedule-plans/${id}`, { params }),
+  executeDeleteBackfill: (data: { items: Array<{ plan_id: number; suggested_plan_date: string }>; remark?: string }) =>
+    api.post('/production/schedule-plans/backfill/execute', data),
   // 重新排产
   reschedulePlan: (planId: number) => api.post(`/production/schedule-plans/${planId}/reschedule`),
+  listSchedulePlanHistory: (params: { order_no: string; line_no: string }) =>
+    api.get('/production/schedule-plans/history', { params }),
   // 订单池用于排产
   getOrdersForScheduling: (params: Record<string, any>) => api.get('/production/schedule-plans/orders-for-scheduling', { params }),
+  getTodoWorkbench: (params: Record<string, any>) => api.get('/production/schedule-plans/todo-workbench', { params }),
+  refreshTodoSnapshots: (data: Record<string, any>) => api.post('/production/schedule-plans/todo-workbench/refresh-snapshots', data),
   // 获取工作时间配置
   getWorkHoursConfig: () => api.get('/production/schedule-plans/work-hours-config'),
+  simulateLeanSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/simulate-lean', data),
   // 一键排产
   autoSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/auto-schedule', data),
+  batchAutoSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/batch-auto-schedule', data),
   // 检测变更
   detectScheduleChanges: () => api.post('/production/schedule-plans/detect-changes'),
   // UPPH 变更影响
+  listChangeEvents: (params: Record<string, any>) => api.get('/production/schedule-plans/change-events', { params }),
+  updateChangeEventStatus: (data: { event_ids: string[]; process_status: string; remark?: string }) =>
+    api.post('/production/schedule-plans/change-events/status', data),
   listUpphImpactPlans: (params: Record<string, any>) => api.get('/production/schedule-plans/upph-impact', { params }),
   batchReschedulePlans: (data: { plan_ids: number[], all_or_none?: boolean }) => api.post('/production/schedule-plans/batch-reschedule', data),
   listOperationLogs: (params: Record<string, any>) => api.get('/production/schedule-plans/operation-logs', { params }),
@@ -309,6 +331,10 @@ export const productionApi = {
   createProductProcessCapacity: (data: Record<string, any>) => api.post('/production/product-process-capacities', data),
   updateProductProcessCapacity: (id: number, data: Record<string, any>) => api.put(`/production/product-process-capacities/${id}`, data),
   deleteProductProcessCapacity: (id: number) => api.delete(`/production/product-process-capacities/${id}`),
+  listUpphFormulaConfigs: (params: Record<string, any> = {}) => api.get('/production/upph-formula-configs', { params }),
+  createUpphFormulaConfig: (data: Record<string, any>) => api.post('/production/upph-formula-configs', data),
+  updateUpphFormulaConfig: (id: number, data: Record<string, any>) => api.put(`/production/upph-formula-configs/${id}`, data),
+  deleteUpphFormulaConfig: (id: number) => api.delete(`/production/upph-formula-configs/${id}`),
 }
 
 // ============ 异常与质量中心 ============
@@ -396,7 +422,7 @@ export const importExportApi = {
     formData.append('file', file)
     return api.post('/basicdata/import-export/purchase-orders', formData)
   },
-  syncData: (type: 'orders' | 'order_details' | 'materials' | 'purchase_orders' | 'customers' | 'suppliers' | 'materials_masterdata' | 'skus' | 'products' | 'warehouses' | 'processes' | 'organizations' | 'positions' | 'employees' | 'purchase_invoices' | 'quality_issues' | 'all', params: { hours?: number; order_numbers?: string[] } = {}) => {
+  syncData: (type: string, params: { hours?: number; order_numbers?: string[] } = {}) => {
     const queryParams = new URLSearchParams()
     if (params.hours !== undefined) {
       queryParams.append('hours', params.hours.toString())
@@ -427,6 +453,23 @@ export const importExportApi = {
     api.get('/basicdata/import-export/weekly-report', { responseType: 'blob' }),
   exportIssues: () =>
     api.get('/basicdata/import-export/issues', { responseType: 'blob' }),
+}
+
+export const dataSupplyApi = {
+  listAvailableTypes: () => api.get('/basicdata/data-supply/configs/available-types'),
+  dataTypeOptions: () => api.get('/basicdata/data-supply/data-type-options'),
+  listConfigs: (params: Record<string, any>) => api.get('/basicdata/data-supply/configs', { params }),
+  createConfig: (data: Record<string, any>) => api.post('/basicdata/data-supply/configs', data),
+  updateConfig: (configId: number, data: Record<string, any>) =>
+    api.put(`/basicdata/data-supply/configs/${configId}`, data),
+  deleteConfig: (configId: number) => api.delete(`/basicdata/data-supply/configs/${configId}`),
+  listApiKeys: (params: Record<string, any>) => api.get('/basicdata/data-supply/api-keys', { params }),
+  createApiKey: (data: Record<string, any>) => api.post('/basicdata/data-supply/api-keys', data),
+  updateApiKey: (keyId: number, data: Record<string, any>) =>
+    api.put(`/basicdata/data-supply/api-keys/${keyId}`, data),
+  deleteApiKey: (keyId: number) => api.delete(`/basicdata/data-supply/api-keys/${keyId}`),
+  listCallLogs: (params: Record<string, any>) => api.get('/basicdata/data-supply/call-logs', { params }),
+  getStatistics: (params: Record<string, any> = {}) => api.get('/basicdata/data-supply/statistics', { params }),
 }
 
 // ============ 规则配置中心 ============

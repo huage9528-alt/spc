@@ -149,6 +149,7 @@ class ProcessProgressUpdate(BaseModel):
 
 class ProductionSchedulePlanOut(BaseModel):
     id: int
+    task_no: Optional[str] = None
     department: str
     plan_date: date
     order_no: Optional[str] = None
@@ -164,7 +165,24 @@ class ProductionSchedulePlanOut(BaseModel):
     upph: Optional[float] = None
     daily_work_hours: Optional[float] = None
     remark: Optional[str] = None
+    bom_no: Optional[str] = None
+    schedule_bucket: Optional[str] = None
+    schedule_bucket_label: Optional[str] = None
+    scheduling_reason: Optional[str] = None
     customer_due_date: Optional[date] = None
+    target_ready_date: Optional[date] = None
+    ready_offset_days: int = 2
+    total_hours: Optional[float] = None
+    available_production_days: Optional[int] = None
+    required_daily_hours: Optional[float] = None
+    recommended_daily_hours: Optional[float] = None
+    capacity_load_status: Optional[str] = None
+    capacity_load_status_label: Optional[str] = None
+    sunday_rest_allowed: Optional[bool] = None
+    needs_sunday_work: Optional[bool] = None
+    needs_move_earlier: Optional[bool] = None
+    move_earlier_days: Optional[int] = None
+    work_hour_summary: Optional[str] = None
     delay_days: Optional[int] = None
     delivery_status: Optional[str] = None
     latest_reschedule_at: Optional[datetime] = None
@@ -256,6 +274,7 @@ class OrderForSchedulingOut(BaseModel):
     order_no: str
     line_no: str
     customer: Optional[str] = None
+    bom_no: Optional[str] = None
     product_code: Optional[str] = None
     product_model: Optional[str] = None
     order_qty: Optional[float] = None
@@ -264,6 +283,109 @@ class OrderForSchedulingOut(BaseModel):
     status: Optional[str] = None
     upph: Optional[float] = None
     has_schedule: bool = False
+    schedule_bucket: Optional[str] = None
+    schedule_bucket_label: Optional[str] = None
+    scheduling_status: str = "pending"
+    scheduling_status_label: str = "待确认"
+    display_status: str = "pending"
+    display_status_label: str = "待确认"
+    scheduling_reason_code: Optional[str] = None
+    scheduling_reason: Optional[str] = None
+    scheduling_reason_details: List[str] = Field(default_factory=list)
+    is_missing_upph: bool = False
+    target_ready_date: Optional[date] = None
+    ready_offset_days: int = 2
+    total_hours: Optional[float] = None
+    available_production_days: Optional[int] = None
+    required_daily_hours: Optional[float] = None
+    recommended_daily_hours: Optional[float] = None
+    capacity_load_status: Optional[str] = None
+    capacity_load_status_label: Optional[str] = None
+    sunday_rest_allowed: Optional[bool] = None
+    needs_sunday_work: Optional[bool] = None
+    needs_move_earlier: Optional[bool] = None
+    move_earlier_days: Optional[int] = None
+    work_hour_summary: Optional[str] = None
+
+
+class TodoWorkbenchItemOut(BaseModel):
+    id: Optional[int] = None
+    todo_source: str
+    todo_kind: str
+    todo_status_label: str
+    todo_action_label: Optional[str] = None
+    todo_due_date: Optional[date] = None
+    order_no: str
+    line_no: str
+    customer: Optional[str] = None
+    bom_no: Optional[str] = None
+    product_code: Optional[str] = None
+    product_model: Optional[str] = None
+    model_code: Optional[str] = None
+    order_qty: Optional[float] = None
+    quantity: Optional[float] = None
+    promised_date: Optional[date] = None
+    source_promised_date: Optional[date] = None
+    risk_level: Optional[str] = None
+    status: Optional[str] = None
+    owner: Optional[str] = None
+    upph: Optional[float] = None
+    current_upph: Optional[float] = None
+    source_upph: Optional[float] = None
+    has_schedule: bool = False
+    schedule_bucket: Optional[str] = None
+    schedule_bucket_label: Optional[str] = None
+    scheduling_status: Optional[str] = None
+    scheduling_status_label: Optional[str] = None
+    display_status: Optional[str] = None
+    display_status_label: Optional[str] = None
+    scheduling_reason_code: Optional[str] = None
+    scheduling_reason: Optional[str] = None
+    scheduling_reason_details: List[str] = Field(default_factory=list)
+    is_missing_upph: bool = False
+    target_ready_date: Optional[date] = None
+    ready_offset_days: int = 2
+    total_hours: Optional[float] = None
+    available_production_days: Optional[int] = None
+    required_daily_hours: Optional[float] = None
+    recommended_daily_hours: Optional[float] = None
+    capacity_load_status: Optional[str] = None
+    capacity_load_status_label: Optional[str] = None
+    sunday_rest_allowed: Optional[bool] = None
+    needs_sunday_work: Optional[bool] = None
+    needs_move_earlier: Optional[bool] = None
+    move_earlier_days: Optional[int] = None
+    work_hour_summary: Optional[str] = None
+    plan_date: Optional[date] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    plan_version: Optional[int] = None
+    previous_plan_id: Optional[int] = None
+    impact_level: Optional[str] = None
+    impact_score: Optional[float] = None
+    impact_reason: Optional[str] = None
+    needs_reschedule: bool = False
+    reschedule_reason: Optional[str] = None
+    planned_days_needed: Optional[int] = None
+    current_days_needed: Optional[int] = None
+    upph_delta: Optional[float] = None
+    upph_delta_ratio: Optional[float] = None
+
+
+class TodoSnapshotRefreshRequest(BaseModel):
+    year: Optional[int] = None
+    month: Optional[int] = None
+    keyword: Optional[str] = None
+    risk_level: Optional[str] = None
+    limit: int = Field(200, ge=1, le=500)
+
+
+class TodoSnapshotRefreshResponse(BaseModel):
+    matched_total: int
+    stale_total: int
+    refreshed_total: int
+    skipped_total: int = 0
+    month_scope: str
 
 
 class AutoScheduleRequest(BaseModel):
@@ -283,12 +405,78 @@ class AutoScheduleResponse(BaseModel):
     calculation_result: Optional[dict] = None
 
 
+class ProductionSimulationRequest(BaseModel):
+    department: str = "生产"
+    quantity: float = Field(..., gt=0)
+    upph: float = Field(..., gt=0)
+    promised_date: date
+    consider_existing_plans: bool = True
+
+
+class ProductionSimulationResponse(BaseModel):
+    department: str = "生产"
+    schedule_bucket: str = "lean"
+    schedule_bucket_label: str = "精益"
+    quantity: float
+    upph: float
+    promised_date: date
+    target_ready_date: Optional[date] = None
+    total_hours: Optional[float] = None
+    days_needed: int
+    recommended_daily_hours: float
+    capacity_load_status: Optional[str] = None
+    capacity_load_status_label: Optional[str] = None
+    sunday_rest_allowed: Optional[bool] = None
+    needs_sunday_work: Optional[bool] = None
+    needs_move_earlier: Optional[bool] = None
+    move_earlier_days: Optional[int] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    plan_date: Optional[date] = None
+    warning: Optional[str] = None
+    work_hour_summary: Optional[str] = None
+    explanation_steps: List[str] = Field(default_factory=list)
+
+
+class BatchAutoScheduleItemIn(BaseModel):
+    order_no: str
+    line_no: str
+    upph: Optional[float] = None
+
+
+class BatchAutoScheduleRequest(BaseModel):
+    department: str = "生产"
+    plan_date: Optional[date] = None
+    daily_work_hours: Optional[float] = None
+    owner: Optional[str] = None
+    items: List[BatchAutoScheduleItemIn]
+
+
+class BatchAutoScheduleItemOut(BaseModel):
+    order_no: str
+    line_no: str
+    success: bool
+    plan_id: Optional[int] = None
+    message: str
+    warning: Optional[str] = None
+
+
+class BatchAutoScheduleResponse(BaseModel):
+    total: int
+    success_count: int
+    failed_count: int
+    delay_warning_count: int = 0
+    items: List[BatchAutoScheduleItemOut]
+
+
 class UpphImpactPlanOut(BaseModel):
     """UPPH变更影响的排产计划项"""
     id: int
     department: str
     order_no: Optional[str] = None
     line_no: Optional[str] = None
+    schedule_bucket: Optional[str] = None
+    schedule_bucket_label: Optional[str] = None
     product_code: Optional[str] = None
     model_code: Optional[str] = None
     quantity: Optional[float] = None
@@ -311,6 +499,71 @@ class UpphImpactPlanOut(BaseModel):
     impact_reason: str
     needs_reschedule: bool = False
     reschedule_reason: Optional[str] = None
+
+
+class ScheduleChangeEventOut(BaseModel):
+    event_id: str
+    id: int
+    event_type: str
+    event_type_label: str
+    department: str
+    order_no: Optional[str] = None
+    line_no: Optional[str] = None
+    schedule_bucket: Optional[str] = None
+    schedule_bucket_label: Optional[str] = None
+    product_code: Optional[str] = None
+    model_code: Optional[str] = None
+    quantity: Optional[float] = None
+    owner: Optional[str] = None
+    status: str
+    plan_version: int = 1
+    plan_date: date
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    source_promised_date: Optional[date] = None
+    current_promised_date: Optional[date] = None
+    source_order_qty: Optional[float] = None
+    current_order_qty: Optional[float] = None
+    source_upph: Optional[float] = None
+    current_upph: Optional[float] = None
+    before_value_text: Optional[str] = None
+    after_value_text: Optional[str] = None
+    change_summary: Optional[str] = None
+    impact_level: str
+    impact_score: float = 0
+    impact_reason: str
+    needs_reschedule: bool = False
+    reschedule_reason: Optional[str] = None
+    process_status: str = "pending"
+    process_status_label: str = "待处理"
+    process_operator: Optional[str] = None
+    process_at: Optional[datetime] = None
+    planned_days_needed: Optional[int] = None
+    current_days_needed: Optional[int] = None
+    upph_delta: Optional[float] = None
+    upph_delta_ratio: Optional[float] = None
+
+
+class ChangeEventStatusUpdateRequest(BaseModel):
+    event_ids: List[str] = Field(default_factory=list)
+    process_status: str = Field(pattern="^(watching|resolved|pending)$")
+    remark: Optional[str] = None
+
+
+class ChangeEventStatusUpdateItemOut(BaseModel):
+    event_id: str
+    plan_id: int
+    process_status: str
+    process_status_label: str
+    success: bool = True
+    message: Optional[str] = None
+
+
+class ChangeEventStatusUpdateResponse(BaseModel):
+    total: int
+    success_count: int
+    failed_count: int
+    items: List[ChangeEventStatusUpdateItemOut] = Field(default_factory=list)
 
 
 class BatchRescheduleRequest(BaseModel):
@@ -339,6 +592,78 @@ class BatchRescheduleResponse(BaseModel):
     # 新增：交期影响统计
     delay_warning_count: int = 0  # 产生新延期预警的条数
     items: List[BatchRescheduleItemOut]
+
+
+class DeleteSchedulePlanBackfillItemOut(BaseModel):
+    plan_id: int
+    order_no: Optional[str] = None
+    line_no: Optional[str] = None
+    current_plan_date: Optional[date] = None
+    suggested_plan_date: Optional[date] = None
+    current_start_date: Optional[date] = None
+    current_end_date: Optional[date] = None
+    schedule_bucket: Optional[str] = None
+    schedule_bucket_label: Optional[str] = None
+
+
+class DeleteSchedulePlanResultOut(BaseModel):
+    deleted: int
+    reason: Optional[str] = None
+    release_plan_date: Optional[date] = None
+    release_bucket: Optional[str] = None
+    release_bucket_label: Optional[str] = None
+    affected_count: int = 0
+    affected_plan_ids: List[int] = Field(default_factory=list)
+    items: List[DeleteSchedulePlanBackfillItemOut] = Field(default_factory=list)
+    backfill_executed: bool = False
+    backfill_success_count: int = 0
+    backfill_failed_count: int = 0
+
+
+class DeleteSchedulePlanPreviewOut(BaseModel):
+    plan_id: int
+    order_no: Optional[str] = None
+    line_no: Optional[str] = None
+    reason: Optional[str] = None
+    release_plan_date: Optional[date] = None
+    release_bucket: Optional[str] = None
+    release_bucket_label: Optional[str] = None
+    affected_count: int = 0
+    affected_plan_ids: List[int] = Field(default_factory=list)
+    items: List[DeleteSchedulePlanBackfillItemOut] = Field(default_factory=list)
+
+
+class DeleteSchedulePlanConfirmRequest(BaseModel):
+    reason: Optional[str] = None
+    execute_backfill: bool = False
+
+
+class DeleteBackfillExecuteItemIn(BaseModel):
+    plan_id: int
+    suggested_plan_date: date
+
+
+class DeleteBackfillExecuteRequest(BaseModel):
+    items: List[DeleteBackfillExecuteItemIn] = Field(default_factory=list)
+    remark: Optional[str] = None
+
+
+class DeleteBackfillExecuteItemOut(BaseModel):
+    old_plan_id: int
+    new_plan_id: Optional[int] = None
+    order_no: Optional[str] = None
+    line_no: Optional[str] = None
+    old_plan_date: Optional[date] = None
+    new_plan_date: Optional[date] = None
+    success: bool = True
+    message: Optional[str] = None
+
+
+class DeleteBackfillExecuteResponse(BaseModel):
+    total: int
+    success_count: int
+    failed_count: int
+    items: List[DeleteBackfillExecuteItemOut] = Field(default_factory=list)
 
 
 class ProductionScheduleOperationLogOut(BaseModel):
@@ -496,8 +821,19 @@ class ProductProcessCapacityOut(BaseModel):
     bom_code: Optional[str] = None
     product_code: str
     product_name: Optional[str] = None
+    oa_workshop_id: Optional[str] = None
+    oa_workshop_name: Optional[str] = None
     process_type: str
+    gjje: Optional[float] = None
+    manpower: Optional[float] = None
+    hour_price: Optional[float] = None
+    oa_raw_upph: Optional[float] = None
+    formula_upph: Optional[float] = None
+    manual_upph: Optional[float] = None
+    upph_source: Optional[str] = None
     upph: float
+    is_schedulable: bool = True
+    exclude_reason: Optional[str] = None
     source: Optional[str] = None
     sync_batch_no: Optional[str] = None
     last_sync_time: Optional[datetime] = None
@@ -514,7 +850,9 @@ class ProductProcessCapacityCreate(BaseModel):
     product_code: str
     product_name: Optional[str] = None
     process_type: str
-    upph: float
+    upph: Optional[float] = None
+    manpower: Optional[float] = None
+    hour_price: Optional[float] = None
     source: Optional[str] = None
     sync_batch_no: Optional[str] = None
     last_sync_time: Optional[datetime] = None
@@ -529,6 +867,8 @@ class ProductProcessCapacityUpdate(BaseModel):
     product_name: Optional[str] = None
     process_type: Optional[str] = None
     upph: Optional[float] = None
+    manpower: Optional[float] = None
+    hour_price: Optional[float] = None
     source: Optional[str] = None
     sync_batch_no: Optional[str] = None
     last_sync_time: Optional[datetime] = None
@@ -544,4 +884,42 @@ class ProductProcessCapacitySyncResult(BaseModel):
     reactivated: int = 0
     deactivated: int = 0
     skipped: int = 0
+    affected_schedule_plans_marked: int = 0
+
+
+class UpphFormulaConfigOut(BaseModel):
+    id: int
+    workshop_name: str
+    process_type: str
+    manpower: float
+    hour_price: float
+    is_active: bool = True
+    remark: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class UpphFormulaConfigCreate(BaseModel):
+    workshop_name: str
+    process_type: str
+    manpower: float
+    hour_price: float
+    is_active: bool = True
+    remark: Optional[str] = None
+
+
+class UpphFormulaConfigUpdate(BaseModel):
+    workshop_name: Optional[str] = None
+    process_type: Optional[str] = None
+    manpower: Optional[float] = None
+    hour_price: Optional[float] = None
+    is_active: Optional[bool] = None
+    remark: Optional[str] = None
+
+
+class UpphFormulaRecalculateResult(BaseModel):
+    recalculated: int = 0
+    updated: int = 0
     affected_schedule_plans_marked: int = 0

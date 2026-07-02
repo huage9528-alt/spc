@@ -9,12 +9,14 @@ from app.api.v1.production.overview import router as overview_router
 from app.api.v1.production.process_exceptions import router as exceptions_router
 from app.api.v1.production.schedule_plans import router as schedule_plans_router
 from app.api.v1.production.product_process_capacities import router as product_process_capacities_router
+from app.api.v1.production.upph_formula_configs import router as upph_formula_configs_router
 
 router = APIRouter()
 
 router.include_router(overview_router, prefix="/overview", tags=["生产总览"])
 router.include_router(schedule_plans_router, prefix="/schedule-plans", tags=["计划排产"])
 router.include_router(product_process_capacities_router, prefix="/product-process-capacities", tags=["产品工序产能"])
+router.include_router(upph_formula_configs_router, prefix="/upph-formula-configs", tags=["UPPH配置"])
 router.include_router(front_process_router, prefix="/front-process", tags=["前道管理"])
 router.include_router(smt_router, prefix="/smt", tags=["贴片管理"])
 router.include_router(lean_router, prefix="/lean", tags=["精益管理"])

@@ -8,16 +8,22 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.production.product_process_capacity import ProductProcessCapacity
+from app.models.production.product_process_capacity import (
+    ProductProcessCapacity,
+    build_capacity_metadata_remark,
+    parse_capacity_metadata,
+    resolve_capacity_upph,
+)
 from app.models.production.schedule_plan import ProductionSchedulePlan
 from app.services.basicdata.erp_sync_service import ERPConnectionError, ERPSyncService
+from app.services.production.upph_formula_config_service import UpphFormulaConfigService
 
 
 class ProductProcessCapacitySyncService:
     """从 OA 同步工序产能到 product_process_capacity。"""
 
     OA_SOURCE = "OA"
-
+    OA_DEPARTMENT_TABLE = "HrmDepartment"
     def __init__(self, db: AsyncSession):
         self.db = db
         self.erp_service = ERPSyncService(db)
@@ -37,10 +43,14 @@ class ProductProcessCapacitySyncService:
         }
 
         try:
+            config_service = UpphFormulaConfigService(self.db)
+            await config_service.ensure_table()
+            config_map = await config_service.get_active_config_map()
             await self.erp_service._connect_erp()
             detail_columns = await self._load_table_columns("formtable_main_51_dt1")
             main_columns = await self._load_table_columns("formtable_main_51")
-            sql_text = self._build_sync_sql(detail_columns, main_columns)
+            department_columns = await self._load_table_columns(self.OA_DEPARTMENT_TABLE)
+            sql_text = self._build_sync_sql(detail_columns, main_columns, department_columns)
             rows = await self.erp_service._execute_erp_sql(sql_text, {})
             stats["fetched"] = len(rows)
 
@@ -67,8 +77,6 @@ class ProductProcessCapacitySyncService:
                 bom_code = normalized["bom_code"]
                 product_code = normalized["product_code"]
                 process_type = normalized["process_type"]
-                remark = normalized.get("remark")
-                new_upph = normalized["upph"]
 
                 if oa_detail_id:
                     seen_oa_detail_ids.add(oa_detail_id)
@@ -76,6 +84,37 @@ class ProductProcessCapacitySyncService:
                 record = None
                 if oa_detail_id:
                     record = existing_by_oa_detail_id.get(oa_detail_id)
+
+                existing_metadata = parse_capacity_metadata(record.remark) if record else {}
+                config_manpower, config_hour_price = await config_service.resolve_formula_inputs(
+                    normalized["oa_workshop_name"],
+                    process_type,
+                    config_map,
+                )
+                upph_result = resolve_capacity_upph(
+                    workshop_name=normalized["oa_workshop_name"],
+                    process_type=process_type,
+                    gjje=normalized["gjje"],
+                    oa_raw_upph=normalized["oa_raw_upph"],
+                    manpower=config_manpower,
+                    hour_price=config_hour_price,
+                    manual_upph=existing_metadata.get("manual_upph"),
+                )
+                new_upph = self._normalize_decimal(upph_result["effective_upph"])
+                remark = build_capacity_metadata_remark(
+                    oa_main_id=normalized["oa_main_id"],
+                    oa_workshop_id=normalized["oa_workshop_id"],
+                    oa_workshop_name=normalized["oa_workshop_name"],
+                    gjje=normalized["gjje"],
+                    oa_raw_upph=upph_result.get("oa_raw_upph"),
+                    formula_upph=upph_result.get("formula_upph"),
+                    effective_upph=upph_result.get("effective_upph"),
+                    manual_upph=upph_result.get("manual_upph"),
+                    upph_source=upph_result.get("upph_source"),
+                    manpower=upph_result.get("manpower"),
+                    hour_price=upph_result.get("hour_price"),
+                    raw_remark=normalized.get("raw_remark"),
+                )
 
                 # 检测 UPPH 是否变化
                 upph_changed = False
@@ -169,28 +208,10 @@ class ProductProcessCapacitySyncService:
 
             # 标记相关的排产计划为待重排
             if changed_product_codes or changed_bom_codes:
-                # 查询状态为"已排产未下达"的计划（状态值为"planned"
-                conditions = [
-                    ProductionSchedulePlan.is_active == True,
-                    ProductionSchedulePlan.status == "planned",
-                ]
-
-                if changed_product_codes:
-                    conditions.append(
-                        ProductionSchedulePlan.product_code.in_(list(changed_product_codes))
-                    )
-
-                result = await self.db.execute(
-                    select(ProductionSchedulePlan)
-                    .where(*conditions)
+                stats["affected_schedule_plans_marked"] += await self.mark_affected_schedule_plans(
+                    self.db,
+                    changed_product_codes,
                 )
-
-                for plan in result.scalars().all():
-                    if not plan.needs_reschedule:
-                        plan.needs_reschedule = True
-                        plan.reschedule_reason = "UPPH 数据已更新"
-                        self.db.add(plan)
-                        stats["affected_schedule_plans_marked"] += 1
 
             await self.db.commit()
             return stats
@@ -202,6 +223,33 @@ class ProductProcessCapacitySyncService:
             raise
         finally:
             self.erp_service._close_erp()
+
+    @staticmethod
+    async def mark_affected_schedule_plans(
+        db: AsyncSession,
+        product_codes: set[str],
+        reason: str = "UPPH 数据已更新",
+    ) -> int:
+        if not product_codes:
+            return 0
+
+        result = await db.execute(
+            select(ProductionSchedulePlan).where(
+                ProductionSchedulePlan.is_active == True,
+                ProductionSchedulePlan.status == "planned",
+                ProductionSchedulePlan.product_code.in_(list(product_codes)),
+            )
+        )
+
+        affected = 0
+        for plan in result.scalars().all():
+            if plan.needs_reschedule and plan.reschedule_reason == reason:
+                continue
+            plan.needs_reschedule = True
+            plan.reschedule_reason = reason
+            db.add(plan)
+            affected += 1
+        return affected
 
     async def _load_table_columns(self, table_name: str) -> set[str]:
         sql_text = f"SELECT TOP 0 * FROM FWsv.ecology.dbo.{table_name}"
@@ -216,7 +264,12 @@ class ProductProcessCapacitySyncService:
             if column
         }
 
-    def _build_sync_sql(self, detail_columns: set[str], main_columns: set[str]) -> str:
+    def _build_sync_sql(
+        self,
+        detail_columns: set[str],
+        main_columns: set[str],
+        department_columns: set[str],
+    ) -> str:
         detail_id_expr = "CAST(b.id AS VARCHAR(64))" if "id" in detail_columns else "NULL"
         if "wldm" in main_columns:
             product_code_expr = "CAST(a.wldm AS VARCHAR(64))"
@@ -233,6 +286,14 @@ class ProductProcessCapacitySyncService:
             raise ERPConnectionError("OA 明细表缺少 UPPH 字段 pph")
         if "sfyx" not in main_columns:
             raise ERPConnectionError("OA 主表缺少是否有效字段 sfyx")
+        if "cj" not in main_columns:
+            raise ERPConnectionError("OA 主表缺少车间字段 cj")
+        if "gjje" not in main_columns:
+            raise ERPConnectionError("OA 主表缺少工价金额字段 gjje")
+        if "id" not in department_columns:
+            raise ERPConnectionError("OA 部门表缺少主键字段 id")
+        if "departmentname" not in department_columns:
+            raise ERPConnectionError("OA 部门表缺少部门名称字段 departmentname")
 
         request_column = "requestID" if "requestid" in main_columns else None
         request_filter = f"AND a.{request_column} IS NULL" if request_column else ""
@@ -248,12 +309,19 @@ class ProductProcessCapacitySyncService:
         elif "bzcn" in detail_columns:
             remark_expr = "LTRIM(RTRIM(CAST(b.bzcn AS NVARCHAR(MAX))))"
 
+        workshop_id_expr = "LTRIM(RTRIM(CAST(a.cj AS VARCHAR(64))))"
+        workshop_name_expr = "LTRIM(RTRIM(CAST(d.departmentname AS NVARCHAR(255))))"
+        gjje_expr = "CAST(ISNULL(a.gjje, 0) AS DECIMAL(15, 2))"
+
         return f"""
         SELECT
+            CAST(a.id AS VARCHAR(64)) AS oa_main_id,
             {detail_id_expr} AS oa_detail_id,
             {bom_code_expr} AS bom_code,
             LTRIM(RTRIM({product_code_expr})) AS product_code,
             LTRIM(RTRIM(CAST(b.wlmc AS VARCHAR(256)))) AS product_name,
+            {workshop_id_expr} AS oa_workshop_id,
+            {workshop_name_expr} AS oa_workshop_name,
             CASE
                 WHEN b.gx = 0 THEN '组装前加工'
                 WHEN b.gx = 7 THEN '包装前加工'
@@ -263,10 +331,13 @@ class ProductProcessCapacitySyncService:
                 WHEN b.gx = 6 THEN '打砂带'
                 ELSE CONCAT('未定义工序(', CAST(b.gx AS VARCHAR(20)), ')')
             END AS process_type,
+            {gjje_expr} AS gjje,
             CAST(ISNULL(b.pph, 0) AS DECIMAL(15, 2)) AS upph,
             {remark_expr} AS remark
         FROM FWsv.ecology.dbo.formtable_main_51 a
         LEFT JOIN FWsv.ecology.dbo.formtable_main_51_dt1 b ON a.id = b.mainid
+        LEFT JOIN FWsv.ecology.dbo.{self.OA_DEPARTMENT_TABLE} d
+          ON CAST(a.cj AS VARCHAR(64)) = CAST(d.id AS VARCHAR(64))
         WHERE a.sfyx = 0
           {request_filter}
           AND b.mainid IS NOT NULL
@@ -283,13 +354,17 @@ class ProductProcessCapacitySyncService:
             return None
 
         return {
+            "oa_main_id": self._normalize_text(row.get("oa_main_id")),
             "oa_detail_id": self._normalize_text(row.get("oa_detail_id")),
             "bom_code": bom_code,
             "product_code": product_code or bom_code,
             "product_name": self._normalize_text(row.get("product_name")),
+            "oa_workshop_id": self._normalize_text(row.get("oa_workshop_id")),
+            "oa_workshop_name": self._normalize_text(row.get("oa_workshop_name")),
             "process_type": process_type,
-            "upph": self._normalize_decimal(row.get("upph")),
-            "remark": self._normalize_text(row.get("remark")),
+            "gjje": self._normalize_decimal(row.get("gjje")),
+            "oa_raw_upph": self._normalize_decimal(row.get("upph")),
+            "raw_remark": self._normalize_text(row.get("remark")),
         }
 
     @staticmethod
