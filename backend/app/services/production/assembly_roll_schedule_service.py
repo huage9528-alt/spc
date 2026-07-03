@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
+
+from sqlalchemy import text
 
 from app.models.production.product_process_capacity import resolve_capacity_upph
 from app.services.basicdata.erp_sync_service import ERPSyncService
@@ -88,6 +91,20 @@ class AssemblyRollScheduleService:
             candidates.append(stripped)
         return candidates
 
+    async def _load_table_columns(self, table_name: str) -> set[str]:
+        await self.erp_service._connect_erp()
+        sql_text = f"SELECT TOP 0 * FROM FWsv.ecology.dbo.{table_name}"
+        loop = asyncio.get_event_loop()
+        columns = await loop.run_in_executor(
+            None,
+            lambda: list(self.erp_service.erp_session.execute(text(sql_text)).keys()),
+        )
+        return {
+            str(column).strip().lower()
+            for column in columns
+            if column
+        }
+
     async def get_stage_pricing_bulk(self, bom_codes: list[str]) -> dict[str, dict[str, Any]]:
         original_codes = [str(item).strip() for item in bom_codes if str(item).strip()]
         if not original_codes:
@@ -118,6 +135,18 @@ class AssemblyRollScheduleService:
             params[f"match_bom_{index}"] = match_code
 
         await self.erp_service._connect_erp()
+        main_columns = await self._load_table_columns("formtable_main_51")
+        department_columns = await self._load_table_columns("HrmDepartment")
+        request_column = "requestID" if "requestid" in main_columns else None
+        request_filter = f"AND a.{request_column} IS NULL" if request_column else ""
+        department_join = ""
+        workshop_filter = ""
+        if "cj" in main_columns and {"id", "departmentname"}.issubset(department_columns):
+            department_join = (
+                "JOIN FWsv.ecology.dbo.HrmDepartment d "
+                "ON LTRIM(RTRIM(CAST(a.cj AS VARCHAR(64)))) = LTRIM(RTRIM(CAST(d.id AS VARCHAR(64))))"
+            )
+            workshop_filter = f"AND LTRIM(RTRIM(CAST(d.departmentname AS NVARCHAR(255)))) = '{ASSEMBLY_WORKSHOP_NAME}'"
         rows = await self.erp_service._execute_erp_sql(
             f"""
             WITH input_boms AS (
@@ -136,7 +165,10 @@ class AssemblyRollScheduleService:
                 FROM input_boms i
                 JOIN FWsv.ecology.dbo.formtable_main_51 a
                     ON LTRIM(RTRIM(CAST(a.bombm AS VARCHAR(64)))) = i.match_bom_code
+                {department_join}
                 WHERE a.sfyx = 0
+                  {request_filter}
+                  {workshop_filter}
             )
             SELECT
                 m.bom_code,

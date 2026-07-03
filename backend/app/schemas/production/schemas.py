@@ -610,6 +610,7 @@ class DeleteSchedulePlanResultOut(BaseModel):
     deleted: int
     reason: Optional[str] = None
     release_plan_date: Optional[date] = None
+    earliest_backfill_date: Optional[date] = None
     release_bucket: Optional[str] = None
     release_bucket_label: Optional[str] = None
     affected_count: int = 0
@@ -618,6 +619,7 @@ class DeleteSchedulePlanResultOut(BaseModel):
     backfill_executed: bool = False
     backfill_success_count: int = 0
     backfill_failed_count: int = 0
+    timings_ms: Optional[dict] = None
 
 
 class DeleteSchedulePlanPreviewOut(BaseModel):
@@ -626,6 +628,7 @@ class DeleteSchedulePlanPreviewOut(BaseModel):
     line_no: Optional[str] = None
     reason: Optional[str] = None
     release_plan_date: Optional[date] = None
+    earliest_backfill_date: Optional[date] = None
     release_bucket: Optional[str] = None
     release_bucket_label: Optional[str] = None
     affected_count: int = 0

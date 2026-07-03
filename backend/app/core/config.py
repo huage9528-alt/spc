@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     AI_DASHSCOPE_MODEL: str = "qwen-plus"
     AI_REQUEST_TIMEOUT: int = 30
 
-    model_config = {"env_file": (".env.local", ".env"), "env_file_encoding": "utf-8"}
+    model_config = {"env_file": (".env.local", ".env"), "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 @lru_cache

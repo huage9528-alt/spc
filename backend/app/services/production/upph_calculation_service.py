@@ -8,7 +8,6 @@ from app.models.production.product_process_capacity import (
     ProductProcessCapacity,
     parse_capacity_metadata,
 )
-from app.core.config import get_settings
 from app.services.production.assembly_roll_schedule_service import AssemblyRollScheduleService
 
 ASSEMBLY_WORKSHOP_NAME = "装配车间"
@@ -21,7 +20,6 @@ class UpphCalculationService:
 
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.settings = get_settings()
 
     @staticmethod
     def normalize_bom_code_for_match(bom_code: Optional[str]) -> Optional[str]:
@@ -53,33 +51,23 @@ class UpphCalculationService:
         bom_code: Optional[str] = None,
     ) -> List[ProductProcessCapacity]:
         """
-        根据配置获取匹配的 UPPH 记录
+        仅按 BOM 获取匹配的 UPPH 记录。
         返回按 last_sync_time 倒序排列的列表（最新优先）
         """
-        # Older/local env files may not define UPPH_MATCH_MODE yet.
-        # Fall back to product_code matching to keep schedule APIs available.
-        match_mode = getattr(self.settings, "UPPH_MATCH_MODE", "product_code")
+        del product_code  # 业务已确认：不再按 product_code 匹配 UPPH。
         conditions = [ProductProcessCapacity.is_active == True]
         order_by_clauses = []
 
-        if match_mode == "bom_code" and bom_code:
-            # 按 BOM 编码匹配
-            bom_candidates = self.build_bom_match_candidates(bom_code)
-            if not bom_candidates:
-                return []
-            if len(bom_candidates) == 1:
-                conditions.append(ProductProcessCapacity.bom_code == bom_candidates[0])
-            else:
-                conditions.append(ProductProcessCapacity.bom_code.in_(bom_candidates))
-            order_by_clauses.append(
-                case((ProductProcessCapacity.bom_code == bom_candidates[0], 0), else_=1).asc()
-            )
-        elif product_code:
-            # 默认按产品编码匹配
-            conditions.append(ProductProcessCapacity.product_code == product_code)
-        else:
-            # 没有匹配条件
+        bom_candidates = self.build_bom_match_candidates(bom_code)
+        if not bom_candidates:
             return []
+        if len(bom_candidates) == 1:
+            conditions.append(ProductProcessCapacity.bom_code == bom_candidates[0])
+        else:
+            conditions.append(ProductProcessCapacity.bom_code.in_(bom_candidates))
+        order_by_clauses.append(
+            case((ProductProcessCapacity.bom_code == bom_candidates[0], 0), else_=1).asc()
+        )
 
         result = await self.db.execute(
             select(ProductProcessCapacity)

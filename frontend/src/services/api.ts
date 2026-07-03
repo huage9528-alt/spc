@@ -259,6 +259,8 @@ export const productionApi = {
   listUpphImpactPlans: (params: Record<string, any>) => api.get('/production/schedule-plans/upph-impact', { params }),
   batchReschedulePlans: (data: { plan_ids: number[], all_or_none?: boolean }) => api.post('/production/schedule-plans/batch-reschedule', data),
   listOperationLogs: (params: Record<string, any>) => api.get('/production/schedule-plans/operation-logs', { params }),
+  getScheduleDebugTrace: (params: { order_no: string; line_no: string }) =>
+    api.get('/production/schedule-plans/debug-trace', { params }),
   // 缺少UPPH的产品
   listMissingUpphProducts: (params: Record<string, any>) => api.get('/production/schedule-plans/missing-upph-products', { params }),
   // 前道管理

@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Table, Tag, Card, Row, Col, Progress, Spin, message } from 'antd'
+import { useNavigate } from 'react-router-dom'
+import { Table, Tag, Card, Row, Col, Progress, Button, Space, message } from 'antd'
 import {
-  ToolOutlined, CheckCircleOutlined, ClockCircleOutlined,
-  WarningOutlined, ExclamationCircleOutlined,
+  ToolOutlined, CheckCircleOutlined,
+  WarningOutlined, ExclamationCircleOutlined, BarChartOutlined,
 } from '@ant-design/icons'
 import { productionApi } from '../../../services/api'
 
@@ -58,6 +59,7 @@ const renderStatus = (v: string | null) =>
   v ? <Tag color={(STATUS_MAP[v] || {}).color || 'default'}>{(STATUS_MAP[v] || {}).label || v}</Tag> : <span style={{ color: '#cbd5e1' }}>-</span>
 
 export default function ProductionOverview() {
+  const navigate = useNavigate()
   const [data, setData] = useState<OverviewData | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -193,6 +195,21 @@ export default function ProductionOverview() {
 
   return (
     <div>
+      <div className="card-modern" style={{ padding: '16px 20px', marginBottom: 16 }}>
+        <Space wrap size={12} style={{ width: '100%', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>生产中心快捷入口</div>
+            <div style={{ color: '#64748b' }}>排产主操作继续走原有计划排产，新增的排产看板独立承接周视图、负荷和进度观察。</div>
+          </div>
+          <Space>
+            <Button onClick={() => navigate('/schedule-plans')}>进入计划排产</Button>
+            <Button type="primary" icon={<BarChartOutlined />} onClick={() => navigate('/schedule-board')}>
+              打开排产看板
+            </Button>
+          </Space>
+        </Space>
+      </div>
+
       <Row gutter={16} style={{ marginBottom: 16 }}>
         {statCards.map((card, i) => (
           <Col span={6} key={i}>

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Alert, Badge, Button, Col, DatePicker, Descriptions, Drawer, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Table, Tabs, Tag, Tooltip, message, notification } from 'antd'
 import { ArrowUpOutlined, CheckCircleOutlined, ClockCircleOutlined, DeleteOutlined, EditOutlined, ExclamationCircleOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -61,6 +62,22 @@ const STATUS_MAP: Record<string, { label: string; color: string }> = {
   completed: { label: '已完成', color: 'success' },
   delayed: { label: '延期', color: 'warning' },
   cancelled: { label: '已取消', color: 'default' },
+}
+
+const PERF_DEBUG = import.meta.env.DEV
+
+const logSchedulePlansPerf = (event: string, payload: Record<string, any>) => {
+  if (!PERF_DEBUG) return
+  console.info(`[SchedulePlans:${event}]`, payload)
+}
+
+const stringifyPerfPayload = (value: any) => {
+  if (!value) return undefined
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return undefined
+  }
 }
 
 const PRIORITY_MAP: Record<string, { label: string; color: string }> = {
@@ -134,6 +151,8 @@ const LEAN_CAPACITY_LOAD_MAP: Record<string, { label: string; color: string }> =
   move_earlier: { label: '需前挪', color: 'error' },
 }
 
+const PAGE_CACHE_TTL_MS = 30 * 1000
+
 const CopyableText = ({ value, label = '内容' }: { value?: string | number | null; label?: string }) => {
   const [copied, setCopied] = useState(false)
   if (value === null || value === undefined || value === '') return '-'
@@ -182,6 +201,19 @@ const renderCopyableText = (value?: string | number | null, label = '内容') =>
 const normalizePlanBoardBucket = (bucket?: string | null) => (
   bucket && ['lean', 'assembly', 'packaging'].includes(bucket) ? bucket : 'all'
 )
+const buildScheduleBoardLink = (row?: any) => {
+  const params = new URLSearchParams()
+  params.set('source', 'schedule_plans')
+  params.set('view', 'week')
+  if (row?.id) params.set('planId', String(row.id))
+  if (row?.order_no) params.set('keyword', row.order_no)
+  if (row?.schedule_bucket && ['lean', 'assembly', 'packaging', 'mixed', 'pending'].includes(row.schedule_bucket)) {
+    params.set('bucket', row.schedule_bucket)
+  }
+  const planDate = row?.start_date || row?.plan_date
+  if (planDate) params.set('planDate', planDate)
+  return `/schedule-board?${params.toString()}`
+}
 
 const getTaskNo = (row: any) => {
   if (row?.task_no) return row.task_no
@@ -286,23 +318,7 @@ const getReadableSchedulingReason = (row: any) => {
 
 const renderSchedulingReasonCell = (row: any) => {
   const reason = getReadableSchedulingReason(row)
-  const details = Array.isArray(row?.scheduling_reason_details)
-    ? row.scheduling_reason_details.filter(Boolean)
-    : []
-  const detailText = details.join('；')
-
-  return (
-    <Space direction="vertical" size={2} style={{ width: '100%' }}>
-      <span>{reason}</span>
-      {detailText ? (
-        <Tooltip title={detailText}>
-          <span style={{ color: '#8c8c8c', fontSize: 12, cursor: 'help' }}>
-            {detailText}
-          </span>
-        </Tooltip>
-      ) : null}
-    </Space>
-  )
+  return <span>{reason}</span>
 }
 
 const renderWorkhourSuggestionCell = (row: any) => {
@@ -340,58 +356,35 @@ const renderPlanExplainSummaryCell = (row: any) => {
     hasConflictAvoidance(row) ? '已避让冲突' : '',
   ].filter(Boolean)
 
-  const detail = row?.work_hour_summary || row?.remark || getReadableSchedulingReason(row)
-
   return (
-    <Space direction="vertical" size={2} style={{ width: '100%' }}>
-      <span style={{ fontWeight: 500 }}>{summaryParts.join('；') || '按排产规则自动生成'}</span>
-      <span style={{ color: '#8c8c8c', fontSize: 12 }}>{detail}</span>
-    </Space>
+    <span style={{ fontWeight: 500 }}>{summaryParts.join('；') || '按排产规则自动生成'}</span>
   )
 }
 
-const renderPlanExplainPanel = (row: any, options: { leanStandardHours: number; leanMaxHours: number }) => {
-  const targetReadyDate = getTargetReadyDateValue(row)
-  const steps = [
-    row?.customer_due_date || targetReadyDate
-      ? `先看交期：客户交期 ${formatDate(row?.customer_due_date || row?.source_promised_date)}，按交期前 ${row?.ready_offset_days || 2} 天倒推出备货目标日 ${formatDate(targetReadyDate)}。`
-      : '',
-    row?.schedule_bucket === 'lean' && row?.quantity && row?.upph
-      ? `再算产能：数量 ${row.quantity}，UPPH ${Number(row.upph).toFixed(2)}，总工时约 ${row?.total_hours ? Number(row.total_hours).toFixed(2) : '-'} 小时。系统先按 ${options.leanStandardHours} 小时/天试算，必要时加班，最高不超过 ${options.leanMaxHours} 小时。`
-      : `当前按 ${row?.schedule_bucket_label || '默认'} 规则计算计划窗口。`,
-    row?.recommended_daily_hours
-      ? `工时结论：当前采用 ${Number(row.recommended_daily_hours).toFixed(2)} 小时/天，负荷状态为 ${row?.capacity_load_status_label || '正常'}${row?.needs_sunday_work ? '，启用周日生产' : ''}${row?.needs_move_earlier ? `，仍需整体前挪 ${row?.move_earlier_days || 0} 天` : ''}。`
-      : '',
-    hasConflictAvoidance(row)
-      ? `冲突处理：当前单原本会与同段已排计划重叠，所以系统已自动前移避让，详细原因见计划备注。`
-      : '',
-    row?.remark ? `计划备注：${row.remark}` : '',
-    row?.start_date || row?.end_date
-      ? `最终结果：计划日 ${formatDate(row?.plan_date)}，生产窗口 ${formatDate(row?.start_date)} 至 ${formatDate(row?.end_date)}。`
-      : '',
-  ].filter(Boolean)
+const renderPlanExplainPanel = (row: any) => {
+  const summary = [
+    row?.schedule_bucket_label ? `排产段：${row.schedule_bucket_label}` : '',
+    row?.recommended_daily_hours ? `建议工时：${Number(row.recommended_daily_hours).toFixed(2)} 小时/天` : '',
+    row?.capacity_load_status_label ? `负荷状态：${row.capacity_load_status_label}` : '',
+    hasConflictAvoidance(row) ? '已执行冲突避让' : '',
+    row?.remark ? '详细冲突备注已保留在后端调试链路' : '',
+  ].filter(Boolean).join('；')
 
   return (
     <div style={{ padding: '4px 8px' }}>
       <Alert
         showIcon
         type={row?.delivery_status === 'delayed' || row?.needs_move_earlier ? 'warning' : 'info'}
-        message="排产逻辑"
-        description={
-          <Space direction="vertical" size={6} style={{ width: '100%' }}>
-            {steps.map((item, index) => (
-              <div key={`${row?.id || row?.order_no}-step-${index}`} style={{ lineHeight: 1.7 }}>
-                {index + 1}. {item}
-              </div>
-            ))}
-          </Space>
-        }
+        message="排产摘要"
+        description={summary || `当前按 ${row?.schedule_bucket_label || '默认'} 规则生成计划。`}
       />
     </div>
   )
 }
 
 export default function SchedulePlans() {
+  const location = useLocation()
+  const navigate = useNavigate()
   const [workspace, setWorkspace] = useState('planner_hub')
   const [plannerHubTab, setPlannerHubTab] = useState('todo_workbench')
   const [loading, setLoading] = useState(false)
@@ -430,6 +423,8 @@ export default function SchedulePlans() {
   const [planDateRange, setPlanDateRange] = useState<[string, string] | null>(null)
   const [planScope, setPlanScope] = useState('active')
   const [planBucketFilter, setPlanBucketFilter] = useState('all')
+  const [pendingPlanFocusId, setPendingPlanFocusId] = useState<number | null>(null)
+  const [highlightPlanId, setHighlightPlanId] = useState<number | null>(null)
 
   const [alertsTab, setAlertsTab] = useState('reschedule_needed')
   const [alertKeyword, setAlertKeyword] = useState('')
@@ -455,6 +450,21 @@ export default function SchedulePlans() {
   const [selectedBatchPlanIds, setSelectedBatchPlanIds] = useState<number[]>([])
   const [batchPreviewOpen, setBatchPreviewOpen] = useState(false)
   const [missingUpphData, setMissingUpphData] = useState<any[]>([])
+  const todoWorkbenchCacheRef = useRef<Record<string, { ts: number; items: any[]; total: number; stats: any }>>({})
+  const planBoardCacheRef = useRef<Record<string, { ts: number; items: any[]; total: number }>>({})
+  const impactPlansCacheRef = useRef<Record<string, { ts: number; items: any[]; total: number; stats: any }>>({})
+  const todoWorkbenchInflightRef = useRef<Record<string, Promise<{ items: any[]; total: number; stats: any; apiMs: number }>>>({})
+  const planBoardInflightRef = useRef<Record<string, Promise<{ items: any[]; total: number; apiMs: number }>>>({})
+  const impactPlansInflightRef = useRef<Record<string, Promise<{ items: any[]; total: number; stats: any; apiMs: number }>>>({})
+  const todoWorkbenchSkipSnapshotReconcileRef = useRef(false)
+  const invalidatePageCaches = useCallback(() => {
+    todoWorkbenchCacheRef.current = {}
+    planBoardCacheRef.current = {}
+    impactPlansCacheRef.current = {}
+    todoWorkbenchInflightRef.current = {}
+    planBoardInflightRef.current = {}
+    impactPlansInflightRef.current = {}
+  }, [])
   const [missingUpphEmptyState, setMissingUpphEmptyState] = useState<any>(null)
   const [alertCounts, setAlertCounts] = useState<Record<string, number>>({
     reschedule_needed: 0,
@@ -609,9 +619,8 @@ export default function SchedulePlans() {
   }, [])
 
   const loadTodoWorkbench = useCallback(async (force = false) => {
-    console.log("=== loadTodoWorkbench START, force=", force);
+    const requestStartedAt = performance.now()
     if (!force && !(workspace === 'planner_hub' && plannerHubTab === 'todo_workbench')) {
-      console.log("=== loadTodoWorkbench: skip (not todo_workbench)");
       return;
     }
     setLoading(true)
@@ -622,35 +631,120 @@ export default function SchedulePlans() {
         year,
         month,
       }
+      const skipSnapshotReconcile = todoWorkbenchSkipSnapshotReconcileRef.current
       if (orderKeyword.trim()) params.keyword = orderKeyword.trim()
       if (riskLevel) params.risk_level = riskLevel
       if (orderBucketFilter !== 'all') params.schedule_bucket = orderBucketFilter
       if (todoStatusFilter !== 'all') params.todo_status = todoStatusFilter
+      if (skipSnapshotReconcile) params.skip_snapshot_reconcile = true
 
-      console.log("=== loadTodoWorkbench: calling API with params=", params);
-      const res: any = await productionApi.getTodoWorkbench(params)
-      console.log("=== loadTodoWorkbench: API response=", res);
-      setTodoData(res.data?.items || [])
-      setTodoTotal(res.data?.total || 0)
-      setTodoStats({
-        ready: res.data?.stats?.ready || 0,
-        pending: res.data?.stats?.pending || 0,
-        reschedule: res.data?.stats?.reschedule || 0,
-        missing_upph: res.data?.stats?.missing_upph || 0,
-        bucket_counts: res.data?.stats?.bucket_counts || { all: 0, lean: 0, assembly: 0, packaging: 0 },
+      const cacheKey = JSON.stringify(params)
+      const cached = todoWorkbenchCacheRef.current[cacheKey]
+      if (!force && cached && (Date.now() - cached.ts) < PAGE_CACHE_TTL_MS) {
+        setTodoData(cached.items || [])
+        setTodoTotal(cached.total || 0)
+        setTodoStats(cached.stats || {
+          ready: 0,
+          pending: 0,
+          reschedule: 0,
+          missing_upph: 0,
+          bucket_counts: { all: 0, lean: 0, assembly: 0, packaging: 0 },
+        })
+        setLoading(false)
+        logSchedulePlansPerf('todo-workbench-cache-hit', {
+          total: cached.total || 0,
+          cacheAgeMs: Date.now() - cached.ts,
+          backendTimingsMs: cached.stats?.timings_ms,
+          backendTimingsMsText: stringifyPerfPayload(cached.stats?.timings_ms),
+          totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+          params,
+        })
+        return
+      }
+
+      let requestPromise = !force ? todoWorkbenchInflightRef.current[cacheKey] : undefined
+      if (!requestPromise) {
+        const apiStartedAt = performance.now()
+        requestPromise = productionApi.getTodoWorkbench(params).then((res: any) => {
+          const apiMs = performance.now() - apiStartedAt
+          return {
+            items: res.data?.items || [],
+            total: res.data?.total || 0,
+            stats: {
+              ready: res.data?.stats?.ready || 0,
+              pending: res.data?.stats?.pending || 0,
+              reschedule: res.data?.stats?.reschedule || 0,
+              missing_upph: res.data?.stats?.missing_upph || 0,
+              bucket_counts: res.data?.stats?.bucket_counts || { all: 0, lean: 0, assembly: 0, packaging: 0 },
+              dependency_timings_ms: res.data?.stats?.dependency_timings_ms || undefined,
+              timings_ms: res.data?.stats?.timings_ms || undefined,
+              synced_scheduled_snapshots: res.data?.stats?.synced_scheduled_snapshots || 0,
+            },
+            apiMs,
+          }
+        }).finally(() => {
+          delete todoWorkbenchInflightRef.current[cacheKey]
+        })
+        if (!force) {
+          todoWorkbenchInflightRef.current[cacheKey] = requestPromise
+        }
+      } else {
+        logSchedulePlansPerf('todo-workbench-inflight-hit', {
+          params,
+        })
+      }
+
+      const { items, total, stats, apiMs } = await requestPromise
+      todoWorkbenchSkipSnapshotReconcileRef.current = false
+      todoWorkbenchCacheRef.current[cacheKey] = { ts: Date.now(), items, total, stats }
+      setTodoData(items)
+      setTodoTotal(total)
+      setTodoStats(stats)
+      requestAnimationFrame(() => {
+        logSchedulePlansPerf('todo-workbench-loaded', {
+          total,
+          apiMs: Number(apiMs.toFixed(2)),
+          dependencyTimingsMs: stats?.dependency_timings_ms,
+          dependencyTimingsMsText: stringifyPerfPayload(stats?.dependency_timings_ms),
+          backendTimingsMs: stats?.timings_ms,
+          backendTimingsMsText: stringifyPerfPayload(stats?.timings_ms),
+          syncedScheduledSnapshots: stats?.synced_scheduled_snapshots || 0,
+          backendStatsSummary: stringifyPerfPayload({
+            ready: stats?.ready,
+            pending: stats?.pending,
+            reschedule: stats?.reschedule,
+            missing_upph: stats?.missing_upph,
+            bucket_counts: stats?.bucket_counts,
+          }),
+          totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+          params,
+        })
       })
-      console.log("=== loadTodoWorkbench: state updated");
     } catch (e: any) {
-      console.error("=== loadTodoWorkbench ERROR:", e);
+      todoWorkbenchSkipSnapshotReconcileRef.current = false
+      logSchedulePlansPerf('todo-workbench-error', {
+        totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+        params: {
+          page: orderPage,
+          page_size: orderPageSize,
+          year,
+          month,
+          keyword: orderKeyword.trim() || undefined,
+          risk_level: riskLevel || undefined,
+          schedule_bucket: orderBucketFilter !== 'all' ? orderBucketFilter : undefined,
+          todo_status: todoStatusFilter !== 'all' ? todoStatusFilter : undefined,
+        },
+        message: e?.message,
+      })
       message.error(e.message || '获取待处理列表失败')
     } finally {
-      console.log("=== loadTodoWorkbench: finally, setting loading false");
       setLoading(false)
     }
   }, [month, orderBucketFilter, orderKeyword, orderPage, orderPageSize, plannerHubTab, riskLevel, todoStatusFilter, workspace, year])
 
   const loadPlanBoard = useCallback(async (force = false) => {
     if (!force && workspace !== 'plan_board') return
+    const requestStartedAt = performance.now()
     setLoading(true)
     try {
       const params: Record<string, any> = {
@@ -658,25 +752,96 @@ export default function SchedulePlans() {
         page_size: planPageSize,
         is_active: planScope !== 'history',
       }
+      const monthStart = dayjs(`${year}-${String(month).padStart(2, '0')}-01`).startOf('month').format('YYYY-MM-DD')
+      const monthEnd = dayjs(monthStart).endOf('month').format('YYYY-MM-DD')
       if (planKeyword.trim()) params.keyword = planKeyword.trim()
       if (planStatus) params.status = planStatus
       if (planBucketFilter !== 'all') params.schedule_bucket = planBucketFilter
       if (planDateRange) {
         params.date_start = planDateRange[0]
         params.date_end = planDateRange[1]
+      } else {
+        params.date_start = monthStart
+        params.date_end = monthEnd
       }
       if (planScope === 'active') params.needs_reschedule = false
       if (planScope === 'reschedule') params.needs_reschedule = true
 
-      const res: any = await productionApi.listSchedulePlans(params)
-      setPlanData(res.data?.items || [])
-      setPlanTotal(res.data?.total || 0)
+      const cacheKey = JSON.stringify(params)
+      const cached = planBoardCacheRef.current[cacheKey]
+      if (!force && cached && (Date.now() - cached.ts) < PAGE_CACHE_TTL_MS) {
+        setPlanData(cached.items || [])
+        setPlanTotal(cached.total || 0)
+        setLoading(false)
+        logSchedulePlansPerf('plan-board-cache-hit', {
+          total: cached.total || 0,
+          cacheAgeMs: Date.now() - cached.ts,
+          backendTimingsMs: cached.backendTimingsMs,
+          backendTimingsMsText: stringifyPerfPayload(cached.backendTimingsMs),
+          totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+          params,
+        })
+        return
+      }
+
+      let requestPromise = !force ? planBoardInflightRef.current[cacheKey] : undefined
+      if (!requestPromise) {
+        const apiStartedAt = performance.now()
+        requestPromise = productionApi.listSchedulePlans(params).then((res: any) => ({
+          items: res.data?.items || [],
+          total: res.data?.total || 0,
+          dependencyTimingsMs: res.data?.stats?.dependency_timings_ms || undefined,
+          backendTimingsMs: res.data?.stats?.timings_ms || undefined,
+          apiMs: performance.now() - apiStartedAt,
+        })).finally(() => {
+          delete planBoardInflightRef.current[cacheKey]
+        })
+        if (!force) {
+          planBoardInflightRef.current[cacheKey] = requestPromise
+        }
+      } else {
+        logSchedulePlansPerf('plan-board-inflight-hit', {
+          params,
+        })
+      }
+
+      const { items, total, apiMs, backendTimingsMs, dependencyTimingsMs } = await requestPromise
+      planBoardCacheRef.current[cacheKey] = { ts: Date.now(), items, total, backendTimingsMs, dependencyTimingsMs }
+      setPlanData(items)
+      setPlanTotal(total)
+      requestAnimationFrame(() => {
+        logSchedulePlansPerf('plan-board-loaded', {
+          total,
+          apiMs: Number(apiMs.toFixed(2)),
+          dependencyTimingsMs,
+          dependencyTimingsMsText: stringifyPerfPayload(dependencyTimingsMs),
+          backendTimingsMs,
+          backendTimingsMsText: stringifyPerfPayload(backendTimingsMs),
+          totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+          params,
+        })
+      })
     } catch (e: any) {
+      logSchedulePlansPerf('plan-board-error', {
+        totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+        params: {
+          page: planPage,
+          page_size: planPageSize,
+          is_active: planScope !== 'history',
+          keyword: planKeyword.trim() || undefined,
+          status: planStatus || undefined,
+          schedule_bucket: planBucketFilter !== 'all' ? planBucketFilter : undefined,
+          date_start: planDateRange?.[0] || monthStart,
+          date_end: planDateRange?.[1] || monthEnd,
+          needs_reschedule: planScope === 'active' ? false : planScope === 'reschedule' ? true : undefined,
+        },
+        message: e?.message,
+      })
       message.error(e.message || '获取排产结果失败')
     } finally {
       setLoading(false)
     }
-  }, [planBucketFilter, planDateRange, planKeyword, planPage, planPageSize, planScope, planStatus, workspace])
+  }, [month, planBucketFilter, planDateRange, planKeyword, planPage, planPageSize, planScope, planStatus, workspace, year])
 
   const loadImpactPlans = useCallback(async (force = false) => {
     if (!force && !(workspace === 'planner_hub' && plannerHubTab === 'change_events')) return
@@ -691,10 +856,30 @@ export default function SchedulePlans() {
       if (impactLevel) params.impact_level = impactLevel
       if (impactBucketFilter !== 'all') params.schedule_bucket = impactBucketFilter
       if (eventTypeFilter !== 'all') params.event_type = eventTypeFilter
+
+      const cacheKey = JSON.stringify(params)
+      const cached = impactPlansCacheRef.current[cacheKey]
+      if (!force && cached && (Date.now() - cached.ts) < PAGE_CACHE_TTL_MS) {
+        setEventData(cached.items || [])
+        setEventTotal(cached.total || 0)
+        setEventStats(cached.stats || {
+          upph_change: 0,
+          bucket_change: 0,
+          due_date_change: 0,
+          quantity_change: 0,
+          high: 0,
+          pending: 0,
+          watching: 0,
+          resolved: 0,
+        })
+        setLoading(false)
+        return
+      }
+
       const res: any = await productionApi.listChangeEvents(params)
-      setEventData(res.data?.items || [])
-      setEventTotal(res.data?.total || 0)
-      setEventStats({
+      const items = res.data?.items || []
+      const total = res.data?.total || 0
+      const stats = {
         upph_change: res.data?.stats?.upph_change || 0,
         bucket_change: res.data?.stats?.bucket_change || 0,
         due_date_change: res.data?.stats?.due_date_change || 0,
@@ -703,7 +888,11 @@ export default function SchedulePlans() {
         pending: res.data?.stats?.pending || 0,
         watching: res.data?.stats?.watching || 0,
         resolved: res.data?.stats?.resolved || 0,
-      })
+      }
+      impactPlansCacheRef.current[cacheKey] = { ts: Date.now(), items, total, stats }
+      setEventData(items)
+      setEventTotal(total)
+      setEventStats(stats)
     } catch (e: any) {
       message.error(e.message || '获取变更事件失败')
     } finally {
@@ -752,6 +941,7 @@ export default function SchedulePlans() {
       message.success(
         `已扫描 ${result.matched_total || 0} 条，刷新 ${result.refreshed_total || 0} 条快照，原本缺失 ${result.stale_total || 0} 条`
       )
+      invalidatePageCaches()
       setSelectedOrderKeys([])
       setSelectedOrderRows([])
       await refreshTodoWorkbenchPanel(true)
@@ -760,25 +950,75 @@ export default function SchedulePlans() {
     } finally {
       setRefreshingSnapshots(false)
     }
-  }, [month, orderKeyword, refreshTodoWorkbenchPanel, riskLevel, year])
+  }, [invalidatePageCaches, month, orderKeyword, refreshTodoWorkbenchPanel, riskLevel, year])
 
   useEffect(() => { loadWorkHours() }, [loadWorkHours])
   useEffect(() => { localStorage.setItem(WORKSPACE_STORAGE_KEY, workspace) }, [workspace])
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const workspaceParam = params.get('workspace')
+    const planIdParam = Number(params.get('planId') || 0)
+    if (workspaceParam !== 'plan_board' && planIdParam <= 0) return
+
+    const planDateParam = params.get('planDate')
+    const keywordParam = params.get('keyword') || ''
+    const bucketParam = params.get('bucket')
+    const scopeParam = params.get('scope')
+    const targetDate = planDateParam ? dayjs(planDateParam) : null
+
+    setWorkspace('plan_board')
+    setPlanScope(scopeParam === 'history' || scopeParam === 'reschedule' ? scopeParam : 'active')
+    setPlanPage(1)
+    setPlanPageSize(100)
+    setPlanKeyword(keywordParam)
+    setPlanBucketFilter(normalizePlanBoardBucket(bucketParam))
+    setPlanDateRange(planDateParam ? [planDateParam, planDateParam] : null)
+    if (targetDate?.isValid()) {
+      setYear(targetDate.year())
+      setMonth(targetDate.month() + 1)
+    }
+    if (planIdParam > 0) {
+      setPendingPlanFocusId(planIdParam)
+      setHighlightPlanId(planIdParam)
+    }
+  }, [location.search])
 
   useEffect(() => {
     const run = async () => {
       try {
         if (workspace === 'planner_hub') {
           if (plannerHubTab === 'todo_workbench') {
+            // #region debug-point delete-only-refresh-flow
+            logSchedulePlansPerf('workspace-auto-load', {
+              workspace,
+              plannerHubTab,
+              target: 'todo_workbench',
+            })
+            // #endregion
             await refreshTodoWorkbenchPanel();
             return;
           }
           if (plannerHubTab === 'change_events') {
+            // #region debug-point delete-only-refresh-flow
+            logSchedulePlansPerf('workspace-auto-load', {
+              workspace,
+              plannerHubTab,
+              target: 'change_events',
+            })
+            // #endregion
             await loadImpactPlans()
             return;
           }
         }
         if (workspace === 'plan_board') {
+          // #region debug-point delete-only-refresh-flow
+          logSchedulePlansPerf('workspace-auto-load', {
+            workspace,
+            plannerHubTab,
+            target: 'plan_board',
+          })
+          // #endregion
           await loadPlanBoard();
           return;
         }
@@ -788,6 +1028,22 @@ export default function SchedulePlans() {
     }
     run();
   }, [loadImpactPlans, loadPlanBoard, plannerHubTab, refreshTodoWorkbenchPanel, workspace])
+
+  useEffect(() => {
+    if (workspace !== 'plan_board' || !pendingPlanFocusId) return
+    const targetRow = planData.find((item) => Number(item.id) === pendingPlanFocusId)
+    if (targetRow) {
+      setHighlightPlanId(pendingPlanFocusId)
+      openOrderDetail(targetRow, 'plan_board')
+      setPendingPlanFocusId(null)
+      message.success('已定位到对应计划')
+      return
+    }
+    if (!loading) {
+      setPendingPlanFocusId(null)
+      message.warning('当前筛选结果中未定位到对应计划，请检查月份或筛选条件')
+    }
+  }, [loading, openOrderDetail, pendingPlanFocusId, planData, workspace])
 
   const openDeleteModal = (row: any) => {
     setDeletingPlan(row)
@@ -879,7 +1135,7 @@ export default function SchedulePlans() {
     setSimulateModalOpen(true)
   }
 
-  const openOrderDetail = (row: any, source: 'order_pool' | 'plan_board') => {
+  function openOrderDetail(row: any, source: 'order_pool' | 'plan_board') {
     setDetailRow(row)
     setDetailSource(source)
     setDetailDrawerOpen(true)
@@ -932,15 +1188,48 @@ export default function SchedulePlans() {
   }
 
   const refreshAllViews = async () => {
+    // #region debug-point delete-only-refresh-flow
+    logSchedulePlansPerf('refresh-all-views-start', {
+      workspace,
+      plannerHubTab,
+    })
+    // #endregion
     if (workspace === 'planner_hub') {
       if (plannerHubTab === 'todo_workbench') {
+        // #region debug-point delete-only-refresh-flow
+        logSchedulePlansPerf('refresh-all-views-dispatch', {
+          target: 'todo_workbench',
+          workspace,
+          plannerHubTab,
+        })
+        // #endregion
         await refreshTodoWorkbenchPanel(true)
       } else if (plannerHubTab === 'change_events') {
+        // #region debug-point delete-only-refresh-flow
+        logSchedulePlansPerf('refresh-all-views-dispatch', {
+          target: 'change_events',
+          workspace,
+          plannerHubTab,
+        })
+        // #endregion
         await loadImpactPlans(true)
       }
     } else if (workspace === 'plan_board') {
+      // #region debug-point delete-only-refresh-flow
+      logSchedulePlansPerf('refresh-all-views-dispatch', {
+        target: 'plan_board',
+        workspace,
+        plannerHubTab,
+      })
+      // #endregion
       await loadPlanBoard(true)
     }
+    // #region debug-point delete-only-refresh-flow
+    logSchedulePlansPerf('refresh-all-views-done', {
+      workspace,
+      plannerHubTab,
+    })
+    // #endregion
   }
 
   const handleSave = async () => {
@@ -959,6 +1248,7 @@ export default function SchedulePlans() {
         await productionApi.createSchedulePlan(payload)
         message.success('计划已创建')
       }
+      invalidatePageCaches()
       setModalOpen(false)
       loadPlanBoard()
       loadAlertCounts()
@@ -982,6 +1272,7 @@ export default function SchedulePlans() {
       }
       const res: any = await productionApi.autoSchedule(payload)
       const result = res.data?.calculation_result || {}
+      invalidatePageCaches()
       setScheduleModalOpen(false)
       await refreshAllViews()
       openPostScheduleNotification({
@@ -1073,7 +1364,12 @@ export default function SchedulePlans() {
       setBatchScheduleOpen(false)
       setSelectedOrderKeys([])
       setSelectedOrderRows([])
-      await refreshAllViews()
+      invalidatePageCaches()
+      try {
+        await refreshAllViews()
+      } catch (refreshError: any) {
+        message.warning(refreshError?.message ? `批量排产已完成，但刷新列表失败：${refreshError.message}` : '批量排产已完成，但刷新列表失败，请手动刷新页面')
+      }
     } catch (e: any) {
       if (!e?.errorFields) message.error(e.message || '批量排产失败')
     } finally {
@@ -1102,16 +1398,30 @@ export default function SchedulePlans() {
 
   const handleDelete = async () => {
     if (!deletingPlan?.id) return
+    const requestStartedAt = performance.now()
     try {
       setLoading(true)
+      const apiStartedAt = performance.now()
       const res: any = await productionApi.getDeleteSchedulePlanPreview(deletingPlan.id, {
         reason: deleteReason?.trim() || undefined,
       })
+      const apiMs = performance.now() - apiStartedAt
       const result = res.data || {}
       setDeleteModalOpen(false)
       openBackfillPreview(result)
+      logSchedulePlansPerf('delete-preview-loaded', {
+        planId: deletingPlan.id,
+        affectedCount: result.affected_count || 0,
+        apiMs: Number(apiMs.toFixed(2)),
+        totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+      })
       message.info(result.affected_count > 0 ? `已生成删除预览，并识别出 ${result.affected_count} 条候选补位计划` : '已生成删除预览，当前没有可补位计划')
     } catch (e: any) {
+      logSchedulePlansPerf('delete-preview-error', {
+        planId: deletingPlan.id,
+        totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+        message: e?.message,
+      })
       message.error(e.message || '获取删除预览失败')
     } finally {
       setLoading(false)
@@ -1120,24 +1430,106 @@ export default function SchedulePlans() {
 
   const handleConfirmDelete = async (executeBackfill: boolean) => {
     if (!deletingPlan?.id) return
+    const requestStartedAt = performance.now()
+    let phase: 'api' | 'refresh' | 'post_refresh' = 'api'
     setLoading(true)
     try {
+      const deleteTarget = deletingPlan
+      const preview = backfillPreview
+      const apiStartedAt = performance.now()
       const res: any = await productionApi.confirmDeleteSchedulePlan(deletingPlan.id, {
         reason: backfillPreview?.reason || deleteReason?.trim() || '计划员手动删除计划',
         execute_backfill: executeBackfill,
       })
+      const apiMs = performance.now() - apiStartedAt
       const result = res.data || {}
+      const targetTodoKeyword = deleteTarget?.order_no || ''
+      const targetTodoBucket = preview?.release_bucket && preview.release_bucket !== 'pending' ? preview.release_bucket : 'all'
       const summary = executeBackfill
         ? `已删除计划，并完成 ${result.backfill_success_count || 0} 条补位前滚`
-        : '已删除计划，未执行补位'
+        : '已删除计划，已回到待处理工作台'
       message.success(summary)
+      invalidatePageCaches()
       setBackfillPreviewOpen(false)
       setBackfillPreview(null)
       setDeletingPlan(null)
       setDeleteReason('')
-      await refreshAllViews()
-      openPlanBoardView({ scope: 'active', bucket: backfillPreview?.release_bucket || 'all' })
+      let refreshMs = 0
+      if (executeBackfill) {
+        phase = 'refresh'
+        const refreshStartedAt = performance.now()
+        await refreshAllViews()
+        refreshMs = performance.now() - refreshStartedAt
+      } else {
+        const alreadyAtTargetTodoView = (
+          workspace === 'planner_hub' &&
+          plannerHubTab === 'todo_workbench' &&
+          orderPage === 1 &&
+          todoStatusFilter === 'all' &&
+          orderKeyword === targetTodoKeyword &&
+          orderBucketFilter === targetTodoBucket
+        )
+        // #region debug-point delete-only-refresh-flow
+        logSchedulePlansPerf('delete-confirm-delete-only-strategy', {
+          alreadyAtTargetTodoView,
+          currentWorkspace: workspace,
+          currentPlannerHubTab: plannerHubTab,
+          currentOrderPage: orderPage,
+          currentTodoStatusFilter: todoStatusFilter,
+          currentOrderKeyword: orderKeyword,
+          currentOrderBucketFilter: orderBucketFilter,
+          targetTodoKeyword,
+          targetTodoBucket,
+        })
+        // #endregion
+        if (alreadyAtTargetTodoView) {
+          todoWorkbenchSkipSnapshotReconcileRef.current = true
+          phase = 'refresh'
+          const refreshStartedAt = performance.now()
+          await refreshTodoWorkbenchPanel(true)
+          refreshMs = performance.now() - refreshStartedAt
+        }
+      }
+      logSchedulePlansPerf('delete-confirm-loaded', {
+        planId: deleteTarget?.id,
+        executeBackfill,
+        affectedCount: result.affected_count || 0,
+        apiMs: Number(apiMs.toFixed(2)),
+        refreshMs: Number(refreshMs.toFixed(2)),
+        totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+        backendTimingsMs: result.timings_ms,
+      })
+      phase = 'post_refresh'
+      if (executeBackfill) {
+        openPlanBoardView({ scope: 'active', bucket: preview?.release_bucket || 'all' })
+      } else {
+        // #region debug-point delete-only-refresh-flow
+        logSchedulePlansPerf('delete-confirm-navigate', {
+          fromWorkspace: workspace,
+          fromPlannerHubTab: plannerHubTab,
+          toWorkspace: 'planner_hub',
+          toPlannerHubTab: 'todo_workbench',
+          orderKeyword: targetTodoKeyword,
+          orderBucketFilter: targetTodoBucket,
+          skipSnapshotReconcileOnce: true,
+        })
+        // #endregion
+        todoWorkbenchSkipSnapshotReconcileRef.current = true
+        setWorkspace('planner_hub')
+        setPlannerHubTab('todo_workbench')
+        setOrderPage(1)
+        setTodoStatusFilter('all')
+        setOrderKeyword(targetTodoKeyword)
+        setOrderBucketFilter(targetTodoBucket)
+      }
     } catch (e: any) {
+      logSchedulePlansPerf('delete-confirm-error', {
+        planId: deletingPlan?.id,
+        executeBackfill,
+        phase,
+        totalMs: Number((performance.now() - requestStartedAt).toFixed(2)),
+        message: e?.message,
+      })
       message.error(e.message || (executeBackfill ? '删除并补位失败' : '删除失败'))
     } finally {
       setLoading(false)
@@ -1149,6 +1541,7 @@ export default function SchedulePlans() {
     try {
       const res: any = await productionApi.detectScheduleChanges()
       message.info(res.data?.length ? `已检测到 ${res.data.length} 条变更并标记待重排` : '未检测到订单行变更')
+      invalidatePageCaches()
       await refreshAllViews()
     } catch (e: any) {
       message.error(e.message || '检测变更失败')
@@ -1162,6 +1555,7 @@ export default function SchedulePlans() {
     try {
       await productionApi.reschedulePlan(id)
       message.success('重排成功')
+      invalidatePageCaches()
       await refreshAllViews()
     } catch (e: any) {
       message.error(e.message || '重排失败')
@@ -1207,6 +1601,7 @@ export default function SchedulePlans() {
       setBatchPreviewOpen(false)
       setSelectedImpactKeys([])
       setSelectedBatchPlanIds([])
+      invalidatePageCaches()
       await refreshAllViews()
     } catch (e: any) {
       message.error(e.message || '批量重排失败')
@@ -1244,6 +1639,7 @@ export default function SchedulePlans() {
       }
       setSelectedImpactKeys([])
       setSelectedBatchPlanIds([])
+      invalidatePageCaches()
       await refreshAllViews()
     } catch (e: any) {
       message.error(e.message || `${statusLabelMap[processStatus]}失败`)
@@ -1517,12 +1913,6 @@ export default function SchedulePlans() {
 
   const planColumns = [
     {
-      title: '任务号',
-      dataIndex: 'task_no',
-      width: 180,
-      render: (_: string, row: any) => renderCopyableText(getTaskNo(row), '排产任务号'),
-    },
-    {
       title: '订单号',
       dataIndex: 'order_no',
       width: 160,
@@ -1533,10 +1923,8 @@ export default function SchedulePlans() {
       ),
     },
     { title: '行号', dataIndex: 'line_no', width: 90, render: (v: string) => renderCopyableText(v, '行号') },
-    { title: '版本', dataIndex: 'plan_version', width: 80, render: (v: number) => `V${v || 1}` },
     { title: 'BOM编码', dataIndex: 'bom_no', width: 180, render: (v: string) => renderCopyableText(v, 'BOM编码') },
     { title: '产品编码', dataIndex: 'product_code', width: 220, render: (v: string) => renderCopyableText(v, '产品编码') },
-    { title: '型号', dataIndex: 'model_code', width: 220, ellipsis: true, render: (v: string) => v || '-' },
     { title: '数量', dataIndex: 'quantity', width: 90, render: (v: number) => v ?? '-' },
     {
       title: '排产段',
@@ -2109,6 +2497,7 @@ export default function SchedulePlans() {
               </Col>
             </Row>
             <Space>
+              <Button type="primary" onClick={() => navigate('/schedule-board')}>进入独立排产看板</Button>
               <Button type="primary" onClick={() => { setWorkspace('planner_hub'); setPlannerHubTab('todo_workbench') }}>回计划排产工作台</Button>
               <Button onClick={() => setWorkspace('plan_board')}>去已排计划</Button>
             </Space>
@@ -2165,16 +2554,9 @@ export default function SchedulePlans() {
             loading={loading}
             size="small"
             scroll={{ x: 2350, y: 600 }}
-            expandable={{
-              expandedRowRender: (row: any) => renderPlanExplainPanel(row, { leanStandardHours, leanMaxHours }),
-              rowExpandable: (row: any) => Boolean(
-                row?.customer_due_date
-                || row?.source_promised_date
-                || row?.work_hour_summary
-                || row?.remark
-                || row?.recommended_daily_hours
-              ),
-            }}
+            onRow={(row: any) => ({
+              style: Number(row.id) === highlightPlanId ? { backgroundColor: '#fffbe6' } : undefined,
+            })}
             pagination={{
               total: planTotal,
               current: planPage,
@@ -2282,14 +2664,6 @@ export default function SchedulePlans() {
                   <div style={{ fontWeight: 600, marginBottom: 8 }}>状态说明</div>
                   {detailSource === 'order_pool' ? renderSchedulingReasonCell(detailRow) : renderPlanExplainSummaryCell(detailRow)}
                 </div>
-                {detailSource === 'order_pool' && detailRow?.work_hour_summary ? (
-                  <Alert
-                    showIcon
-                    type={detailRow?.needs_move_earlier ? 'warning' : 'info'}
-                    message={`${detailRow?.schedule_bucket_label || '当前阶段'}工时建议`}
-                    description={detailRow.work_hour_summary}
-                  />
-                ) : null}
               </Space>
             </Descriptions.Item>
             <Descriptions.Item label="当前可做什么" span={2}>
@@ -2315,6 +2689,14 @@ export default function SchedulePlans() {
                       }}
                     >
                       查看已排计划
+                    </Button>
+                  ) : null}
+                  {detailSource === 'plan_board' ? (
+                    <Button
+                      type="primary"
+                      onClick={() => navigate(buildScheduleBoardLink(detailRow))}
+                    >
+                      回看板定位
                     </Button>
                   ) : null}
                   {detailSource === 'plan_board' ? (
@@ -2393,7 +2775,7 @@ export default function SchedulePlans() {
             </Descriptions.Item>
           </Descriptions>
           {detailSource === 'plan_board' ? (
-            renderPlanExplainPanel(detailRow, { leanStandardHours, leanMaxHours })
+            renderPlanExplainPanel(detailRow)
           ) : null}
         </Space>
       </Drawer>
@@ -2483,22 +2865,21 @@ export default function SchedulePlans() {
           <Button
             key="delete-only"
             type="primary"
-            ghost
             loading={loading}
             onClick={() => handleConfirmDelete(false)}
           >
-            只删除不补位
+            只删除，回待处理
           </Button>,
           <Button
             key="execute-backfill"
-            type="primary"
+            danger
             disabled={(backfillPreview?.items || []).length === 0}
             loading={loading}
             onClick={() => {
               handleConfirmDelete(true)
             }}
           >
-            删除并补位
+            删除并补位，保留在已排计划
           </Button>,
         ]}
         width={980}
@@ -2506,22 +2887,33 @@ export default function SchedulePlans() {
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Alert
             showIcon
-            type="info"
-            message="这里先预览删除影响，再决定是否执行补位"
-            description="当前还没有真正删除。你可以选择“只删除不补位”，也可以选择“删除并补位”；如果执行补位，系统会为前滚计划生成新版本，并保留旧版本历史。"
+            type="warning"
+            message="请先确认删除后的去向"
+            description={
+              <div>
+                <div>点“只删除，回待处理”：这张单据会离开已排计划，并回到待处理工作台。</div>
+                <div>点“删除并补位，保留在已排计划”：系统会立即生成新的补位计划，不会回待处理。</div>
+                <div>如果原释放计划日已经过去，系统只会从“最早可补位日”开始补位，不会把新计划前移到过去日期。</div>
+              </div>
+            }
           />
           <Row gutter={12}>
-            <Col span={8}>
+            <Col span={6}>
               <div className="card-modern" style={{ padding: 16 }}>
-                <Statistic title="释放计划日" value={backfillPreview?.release_plan_date || '-'} />
+                <Statistic title="原释放计划日" value={backfillPreview?.release_plan_date || '-'} />
               </div>
             </Col>
-            <Col span={8}>
+            <Col span={6}>
+              <div className="card-modern" style={{ padding: 16 }}>
+                <Statistic title="最早可补位日" value={backfillPreview?.earliest_backfill_date || backfillPreview?.release_plan_date || '-'} />
+              </div>
+            </Col>
+            <Col span={6}>
               <div className="card-modern" style={{ padding: 16 }}>
                 <Statistic title="释放排产段" value={backfillPreview?.release_bucket_label || '-'} />
               </div>
             </Col>
-            <Col span={8}>
+            <Col span={6}>
               <div className="card-modern" style={{ padding: 16 }}>
                 <Statistic title="候选补位数" value={backfillPreview?.affected_count || 0} />
               </div>

@@ -1,24 +1,29 @@
 """Production schedule plan API."""
 
+import copy
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Optional, List
 import json
 import dataclasses
 import math
+import logging
+from time import perf_counter
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, func, or_, select, and_
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import case, func, or_, select, and_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import log_audit
-from app.core.database import get_db
-from app.core.security import PermissionChecker
+from app.core.database import AsyncSessionLocal, get_db
+from app.core.security import PermissionChecker, decode_access_token, oauth2_scheme
+from app.core.token_blacklist import TOKEN_BLACKLIST_PREFIX, get_redis_client
+from app.models.basicdata.user import SysRole, SysUser
 from app.models.production.order_schedule_snapshot import ProductionOrderScheduleSnapshot
 from app.models.production.schedule_plan import ProductionSchedulePlan
 from app.models.production.schedule_operation_log import ProductionScheduleOperationLog
 from app.models.order.sale_order import SaleOrder, SaleOrderLine
-from app.models.production.product_process_capacity import ProductProcessCapacity
+from app.models.production.product_process_capacity import ProductProcessCapacity, parse_capacity_metadata
 from app.models.rules.node_standard import NodeStandard
 from app.schemas.common import PageResult, ResponseModel
 from app.schemas.production.schemas import (
@@ -64,6 +69,266 @@ from app.services.production.schedule_simulation_service import ScheduleSimulati
 from app.services.production.upph_calculation_service import UpphCalculationService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+READ_PERMISSION_CACHE_TTL_SECONDS = 5
+_production_schedule_read_permission_cache: dict[str, tuple[datetime, dict]] = {}
+WRITE_PERMISSION_CACHE_TTL_SECONDS = 5
+_production_schedule_write_permission_cache: dict[str, tuple[datetime, dict]] = {}
+TOKEN_BLACKLIST_RESULT_CACHE_TTL_SECONDS = 30
+TOKEN_BLACKLIST_UNAVAILABLE_BACKOFF_SECONDS = 60
+_token_blacklist_result_cache: dict[str, tuple[datetime, bool]] = {}
+_token_blacklist_unavailable_until: Optional[datetime] = None
+
+
+def _get_cached_production_schedule_read_user(token: str) -> Optional[dict]:
+    cached = _production_schedule_read_permission_cache.get(token)
+    if not cached:
+        return None
+    cached_at, payload = cached
+    if (datetime.now() - cached_at).total_seconds() > READ_PERMISSION_CACHE_TTL_SECONDS:
+        _production_schedule_read_permission_cache.pop(token, None)
+        return None
+    return dict(payload)
+
+
+def _set_cached_production_schedule_read_user(token: str, payload: dict) -> None:
+    _production_schedule_read_permission_cache[token] = (datetime.now(), dict(payload))
+
+
+def _get_cached_production_schedule_write_user(token: str) -> Optional[dict]:
+    cached = _production_schedule_write_permission_cache.get(token)
+    if not cached:
+        return None
+    cached_at, payload = cached
+    if (datetime.now() - cached_at).total_seconds() > WRITE_PERMISSION_CACHE_TTL_SECONDS:
+        _production_schedule_write_permission_cache.pop(token, None)
+        return None
+    return dict(payload)
+
+
+def _set_cached_production_schedule_write_user(token: str, payload: dict) -> None:
+    _production_schedule_write_permission_cache[token] = (datetime.now(), dict(payload))
+
+
+def _get_cached_token_blacklist_result(jti: str) -> Optional[bool]:
+    cached = _token_blacklist_result_cache.get(jti)
+    if not cached:
+        return None
+    cached_at, payload = cached
+    if (datetime.now() - cached_at).total_seconds() > TOKEN_BLACKLIST_RESULT_CACHE_TTL_SECONDS:
+        _token_blacklist_result_cache.pop(jti, None)
+        return None
+    return payload
+
+
+def _set_cached_token_blacklist_result(jti: str, is_blacklisted: bool) -> None:
+    _token_blacklist_result_cache[jti] = (datetime.now(), is_blacklisted)
+
+
+async def _is_token_blacklisted_fast(jti: str) -> tuple[bool, dict[str, object]]:
+    global _token_blacklist_unavailable_until
+
+    blacklist_started_at = perf_counter()
+    cached = _get_cached_token_blacklist_result(jti)
+    if cached is not None:
+        return cached, {
+            "source": "memory_cache",
+            "duration_ms": round((perf_counter() - blacklist_started_at) * 1000, 2),
+        }
+
+    if _token_blacklist_unavailable_until and datetime.now() < _token_blacklist_unavailable_until:
+        return False, {
+            "source": "unavailable_backoff",
+            "duration_ms": round((perf_counter() - blacklist_started_at) * 1000, 2),
+        }
+
+    client = await get_redis_client()
+    if not client:
+        _token_blacklist_unavailable_until = datetime.now() + timedelta(seconds=TOKEN_BLACKLIST_UNAVAILABLE_BACKOFF_SECONDS)
+        return False, {
+            "source": "client_unavailable",
+            "duration_ms": round((perf_counter() - blacklist_started_at) * 1000, 2),
+        }
+
+    try:
+        result = await client.exists(f"{TOKEN_BLACKLIST_PREFIX}{jti}")
+        is_blacklisted = result > 0
+        _set_cached_token_blacklist_result(jti, is_blacklisted)
+        return is_blacklisted, {
+            "source": "redis",
+            "duration_ms": round((perf_counter() - blacklist_started_at) * 1000, 2),
+        }
+    except Exception:
+        _token_blacklist_unavailable_until = datetime.now() + timedelta(seconds=TOKEN_BLACKLIST_UNAVAILABLE_BACKOFF_SECONDS)
+        return False, {
+            "source": "redis_error_backoff",
+            "duration_ms": round((perf_counter() - blacklist_started_at) * 1000, 2),
+        }
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
+async def _check_production_schedule_permission_fast(
+    token: str,
+    db: AsyncSession,
+    action: str = "read",
+) -> tuple[dict, dict[str, object]]:
+    checker = PermissionChecker("production.schedule_plans", action)
+    timings: dict[str, object] = {}
+
+    decode_started_at = perf_counter()
+    payload = decode_access_token(token)
+    timings["decode_access_token"] = round((perf_counter() - decode_started_at) * 1000, 2)
+
+    token_jti = payload.get("jti")
+    token_login_version = payload.get("login_version", 0)
+    if token_jti:
+        is_blacklisted, blacklist_meta = await _is_token_blacklisted_fast(token_jti)
+        timings["token_blacklist"] = blacklist_meta
+        if is_blacklisted:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="您的账号已在其他设备登录，请重新登录",
+                headers={"X-Force-Logout": "true"},
+            )
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无效的认证凭据")
+
+    if payload.get("share", False):
+        share_started_at = perf_counter()
+        result = await checker(token=token, db=db)
+        timings["share_permission_checker"] = round((perf_counter() - share_started_at) * 1000, 2)
+        return result, timings
+
+    user_query_started_at = perf_counter()
+    user_row = (
+        await db.execute(
+            select(SysUser, SysRole.role_code, SysRole.permissions)
+            .outerjoin(SysRole, SysUser.role_id == SysRole.id)
+            .where(SysUser.id == int(user_id))
+        )
+    ).one_or_none()
+    timings["user_permission_query"] = round((perf_counter() - user_query_started_at) * 1000, 2)
+    user = user_row[0] if user_row else None
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已禁用")
+
+    role = user_row[1] or payload.get("role", "")
+    permissions = user_row[2]
+    payload["role"] = role
+    payload["username"] = user.username
+    payload["supplier_name"] = user.supplier_name
+
+    db_login_version = user.login_version or 0
+    if token_login_version != db_login_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="您的账号已在其他设备登录，请重新登录",
+            headers={"X-Force-Logout": "true"},
+        )
+
+    if role == "admin":
+        return payload, timings
+
+    if not permissions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="用户角色配置异常")
+    if not isinstance(permissions, dict):
+        permissions = {}
+    permission_merge_started_at = perf_counter()
+    permissions = checker._role_permission_additions(role, permissions)
+    timings["merge_role_permissions"] = round((perf_counter() - permission_merge_started_at) * 1000, 2)
+
+    permission_eval_started_at = perf_counter()
+    for resource in checker._resource_candidates():
+        allowed_actions = permissions.get(resource, [])
+        if checker.action in allowed_actions:
+            timings["permission_eval"] = round((perf_counter() - permission_eval_started_at) * 1000, 2)
+            return payload, timings
+    for resource in checker._resource_candidates():
+        if "." not in resource:
+            continue
+        parent = resource.split(".")[0]
+        parent_actions = permissions.get(parent, [])
+        if checker.action in parent_actions:
+            timings["permission_eval"] = round((perf_counter() - permission_eval_started_at) * 1000, 2)
+            return payload, timings
+
+    timings["permission_eval"] = round((perf_counter() - permission_eval_started_at) * 1000, 2)
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"缺少 {checker.resource}.{checker.action} 权限",
+    )
+
+
+async def _check_production_schedule_read_permission_fast(
+    token: str,
+    db: AsyncSession,
+) -> tuple[dict, dict[str, object]]:
+    return await _check_production_schedule_permission_fast(token, db, "read")
+
+
+async def _get_production_schedule_read_context(
+    token: str = Depends(oauth2_scheme),
+):
+    dependency_started_at = perf_counter()
+    async with AsyncSessionLocal() as db:
+        permission_started_at = perf_counter()
+        current_user = _get_cached_production_schedule_read_user(token)
+        cache_hit = current_user is not None
+        permission_breakdown: dict[str, object] = {}
+        if current_user is None:
+            current_user, permission_breakdown = await _check_production_schedule_read_permission_fast(token, db)
+            _set_cached_production_schedule_read_user(token, current_user)
+        dependency_timings_ms = {
+            "permission_cache_hit": cache_hit,
+            "permission_checker": round((perf_counter() - permission_started_at) * 1000, 2),
+            "permission_breakdown": permission_breakdown,
+            "total": round((perf_counter() - dependency_started_at) * 1000, 2),
+        }
+        try:
+            yield {
+                "current_user": current_user,
+                "db": db,
+                "dependency_timings_ms": dependency_timings_ms,
+            }
+        except Exception:
+            await db.rollback()
+            raise
+
+
+async def _get_production_schedule_write_context(
+    token: str = Depends(oauth2_scheme),
+):
+    dependency_started_at = perf_counter()
+    async with AsyncSessionLocal() as db:
+        permission_started_at = perf_counter()
+        current_user = _get_cached_production_schedule_write_user(token)
+        cache_hit = current_user is not None
+        permission_breakdown: dict[str, object] = {}
+        if current_user is None:
+            current_user, permission_breakdown = await _check_production_schedule_permission_fast(token, db, "delete")
+            _set_cached_production_schedule_write_user(token, current_user)
+        dependency_timings_ms = {
+            "permission_cache_hit": cache_hit,
+            "permission_checker": round((perf_counter() - permission_started_at) * 1000, 2),
+            "permission_breakdown": permission_breakdown,
+            "total": round((perf_counter() - dependency_started_at) * 1000, 2),
+        }
+        try:
+            yield {
+                "current_user": current_user,
+                "db": db,
+                "dependency_timings_ms": dependency_timings_ms,
+            }
+        except Exception:
+            await db.rollback()
+            raise
 
 SCHEDULE_BUCKET_LABELS = {
     "lean": "精益",
@@ -107,6 +372,16 @@ TODO_WORKBENCH_PRIORITY = {
     "pending": 3,
 }
 
+RESCHEDULE_MAP_CACHE_TTL_SECONDS = 15
+TODO_WORKBENCH_CACHE_TTL_SECONDS = 15
+SCHEDULE_PLAN_LIST_CACHE_TTL_SECONDS = 15
+DELETE_PREVIEW_CACHE_TTL_SECONDS = 60
+_effective_reschedule_map_cache: dict[tuple, tuple[datetime, dict[int, dict[str, object]]]] = {}
+_todo_workbench_cache: dict[tuple, tuple[datetime, PageResult]] = {}
+_schedule_plan_list_cache: dict[tuple, tuple[datetime, PageResult]] = {}
+_delete_preview_cache: dict[int, tuple[datetime, dict]] = {}
+_order_snapshot_table_ready = False
+
 CHANGE_EVENT_TYPE_LABELS = {
     "upph_change": "UPPH变化",
     "bucket_change": "排产段变化",
@@ -119,6 +394,237 @@ CHANGE_EVENT_PROCESS_STATUS_LABELS = {
     "watching": "暂不处理",
     "resolved": "已处理",
 }
+
+
+def _invalidate_schedule_runtime_caches() -> None:
+    _effective_reschedule_map_cache.clear()
+    _todo_workbench_cache.clear()
+    _schedule_plan_list_cache.clear()
+    _delete_preview_cache.clear()
+    _production_schedule_read_permission_cache.clear()
+
+
+def _get_runtime_page_cache(
+    cache: dict[tuple, tuple[datetime, PageResult]],
+    cache_key: tuple,
+    *,
+    ttl_seconds: int,
+) -> Optional[PageResult]:
+    cached = cache.get(cache_key)
+    if not cached:
+        return None
+    cached_at, payload = cached
+    if (datetime.now() - cached_at).total_seconds() > ttl_seconds:
+        cache.pop(cache_key, None)
+        return None
+    return payload
+
+
+def _set_runtime_page_cache(
+    cache: dict[tuple, tuple[datetime, PageResult]],
+    cache_key: tuple,
+    payload: PageResult,
+) -> None:
+    cache[cache_key] = (datetime.now(), payload)
+
+
+def _get_cached_delete_preview(record_id: int) -> Optional[dict]:
+    cached = _delete_preview_cache.get(record_id)
+    if not cached:
+        return None
+    cached_at, payload = cached
+    if (datetime.now() - cached_at).total_seconds() > DELETE_PREVIEW_CACHE_TTL_SECONDS:
+        _delete_preview_cache.pop(record_id, None)
+        return None
+    return copy.deepcopy(payload)
+
+
+def _set_cached_delete_preview(record_id: int, payload: dict) -> None:
+    _delete_preview_cache[record_id] = (datetime.now(), copy.deepcopy(payload))
+
+
+def _pop_cached_delete_preview(record_id: int) -> Optional[dict]:
+    payload = _get_cached_delete_preview(record_id)
+    _delete_preview_cache.pop(record_id, None)
+    return payload
+
+
+def _build_effective_reschedule_cache_key(plans: List[ProductionSchedulePlan]) -> tuple:
+    signature = []
+    for plan in plans:
+        signature.append((
+            int(plan.id or 0),
+            plan.updated_at.isoformat() if getattr(plan, "updated_at", None) else None,
+            str(plan.source_process_type or ""),
+            str(plan.source_promised_date or ""),
+            str(plan.source_order_qty or ""),
+            str(plan.source_upph or ""),
+            bool(plan.needs_reschedule),
+            str(plan.reschedule_reason or ""),
+        ))
+    return tuple(signature)
+
+
+def _get_cached_effective_reschedule_map(plans: List[ProductionSchedulePlan]) -> Optional[dict[int, dict[str, object]]]:
+    cache_key = _build_effective_reschedule_cache_key(plans)
+    cached = _effective_reschedule_map_cache.get(cache_key)
+    if not cached:
+        return None
+    cached_at, payload = cached
+    if (datetime.now() - cached_at).total_seconds() > RESCHEDULE_MAP_CACHE_TTL_SECONDS:
+        _effective_reschedule_map_cache.pop(cache_key, None)
+        return None
+    return payload
+
+
+def _set_cached_effective_reschedule_map(
+    plans: List[ProductionSchedulePlan],
+    payload: dict[int, dict[str, object]],
+) -> None:
+    cache_key = _build_effective_reschedule_cache_key(plans)
+    _effective_reschedule_map_cache[cache_key] = (datetime.now(), payload)
+
+
+def _serialize_debug_capacity_record(capacity: ProductProcessCapacity) -> dict[str, object]:
+    metadata = parse_capacity_metadata(capacity.remark)
+    return {
+        "id": int(capacity.id or 0),
+        "oa_detail_id": capacity.oa_detail_id,
+        "bom_code": capacity.bom_code,
+        "product_code": capacity.product_code,
+        "process_type": capacity.process_type,
+        "upph": float(capacity.upph or 0),
+        "is_active": bool(capacity.is_active),
+        "last_sync_time": capacity.last_sync_time.isoformat() if capacity.last_sync_time else None,
+        "workshop_name": metadata.get("oa_workshop_name"),
+        "oa_main_id": metadata.get("oa_main_id"),
+        "is_schedulable": bool(metadata.get("is_schedulable", True)),
+        "exclude_reason": metadata.get("exclude_reason"),
+    }
+
+
+def _build_scheduled_snapshot_state_payload() -> dict[str, object]:
+    return {
+        "scheduling_status": "scheduled",
+        "scheduling_status_label": SCHEDULING_STATUS_LABELS["scheduled"],
+        "display_status": "scheduled",
+        "display_status_label": ORDER_POOL_DISPLAY_STATUS_LABELS["scheduled"],
+        "scheduling_reason_code": "already_scheduled",
+        "scheduling_reason": "已存在有效排产计划",
+        "scheduling_reason_details_json": _serialize_snapshot_details([
+            "该订单已进入已排计划，如需调整请走重排流程",
+        ]),
+        "snapshot_updated_at": datetime.now(),
+    }
+
+
+def _build_schedule_debug_report(
+    *,
+    bom_no: Optional[str],
+    snapshot: Optional[ProductionOrderScheduleSnapshot],
+    active_plan: Optional[ProductionSchedulePlan],
+    serialized_capacities: list[dict[str, object]],
+    schedule_context: dict[str, object],
+    split_rules: dict[str, object],
+) -> dict[str, object]:
+    schedulable_capacities = [item for item in serialized_capacities if item.get("is_schedulable")]
+    excluded_capacities = [item for item in serialized_capacities if not item.get("is_schedulable")]
+    final_bucket = str(schedule_context.get("schedule_bucket") or "pending")
+    final_bucket_label = SCHEDULE_BUCKET_LABELS.get(final_bucket, final_bucket)
+    selected_main_id = split_rules.get("selected_main_id")
+    findings: list[str] = []
+    developer_hints: list[str] = []
+
+    if serialized_capacities:
+        findings.append(
+            f"BOM {bom_no or '-'} 命中 {len(serialized_capacities)} 条本地产能记录，其中可排产 {len(schedulable_capacities)} 条、排除 {len(excluded_capacities)} 条。"
+        )
+    else:
+        findings.append(f"BOM {bom_no or '-'} 未命中本地产能记录，当前无法从本地产能表直接取得有效 UPPH。")
+
+    if selected_main_id:
+        findings.append(f"BOM 拆分当前选中的泛微主表为 {selected_main_id}。")
+    elif bom_no:
+        findings.append("当前未选中可用于装配拆分的泛微主表。")
+
+    if split_rules.get("split_rule_ready"):
+        findings.append(
+            f"拆分规则已就绪，最终排产段判定为 {split_rules.get('schedule_bucket') or final_bucket_label}。"
+        )
+    else:
+        findings.append(f"最终排产段暂判为 {final_bucket_label}。")
+
+    if excluded_capacities:
+        excluded_summary = "；".join(
+            [
+                f"{item.get('id')}/{item.get('workshop_name') or '-'}: {item.get('exclude_reason') or '已排除'}"
+                for item in excluded_capacities[:5]
+            ]
+        )
+        findings.append(f"已排除记录：{excluded_summary}")
+        developer_hints.append("先检查被排除记录的车间是否属于精益车间或装配车间。")
+
+    if split_rules.get("split_rule_ready") and split_rules.get("matched_buckets"):
+        developer_hints.append("如需核对装配拆分，请优先关注 selected_main_id、stage_price_totals 和 stage_rules。")
+    if final_bucket == "pending":
+        developer_hints.append("当前结果为待确认，优先核查 BOM 是否命中有效产能、拆分主表是否选中、公式配置是否完整。")
+
+    snapshot_bucket = getattr(snapshot, "schedule_bucket_snapshot", None)
+    snapshot_upph = getattr(snapshot, "upph_snapshot", None)
+    active_plan_bucket = _normalize_plan_source_bucket(getattr(active_plan, "source_process_type", None)) if active_plan else None
+
+    if snapshot_bucket and snapshot_bucket != final_bucket:
+        developer_hints.append(
+            f"快照当前仍是 {SCHEDULE_BUCKET_LABELS.get(snapshot_bucket, snapshot_bucket)}，与实时判定 {final_bucket_label} 不一致，建议刷新快照。"
+        )
+    if active_plan_bucket and active_plan_bucket != final_bucket:
+        developer_hints.append(
+            f"有效计划来源排产段为 {SCHEDULE_BUCKET_LABELS.get(active_plan_bucket, active_plan_bucket)}，与当前实时判定 {final_bucket_label} 不一致，需关注是否重排。"
+        )
+
+    return {
+        "final_conclusion": {
+            "schedule_bucket": final_bucket,
+            "schedule_bucket_label": final_bucket_label,
+            "total_upph": schedule_context.get("total_upph"),
+            "matched_buckets": schedule_context.get("matched_buckets") or [],
+            "split_rule_ready": bool(split_rules.get("split_rule_ready")),
+            "selected_main_id": selected_main_id,
+        },
+        "capacity_summary": {
+            "matched_capacity_count": len(serialized_capacities),
+            "schedulable_capacity_count": len(schedulable_capacities),
+            "excluded_capacity_count": len(excluded_capacities),
+            "workshop_names": schedule_context.get("workshop_names") or [],
+            "schedulable_workshop_names": schedule_context.get("schedulable_workshop_names") or [],
+            "non_schedulable_reasons": schedule_context.get("non_schedulable_reasons") or [],
+        },
+        "bom_split_summary": {
+            "selected_main_id": selected_main_id,
+            "matched_buckets": split_rules.get("matched_buckets") or [],
+            "schedule_bucket": split_rules.get("schedule_bucket"),
+            "schedule_bucket_label": SCHEDULE_BUCKET_LABELS.get(split_rules.get("schedule_bucket"), split_rules.get("schedule_bucket")),
+            "stage_price_totals": split_rules.get("stage_price_totals") or {},
+            "stage_rules": split_rules.get("stage_rules") or {},
+        },
+        "snapshot_compare": {
+            "exists": bool(snapshot),
+            "schedule_bucket_snapshot": snapshot_bucket,
+            "schedule_bucket_label": getattr(snapshot, "schedule_bucket_label", None),
+            "upph_snapshot": float(snapshot_upph or 0) if snapshot_upph is not None else None,
+            "display_status": getattr(snapshot, "display_status", None),
+        },
+        "active_plan_compare": {
+            "exists": bool(active_plan),
+            "plan_id": int(active_plan.id or 0) if active_plan else None,
+            "source_process_type": getattr(active_plan, "source_process_type", None) if active_plan else None,
+            "normalized_source_bucket": active_plan_bucket,
+            "upph": float(active_plan.upph or 0) if active_plan and active_plan.upph is not None else None,
+            "needs_reschedule": bool(active_plan.needs_reschedule) if active_plan else False,
+        },
+        "findings": findings,
+        "developer_hints": developer_hints,
+    }
 
 
 async def _ensure_operation_log_table(db: AsyncSession) -> bool:
@@ -135,6 +641,9 @@ async def _ensure_operation_log_table(db: AsyncSession) -> bool:
 
 
 async def _ensure_order_snapshot_table(db: AsyncSession) -> bool:
+    global _order_snapshot_table_ready
+    if _order_snapshot_table_ready:
+        return True
     try:
         bind = db.bind
         if bind is None:
@@ -143,6 +652,7 @@ async def _ensure_order_snapshot_table(db: AsyncSession) -> bool:
             await conn.run_sync(ProductionOrderScheduleSnapshot.__table__.create, checkfirst=True)
     except Exception:
         return False
+    _order_snapshot_table_ready = True
     return True
 
 
@@ -290,6 +800,9 @@ async def _build_effective_reschedule_map(
 ) -> dict[int, dict[str, object]]:
     if not plans:
         return {}
+    cached_payload = _get_cached_effective_reschedule_map(plans)
+    if cached_payload is not None:
+        return cached_payload
     change_events = await _build_schedule_change_event_items(db, plans, impact_config=impact_config)
     grouped: dict[int, List[ScheduleChangeEventOut]] = {}
     for item in change_events:
@@ -339,6 +852,7 @@ async def _build_effective_reschedule_map(
             "impact_level": None,
             "impact_score": None,
         }
+    _set_cached_effective_reschedule_map(plans, result)
     return result
     plan_id_text, event_type = event_id.split(":", 1)
     try:
@@ -427,6 +941,7 @@ def _build_delete_preview_response(
         "line_no": record.line_no,
         "reason": remark,
         "release_plan_date": preview_result.get("release_plan_date"),
+        "earliest_backfill_date": preview_result.get("earliest_backfill_date"),
         "release_bucket": preview_result.get("release_bucket"),
         "release_bucket_label": SCHEDULE_BUCKET_LABELS.get(preview_result.get("release_bucket")),
         "affected_count": preview_result.get("affected_count") or 0,
@@ -875,26 +1390,19 @@ def _is_snapshot_stale(
     return False
 
 
-async def _load_order_snapshot_map(
+async def _load_order_snapshot_map_by_keys(
     db: AsyncSession,
-    rows: list,
+    keys: set[tuple[str, str]],
 ) -> dict[tuple[str, str], ProductionOrderScheduleSnapshot]:
-    keys = [
-        (row.SaleOrderLine.order_no, row.SaleOrderLine.line_no)
-        for row in rows
-        if row.SaleOrderLine.order_no and row.SaleOrderLine.line_no
-    ]
     if not keys:
         return {}
-    conditions = [
-        and_(
-            ProductionOrderScheduleSnapshot.order_no == order_no,
-            ProductionOrderScheduleSnapshot.line_no == line_no,
-        )
-        for order_no, line_no in keys
-    ]
     result = await db.execute(
-        select(ProductionOrderScheduleSnapshot).where(or_(*conditions))
+        select(ProductionOrderScheduleSnapshot).where(
+            tuple_(
+                ProductionOrderScheduleSnapshot.order_no,
+                ProductionOrderScheduleSnapshot.line_no,
+            ).in_(list(keys))
+        )
     )
     return {
         (item.order_no, item.line_no): item
@@ -902,16 +1410,159 @@ async def _load_order_snapshot_map(
     }
 
 
+async def _load_order_snapshot_map(
+    db: AsyncSession,
+    rows: list,
+) -> dict[tuple[str, str], ProductionOrderScheduleSnapshot]:
+    keys = {
+        (row.SaleOrderLine.order_no, row.SaleOrderLine.line_no)
+        for row in rows
+        if row.SaleOrderLine.order_no and row.SaleOrderLine.line_no
+    }
+    return await _load_order_snapshot_map_by_keys(db, keys)
+
+
+async def _query_snapshot_source_rows_by_keys(
+    db: AsyncSession,
+    keys: set[tuple[str, str]],
+) -> list:
+    if not keys:
+        return []
+    latest_line_subq = (
+        select(
+            SaleOrderLine.order_no,
+            SaleOrderLine.line_no,
+            func.max(SaleOrderLine.id).label("max_id"),
+        )
+        .where(tuple_(SaleOrderLine.order_no, SaleOrderLine.line_no).in_(list(keys)))
+        .group_by(SaleOrderLine.order_no, SaleOrderLine.line_no)
+        .subquery()
+    )
+    result = await db.execute(
+        select(SaleOrderLine, SaleOrder.customer, SaleOrder.risk_level)
+        .join(
+            latest_line_subq,
+            and_(
+                SaleOrderLine.order_no == latest_line_subq.c.order_no,
+                SaleOrderLine.line_no == latest_line_subq.c.line_no,
+                SaleOrderLine.id == latest_line_subq.c.max_id,
+            )
+        )
+        .outerjoin(SaleOrder, SaleOrderLine.sale_order_id == SaleOrder.id)
+    )
+    return list(result.all())
+
+
+async def _mark_snapshots_scheduled_by_keys(
+    db: AsyncSession,
+    keys: set[tuple[str, str]],
+) -> int:
+    if not keys:
+        return 0
+    snapshot_map = await _load_order_snapshot_map_by_keys(db, keys)
+    scheduled_payload = _build_scheduled_snapshot_state_payload()
+    updated_count = 0
+    for key in keys:
+        snapshot = snapshot_map.get(key)
+        if not snapshot:
+            continue
+        dirty = False
+        for field, value in scheduled_payload.items():
+            if getattr(snapshot, field, None) != value:
+                setattr(snapshot, field, value)
+                dirty = True
+        if dirty:
+            updated_count += 1
+    if updated_count:
+        await db.flush()
+    return updated_count
+
+
+async def _sync_snapshot_schedule_state_for_keys(
+    db: AsyncSession,
+    keys: set[tuple[str, str]],
+) -> None:
+    if not keys:
+        return
+    await _ensure_order_snapshot_table(db)
+    source_rows = await _query_snapshot_source_rows_by_keys(db, keys)
+    if source_rows:
+        await _refresh_order_schedule_snapshots(db, source_rows, force_refresh=True)
+
+    active_plan_rows = (
+        await db.execute(
+            select(ProductionSchedulePlan.order_no, ProductionSchedulePlan.line_no)
+            .where(
+                ProductionSchedulePlan.is_active == True,
+                tuple_(ProductionSchedulePlan.order_no, ProductionSchedulePlan.line_no).in_(list(keys)),
+            )
+        )
+    ).all()
+    active_plan_keys = {
+        (str(order_no), str(line_no))
+        for order_no, line_no in active_plan_rows
+        if order_no and line_no
+    }
+    if active_plan_keys:
+        updated_count = await _mark_snapshots_scheduled_by_keys(db, active_plan_keys)
+        if updated_count:
+            await db.commit()
+
+
+async def _sync_month_scheduled_snapshot_flags(
+    db: AsyncSession,
+    *,
+    first_day: date,
+    last_day: date,
+) -> int:
+    await _ensure_order_snapshot_table(db)
+    rows = (
+        await db.execute(
+            select(ProductionOrderScheduleSnapshot.order_no, ProductionOrderScheduleSnapshot.line_no)
+            .join(
+                ProductionSchedulePlan,
+                and_(
+                    ProductionOrderScheduleSnapshot.order_no == ProductionSchedulePlan.order_no,
+                    ProductionOrderScheduleSnapshot.line_no == ProductionSchedulePlan.line_no,
+                )
+            )
+            .where(
+                ProductionSchedulePlan.is_active == True,
+                ProductionOrderScheduleSnapshot.promised_date >= first_day,
+                ProductionOrderScheduleSnapshot.promised_date <= last_day,
+                or_(
+                    ProductionOrderScheduleSnapshot.scheduling_status != "scheduled",
+                    ProductionOrderScheduleSnapshot.display_status != "scheduled",
+                    ProductionOrderScheduleSnapshot.scheduling_reason_code != "already_scheduled",
+                ),
+            )
+        )
+    ).all()
+    active_plan_keys = {
+        (str(order_no), str(line_no))
+        for order_no, line_no in rows
+        if order_no and line_no
+    }
+    if not active_plan_keys:
+        return 0
+    updated_count = await _mark_snapshots_scheduled_by_keys(db, active_plan_keys)
+    if updated_count:
+        await db.commit()
+    return updated_count
+
+
 async def _refresh_order_schedule_snapshots(
     db: AsyncSession,
     rows: list,
+    *,
+    force_refresh: bool = False,
 ) -> dict[tuple[str, str], ProductionOrderScheduleSnapshot]:
     if not rows:
         return {}
 
     await _ensure_order_snapshot_table(db)
     snapshot_map = await _load_order_snapshot_map(db, rows)
-    stale_rows = [
+    stale_rows = rows if force_refresh else [
         row for row in rows
         if _is_snapshot_stale(
             snapshot_map.get((row.SaleOrderLine.order_no, row.SaleOrderLine.line_no)),
@@ -1415,20 +2066,32 @@ async def _build_promised_date_map(
     if not missing_keys:
         return {}
 
-    conditions = [
-        and_(SaleOrderLine.order_no == order_no, SaleOrderLine.line_no == line_no)
-        for order_no, line_no in missing_keys
-    ]
+    latest_line_subq = (
+        select(
+            SaleOrderLine.order_no,
+            SaleOrderLine.line_no,
+            func.max(SaleOrderLine.id).label("max_id"),
+        )
+        .where(tuple_(SaleOrderLine.order_no, SaleOrderLine.line_no).in_(list(missing_keys)))
+        .group_by(SaleOrderLine.order_no, SaleOrderLine.line_no)
+        .subquery()
+    )
     result = await db.execute(
         select(SaleOrderLine)
-        .where(or_(*conditions))
-        .order_by(SaleOrderLine.id.desc())
+        .join(
+            latest_line_subq,
+            and_(
+                SaleOrderLine.order_no == latest_line_subq.c.order_no,
+                SaleOrderLine.line_no == latest_line_subq.c.line_no,
+                SaleOrderLine.id == latest_line_subq.c.max_id,
+            )
+        )
     )
 
     promised_date_map: dict[tuple[str, str], date] = {}
     for row in result.scalars().all():
         key = (row.order_no, row.line_no)
-        if key not in promised_date_map and row.promised_date:
+        if row.promised_date:
             promised_date_map[key] = row.promised_date
     return promised_date_map
 
@@ -1440,21 +2103,31 @@ async def _build_latest_order_line_map_by_keys(
     if not keys:
         return {}
 
-    conditions = [
-        and_(SaleOrderLine.order_no == order_no, SaleOrderLine.line_no == line_no)
-        for order_no, line_no in keys
-    ]
+    latest_line_subq = (
+        select(
+            SaleOrderLine.order_no,
+            SaleOrderLine.line_no,
+            func.max(SaleOrderLine.id).label("max_id"),
+        )
+        .where(tuple_(SaleOrderLine.order_no, SaleOrderLine.line_no).in_(list(keys)))
+        .group_by(SaleOrderLine.order_no, SaleOrderLine.line_no)
+        .subquery()
+    )
     result = await db.execute(
         select(SaleOrderLine)
-        .where(or_(*conditions))
-        .order_by(SaleOrderLine.order_no, SaleOrderLine.line_no, SaleOrderLine.id.desc())
+        .join(
+            latest_line_subq,
+            and_(
+                SaleOrderLine.order_no == latest_line_subq.c.order_no,
+                SaleOrderLine.line_no == latest_line_subq.c.line_no,
+                SaleOrderLine.id == latest_line_subq.c.max_id,
+            )
+        )
     )
 
     order_line_map: dict[tuple[str, str], SaleOrderLine] = {}
     for row in result.scalars().all():
-        key = (row.order_no, row.line_no)
-        if key not in order_line_map:
-            order_line_map[key] = row
+        order_line_map[(row.order_no, row.line_no)] = row
     return order_line_map
 
 
@@ -1475,11 +2148,12 @@ def _serialize_schedule_plan(
     promised_date_map: Optional[dict[tuple[str, str], date]] = None,
     *,
     bom_no: Optional[str] = None,
+    snapshot: Optional[ProductionOrderScheduleSnapshot] = None,
     schedule_context: Optional[dict] = None,
     reschedule_payload: Optional[dict[str, object]] = None,
 ) -> ProductionSchedulePlanOut:
     simulation_service = ScheduleSimulationService(None)
-    customer_due_date = plan.source_promised_date
+    customer_due_date = plan.source_promised_date or (snapshot.promised_date if snapshot else None)
     if not customer_due_date and promised_date_map and plan.order_no and plan.line_no:
         customer_due_date = promised_date_map.get((plan.order_no, plan.line_no))
 
@@ -1508,7 +2182,7 @@ def _serialize_schedule_plan(
         recommended_daily_hours = float(plan.daily_work_hours)
     return payload.model_copy(update={
         "task_no": _build_schedule_task_no(plan),
-        "bom_no": bom_no,
+        "bom_no": bom_no or (snapshot.bom_no if snapshot else None),
         "schedule_bucket": schedule_bucket,
         "schedule_bucket_label": SCHEDULE_BUCKET_LABELS.get(schedule_bucket),
         "scheduling_reason": scheduling_state["reason"],
@@ -3335,19 +4009,67 @@ async def list_schedule_plans(
     needs_reschedule: Optional[bool] = Query(None),
     is_active: Optional[bool] = Query(True),
     schedule_bucket: Optional[str] = Query(None, pattern="^(lean|assembly|packaging|mixed|pending)$"),
-    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
-    db: AsyncSession = Depends(get_db),
+    read_context: dict = Depends(_get_production_schedule_read_context),
 ):
-    # 临时轻量版本：只返回数据库里的字段 + 简单补 promised_date，不做复杂计算
+    # 列表查询优先走数据库已固化字段，避免切页时全量动态重算。
+    request_started_at = perf_counter()
+    timings_ms: dict[str, float] = {}
+    dependency_timings_ms = dict(read_context.get("dependency_timings_ms") or {})
+    db: AsyncSession = read_context["db"]
+    cache_key = (
+        page,
+        page_size,
+        department or "",
+        status or "",
+        date_start.isoformat() if date_start else "",
+        date_end.isoformat() if date_end else "",
+        keyword or "",
+        needs_reschedule,
+        is_active,
+        schedule_bucket or "",
+    )
+    cached_page = _get_runtime_page_cache(
+        _schedule_plan_list_cache,
+        cache_key,
+        ttl_seconds=SCHEDULE_PLAN_LIST_CACHE_TTL_SECONDS,
+    )
+    if cached_page is not None:
+        logger.info(
+            "schedule-plans timing page=%s page_size=%s total=%s needs_reschedule=%s keyword=%s bucket=%s timings_ms=%s",
+            page,
+            page_size,
+            cached_page.total,
+            needs_reschedule,
+            bool(keyword),
+            schedule_bucket or "all",
+            {"cache_hit": True},
+        )
+        return ResponseModel(data=cached_page)
     conditions = []
     if department:
         conditions.append(ProductionSchedulePlan.department == department)
     if status:
         conditions.append(ProductionSchedulePlan.status == status)
-    if date_start:
-        conditions.append(ProductionSchedulePlan.plan_date >= date_start)
-    if date_end:
-        conditions.append(ProductionSchedulePlan.plan_date <= date_end)
+    if date_start or date_end:
+        plan_window_start = func.coalesce(
+            ProductionSchedulePlan.start_date,
+            ProductionSchedulePlan.plan_date,
+        )
+        plan_window_end = func.coalesce(
+            ProductionSchedulePlan.end_date,
+            ProductionSchedulePlan.plan_date,
+        )
+        if date_start and date_end:
+            conditions.append(
+                and_(
+                    plan_window_start <= date_end,
+                    plan_window_end >= date_start,
+                )
+            )
+        elif date_start:
+            conditions.append(plan_window_end >= date_start)
+        elif date_end:
+            conditions.append(plan_window_start <= date_end)
     if keyword:
         like = f"%{keyword}%"
         conditions.append(
@@ -3361,6 +4083,15 @@ async def list_schedule_plans(
         )
     if is_active is not None:
         conditions.append(ProductionSchedulePlan.is_active == is_active)
+    if needs_reschedule is True:
+        conditions.append(ProductionSchedulePlan.needs_reschedule == True)
+    elif needs_reschedule is False:
+        conditions.append(
+            or_(
+                ProductionSchedulePlan.needs_reschedule == False,
+                ProductionSchedulePlan.needs_reschedule.is_(None),
+            )
+        )
     bucket_condition = _build_workspace_bucket_filter_condition(
         ProductionSchedulePlan.source_process_type,
         schedule_bucket,
@@ -3368,55 +4099,83 @@ async def list_schedule_plans(
     if bucket_condition is not None:
         conditions.append(bucket_condition)
 
-    base_stmt = select(ProductionSchedulePlan).where(*conditions)
-    ordered_stmt = base_stmt.order_by(
-        ProductionSchedulePlan.plan_date.desc(),
-        ProductionSchedulePlan.id.desc(),
+    page_stmt = (
+        select(ProductionSchedulePlan, ProductionOrderScheduleSnapshot)
+        .select_from(ProductionSchedulePlan)
+        .outerjoin(
+            ProductionOrderScheduleSnapshot,
+            and_(
+                ProductionSchedulePlan.order_no == ProductionOrderScheduleSnapshot.order_no,
+                ProductionSchedulePlan.line_no == ProductionOrderScheduleSnapshot.line_no,
+            ),
+        )
+        .where(*conditions)
+        .order_by(
+            func.coalesce(
+                ProductionSchedulePlan.start_date,
+                ProductionSchedulePlan.plan_date,
+            ).asc(),
+            ProductionSchedulePlan.id.asc(),
+        )
     )
     start = (page - 1) * page_size
-    end = start + page_size
 
-    impact_config = await _get_impact_config(db)
-    effective_reschedule_map: dict[int, dict[str, object]] = {}
-    if needs_reschedule is None:
-        total = (
-            await db.execute(
-                select(func.count()).select_from(base_stmt.subquery())
-            )
-        ).scalar() or 0
-        result = await db.execute(
-            ordered_stmt.offset(start).limit(page_size)
+    step_started_at = perf_counter()
+    total = (
+        await db.execute(
+            select(func.count(ProductionSchedulePlan.id)).where(*conditions)
         )
-        plans = list(result.scalars().all())
-        effective_reschedule_map = await _build_effective_reschedule_map(db, plans, impact_config=impact_config)
-    else:
-        result = await db.execute(ordered_stmt)
-        all_plans = list(result.scalars().all())
-        effective_reschedule_map = await _build_effective_reschedule_map(db, all_plans, impact_config=impact_config)
-        filtered_plans = [
-            plan
-            for plan in all_plans
-            if bool((effective_reschedule_map.get(int(plan.id or 0)) or {}).get("needs_reschedule")) == needs_reschedule
-        ]
-        total = len(filtered_plans)
-        plans = filtered_plans[start:end]
-
-    # 简化版本：只补最必要的 promised_date，不补 UPPH 等复杂字段
-    promised_date_map = await _build_promised_date_map(db, plans)
-    order_line_map = await _build_latest_order_line_map(db, plans)
+    ).scalar() or 0
+    timings_ms["count_query"] = round((perf_counter() - step_started_at) * 1000, 2)
+    step_started_at = perf_counter()
+    result = await db.execute(page_stmt.offset(start).limit(page_size))
+    page_rows = list(result.all())
+    timings_ms["page_query"] = round((perf_counter() - step_started_at) * 1000, 2)
+    step_started_at = perf_counter()
+    order_line_map = await _build_latest_order_line_map_by_keys(
+        db,
+        {
+            (plan.order_no, plan.line_no)
+            for plan, _ in page_rows
+            if plan.order_no and plan.line_no
+        },
+    )
+    timings_ms["order_line_fallback_query"] = round((perf_counter() - step_started_at) * 1000, 2)
+    step_started_at = perf_counter()
     items: List[ProductionSchedulePlanOut] = []
-    for plan in plans:
-        order_line = order_line_map.get((plan.order_no, plan.line_no)) if plan.order_no and plan.line_no else None
+    for plan, plan_snapshot in page_rows:
         item = _serialize_schedule_plan(
             plan,
-            promised_date_map,
-            bom_no=_get_order_line_bom_code(order_line) if order_line else None,
+            bom_no=_get_order_line_bom_code(order_line_map.get((plan.order_no, plan.line_no))),
+            snapshot=plan_snapshot,
             schedule_context=None,
-            reschedule_payload=effective_reschedule_map.get(int(plan.id or 0)),
         )
         items.append(item)
+    timings_ms["serialize_items"] = round((perf_counter() - step_started_at) * 1000, 2)
+    timings_ms["total"] = round((perf_counter() - request_started_at) * 1000, 2)
+    logger.info(
+        "schedule-plans timing page=%s page_size=%s total=%s needs_reschedule=%s keyword=%s bucket=%s timings_ms=%s",
+        page,
+        page_size,
+        total,
+        needs_reschedule,
+        bool(keyword),
+        schedule_bucket or "all",
+        timings_ms,
+    )
 
-    return ResponseModel(data=PageResult(total=total, page=page, page_size=page_size, items=items))
+    page_result = PageResult(
+        total=total,
+        page=page,
+        page_size=page_size,
+        items=items,
+        stats={
+            "dependency_timings_ms": dependency_timings_ms,
+            "timings_ms": timings_ms,
+        },
+    )
+    _set_runtime_page_cache(_schedule_plan_list_cache, cache_key, page_result)
+    return ResponseModel(data=page_result)
 
 
 @router.post("", response_model=ResponseModel[ProductionSchedulePlanOut])
@@ -3430,6 +4189,9 @@ async def create_schedule_plan(
     await db.flush()
     await log_audit(db, "production_schedule_plan", record.id, "create", operator=current_user["username"])
     await db.commit()
+    if record.order_no and record.line_no:
+        await _sync_snapshot_schedule_state_for_keys(db, {(record.order_no, record.line_no)})
+    _invalidate_schedule_runtime_caches()
     await db.refresh(record)
     return ResponseModel(data=ProductionSchedulePlanOut.model_validate(record))
 
@@ -3450,6 +4212,9 @@ async def update_schedule_plan(
     for field, value in update_data.items():
         setattr(record, field, value)
     await db.commit()
+    if record.order_no and record.line_no:
+        await _sync_snapshot_schedule_state_for_keys(db, {(record.order_no, record.line_no)})
+    _invalidate_schedule_runtime_caches()
     await db.refresh(record)
     return ResponseModel(data=ProductionSchedulePlanOut.model_validate(record))
 
@@ -3458,10 +4223,14 @@ async def update_schedule_plan(
 async def get_delete_schedule_plan_preview(
     record_id: int,
     reason: Optional[str] = Query(None, description="删除原因"),
-    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
-    db: AsyncSession = Depends(get_db),
+    read_context: dict = Depends(_get_production_schedule_read_context),
 ):
+    request_started_at = perf_counter()
+    dependency_timings_ms = dict(read_context.get("dependency_timings_ms") or {})
+    db: AsyncSession = read_context["db"]
+    step_started_at = perf_counter()
     record = (await db.execute(select(ProductionSchedulePlan).where(ProductionSchedulePlan.id == record_id))).scalar_one_or_none()
+    record_query_ms = round((perf_counter() - step_started_at) * 1000, 2)
     if not record:
         raise HTTPException(status_code=404, detail="计划不存在")
     if not record.is_active:
@@ -3471,8 +4240,22 @@ async def get_delete_schedule_plan_preview(
     if not delete_service.can_participate_backfill(record):
         raise HTTPException(status_code=400, detail="仅允许删除未开始、未投产且未锁定的计划")
 
+    step_started_at = perf_counter()
     preview_result = await delete_service.build_delete_preview(record)
+    preview_build_ms = round((perf_counter() - step_started_at) * 1000, 2)
+    _set_cached_delete_preview(record_id, preview_result)
     remark = reason or "计划员手动删除计划"
+    logger.warning(
+        "delete-preview timing plan_id=%s affected_count=%s timings_ms=%s",
+        record_id,
+        preview_result.get("affected_count", 0),
+        {
+            "dependency": dependency_timings_ms,
+            "record_query": record_query_ms,
+            "build_preview": preview_build_ms,
+            "total": round((perf_counter() - request_started_at) * 1000, 2),
+        },
+    )
     return ResponseModel(data=DeleteSchedulePlanPreviewOut(**_build_delete_preview_response(
         record=record,
         remark=remark,
@@ -3484,10 +4267,15 @@ async def get_delete_schedule_plan_preview(
 async def confirm_delete_schedule_plan(
     record_id: int,
     data: DeleteSchedulePlanConfirmRequest,
-    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "delete")),
-    db: AsyncSession = Depends(get_db),
+    context: dict = Depends(_get_production_schedule_write_context),
 ):
+    current_user = context["current_user"]
+    db = context["db"]
+    dependency_timings_ms = context["dependency_timings_ms"]
+    request_started_at = perf_counter()
+    step_started_at = perf_counter()
     record = (await db.execute(select(ProductionSchedulePlan).where(ProductionSchedulePlan.id == record_id))).scalar_one_or_none()
+    record_query_ms = round((perf_counter() - step_started_at) * 1000, 2)
     if not record:
         raise HTTPException(status_code=404, detail="计划不存在")
     if not record.is_active:
@@ -3497,9 +4285,27 @@ async def confirm_delete_schedule_plan(
     if not delete_service.can_participate_backfill(record):
         raise HTTPException(status_code=400, detail="仅允许删除未开始、未投产且未锁定的计划")
 
-    preview_result = await delete_service.build_delete_preview(record)
+    preview_source = "cache_hit"
+    step_started_at = perf_counter()
+    preview_result = _pop_cached_delete_preview(record_id)
+    if preview_result is None:
+        if data.execute_backfill:
+            preview_source = "rebuild_for_backfill"
+            preview_result = await delete_service.build_delete_preview(record)
+        else:
+            preview_source = "skip_preview_for_delete_only"
+            preview_result = {
+                "release_plan_date": record.plan_date,
+                "earliest_backfill_date": delete_service.get_earliest_backfill_plan_date(record.plan_date),
+                "release_bucket": record.source_process_type,
+                "affected_count": 0,
+                "affected_plan_ids": [],
+                "items": [],
+            }
+    preview_prepare_ms = round((perf_counter() - step_started_at) * 1000, 2)
     remark = data.reason or "计划员手动删除计划"
 
+    step_started_at = perf_counter()
     await log_audit(db, "production_schedule_plan", record.id, "delete", operator=current_user["username"])
     await _log_schedule_operation(
         db,
@@ -3512,10 +4318,13 @@ async def confirm_delete_schedule_plan(
         affected_plan_ids=preview_result.get("affected_plan_ids"),
     )
     await db.delete(record)
+    delete_mark_ms = round((perf_counter() - step_started_at) * 1000, 2)
 
     backfill_success_count = 0
     backfill_failed_count = 0
+    backfill_ms = 0.0
     if data.execute_backfill and preview_result.get("items"):
+        step_started_at = perf_counter()
         results = await delete_service.execute_backfill(
             items=list(preview_result.get("items") or []),
             operator=current_user["username"],
@@ -3544,16 +4353,60 @@ async def confirm_delete_schedule_plan(
                 affected_plan_ids=success_plan_ids,
                 remark=f"执行删除补位 {len(success_plan_ids)} 条",
             )
+        backfill_ms = round((perf_counter() - step_started_at) * 1000, 2)
+    step_started_at = perf_counter()
     await db.commit()
+    commit_ms = round((perf_counter() - step_started_at) * 1000, 2)
+    sync_keys = {
+        (record.order_no, record.line_no),
+        *{
+            (str(item.get("order_no")), str(item.get("line_no")))
+            for item in (preview_result.get("items") or [])
+            if item.get("order_no") and item.get("line_no")
+        },
+    }
+    step_started_at = perf_counter()
+    await _sync_snapshot_schedule_state_for_keys(
+        db,
+        {
+            (order_no, line_no)
+            for order_no, line_no in sync_keys
+            if order_no and line_no
+        },
+    )
+    sync_snapshot_ms = round((perf_counter() - step_started_at) * 1000, 2)
+    step_started_at = perf_counter()
+    _invalidate_schedule_runtime_caches()
+    invalidate_cache_ms = round((perf_counter() - step_started_at) * 1000, 2)
     preview_payload = _build_delete_preview_response(
         record=record,
         remark=remark,
         preview_result=preview_result,
     )
+    timings_ms = {
+        "dependency": dependency_timings_ms,
+        "record_query": record_query_ms,
+        "prepare_preview": preview_prepare_ms,
+        "mark_delete": delete_mark_ms,
+        "execute_backfill": backfill_ms,
+        "commit": commit_ms,
+        "sync_snapshot": sync_snapshot_ms,
+        "invalidate_cache": invalidate_cache_ms,
+        "total": round((perf_counter() - request_started_at) * 1000, 2),
+    }
+    logger.warning(
+        "delete-confirm timing plan_id=%s execute_backfill=%s preview_source=%s affected_count=%s timings_ms=%s",
+        record_id,
+        data.execute_backfill,
+        preview_source,
+        preview_result.get("affected_count", 0),
+        timings_ms,
+    )
     return ResponseModel(data=DeleteSchedulePlanResultOut(
         deleted=record_id,
         reason=remark,
         release_plan_date=preview_payload["release_plan_date"],
+        earliest_backfill_date=preview_payload.get("earliest_backfill_date"),
         release_bucket=preview_payload["release_bucket"],
         release_bucket_label=preview_payload["release_bucket_label"],
         affected_count=preview_payload["affected_count"],
@@ -3562,6 +4415,7 @@ async def confirm_delete_schedule_plan(
         backfill_executed=bool(data.execute_backfill),
         backfill_success_count=backfill_success_count,
         backfill_failed_count=backfill_failed_count,
+        timings_ms=timings_ms,
     ))
 
 
@@ -3569,14 +4423,12 @@ async def confirm_delete_schedule_plan(
 async def delete_schedule_plan(
     record_id: int,
     reason: Optional[str] = Query(None, description="删除原因"),
-    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "delete")),
-    db: AsyncSession = Depends(get_db),
+    context: dict = Depends(_get_production_schedule_write_context),
 ):
     return await confirm_delete_schedule_plan(
         record_id=record_id,
         data=DeleteSchedulePlanConfirmRequest(reason=reason, execute_backfill=False),
-        current_user=current_user,
-        db=db,
+        context=context,
     )
 
 
@@ -3618,6 +4470,15 @@ async def execute_delete_backfill(
             remark=f"执行删除补位 {len(success_plan_ids)} 条",
         )
     await db.commit()
+    await _sync_snapshot_schedule_state_for_keys(
+        db,
+        {
+            (str(item.get("order_no")), str(item.get("line_no")))
+            for item in data.items
+            if item.order_no and item.line_no
+        },
+    )
+    _invalidate_schedule_runtime_caches()
     return ResponseModel(data=DeleteBackfillExecuteResponse(
         total=len(results),
         success_count=len(success_items),
@@ -3644,6 +4505,7 @@ async def detect_sale_order_line_changes(
         remark=f"检测到 {len(changed_logs)} 条订单行变更",
     )
     await db.commit()
+    _invalidate_schedule_runtime_caches()
     return ResponseModel(data=[log for log in changed_logs])
 
 
@@ -3667,6 +4529,9 @@ async def reschedule_plan(
         remark="单条手动重排",
     )
     await db.commit()
+    if new_record.order_no and new_record.line_no:
+        await _sync_snapshot_schedule_state_for_keys(db, {(new_record.order_no, new_record.line_no)})
+    _invalidate_schedule_runtime_caches()
     await db.refresh(new_record)
     return ResponseModel(data=ProductionSchedulePlanOut.model_validate(new_record))
 
@@ -3927,6 +4792,7 @@ async def batch_reschedule_plans(
                 remark=f"批量重排 {len(plan_ids)} 条计划（全成功全回滚模式）",
             )
             await db.commit()
+            _invalidate_schedule_runtime_caches()
 
             # 刷新 new record
             for new_plan_id in new_plan_ids_map.values():
@@ -3983,6 +4849,7 @@ async def batch_reschedule_plans(
                     remark="批量重排中的单条",
                 )
                 await db.commit()
+                _invalidate_schedule_runtime_caches()
                 await db.refresh(new_record)
                 success_count += 1
                 items.append(BatchRescheduleItemOut(
@@ -4021,6 +4888,7 @@ async def batch_reschedule_plans(
                 remark=f"批量重排 {len(plan_ids)} 条计划，成功 {success_count} 条",
             )
             await db.commit()
+            _invalidate_schedule_runtime_caches()
 
     # 统计产生新延期预警的条数
     delay_warning_count = 0
@@ -4150,6 +5018,163 @@ async def list_operation_logs(
         raise
 
 
+@router.get("/debug-trace", response_model=ResponseModel[dict])
+async def get_schedule_debug_trace(
+    order_no: str = Query(..., min_length=1),
+    line_no: str = Query(..., min_length=1),
+    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    request_started_at = perf_counter()
+    timings_ms: dict[str, float] = {}
+    normalized_order_no = order_no.strip()
+    normalized_line_no = line_no.strip()
+
+    step_started_at = perf_counter()
+    order_line = (
+        await db.execute(
+            select(SaleOrderLine)
+            .where(
+                SaleOrderLine.order_no == normalized_order_no,
+                SaleOrderLine.line_no == normalized_line_no,
+            )
+            .order_by(SaleOrderLine.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    timings_ms["order_line_query"] = round((perf_counter() - step_started_at) * 1000, 2)
+    if not order_line:
+        raise HTTPException(status_code=404, detail="未找到对应订单行")
+
+    step_started_at = perf_counter()
+    snapshot = (
+        await db.execute(
+            select(ProductionOrderScheduleSnapshot)
+            .where(
+                ProductionOrderScheduleSnapshot.order_no == normalized_order_no,
+                ProductionOrderScheduleSnapshot.line_no == normalized_line_no,
+            )
+            .order_by(ProductionOrderScheduleSnapshot.snapshot_updated_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    timings_ms["snapshot_query"] = round((perf_counter() - step_started_at) * 1000, 2)
+    step_started_at = perf_counter()
+    active_plan = (
+        await db.execute(
+            select(ProductionSchedulePlan)
+            .where(
+                ProductionSchedulePlan.order_no == normalized_order_no,
+                ProductionSchedulePlan.line_no == normalized_line_no,
+                ProductionSchedulePlan.is_active == True,
+            )
+            .order_by(ProductionSchedulePlan.updated_at.desc(), ProductionSchedulePlan.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    timings_ms["active_plan_query"] = round((perf_counter() - step_started_at) * 1000, 2)
+
+    bom_no = _get_order_line_bom_code(order_line) or getattr(snapshot, "bom_no", None)
+    product_code = order_line.product_code or getattr(snapshot, "product_code", None) or getattr(active_plan, "product_code", None)
+
+    split_service = AssemblyRollScheduleService(db)
+    step_started_at = perf_counter()
+    split_rules = await split_service.get_stage_rules(bom_no=bom_no)
+    timings_ms["split_rules"] = round((perf_counter() - step_started_at) * 1000, 2)
+    upph_service = UpphCalculationService(db)
+    step_started_at = perf_counter()
+    capacities = await upph_service.get_matched_capacities(product_code=product_code, bom_code=bom_no)
+    timings_ms["matched_capacities"] = round((perf_counter() - step_started_at) * 1000, 2)
+    step_started_at = perf_counter()
+    schedule_context = await upph_service.summarize_schedule_context(
+        product_code=product_code,
+        bom_code=bom_no,
+        preloaded_split_rules=split_rules if bom_no else None,
+    )
+    timings_ms["schedule_context"] = round((perf_counter() - step_started_at) * 1000, 2)
+    serialized_capacities = [_serialize_debug_capacity_record(item) for item in capacities]
+    report = _build_schedule_debug_report(
+        bom_no=bom_no,
+        snapshot=snapshot,
+        active_plan=active_plan,
+        serialized_capacities=serialized_capacities,
+        schedule_context=schedule_context,
+        split_rules=split_rules,
+    )
+    timings_ms["total"] = round((perf_counter() - request_started_at) * 1000, 2)
+
+    return ResponseModel(data={
+        "query": {
+            "order_no": normalized_order_no,
+            "line_no": normalized_line_no,
+        },
+        "report": report,
+        "timings_ms": timings_ms,
+        "order_line": {
+            "id": int(order_line.id or 0),
+            "order_no": order_line.order_no,
+            "line_no": order_line.line_no,
+            "product_code": order_line.product_code,
+            "product_model": order_line.product_model,
+            "bom_no": bom_no,
+            "order_qty": float(order_line.order_qty or 0),
+            "promised_date": order_line.promised_date.isoformat() if order_line.promised_date else None,
+            "updated_at": order_line.updated_at.isoformat() if order_line.updated_at else None,
+        },
+        "snapshot": (
+            {
+                "id": int(snapshot.id or 0),
+                "schedule_bucket_snapshot": snapshot.schedule_bucket_snapshot,
+                "schedule_bucket_label": snapshot.schedule_bucket_label,
+                "upph_snapshot": float(snapshot.upph_snapshot or 0) if snapshot.upph_snapshot is not None else None,
+                "display_status": snapshot.display_status,
+                "display_status_label": snapshot.display_status_label,
+                "scheduling_reason": snapshot.scheduling_reason,
+                "scheduling_reason_details": _deserialize_snapshot_details(snapshot.scheduling_reason_details_json),
+                "work_hour_summary": snapshot.work_hour_summary,
+                "recommended_daily_hours": float(snapshot.recommended_daily_hours or 0) if snapshot.recommended_daily_hours is not None else None,
+                "capacity_load_status": snapshot.capacity_load_status,
+                "capacity_load_status_label": snapshot.capacity_load_status_label,
+                "snapshot_updated_at": snapshot.snapshot_updated_at.isoformat() if snapshot.snapshot_updated_at else None,
+            }
+            if snapshot else None
+        ),
+        "active_plan": (
+            {
+                "id": int(active_plan.id or 0),
+                "plan_version": int(active_plan.plan_version or 1),
+                "plan_date": active_plan.plan_date.isoformat() if active_plan.plan_date else None,
+                "start_date": active_plan.start_date.isoformat() if active_plan.start_date else None,
+                "end_date": active_plan.end_date.isoformat() if active_plan.end_date else None,
+                "upph": float(active_plan.upph or 0) if active_plan.upph is not None else None,
+                "source_upph": float(active_plan.source_upph or 0) if active_plan.source_upph is not None else None,
+                "source_process_type": active_plan.source_process_type,
+                "needs_reschedule": bool(active_plan.needs_reschedule),
+                "reschedule_reason": active_plan.reschedule_reason,
+                "remark": active_plan.remark,
+                "updated_at": active_plan.updated_at.isoformat() if active_plan.updated_at else None,
+            }
+            if active_plan else None
+        ),
+        "upph_debug": {
+            "bom_match_candidates": UpphCalculationService.build_bom_match_candidates(bom_no),
+            "matched_capacity_count": len(capacities),
+            "matched_capacities": serialized_capacities,
+            "schedule_context": {
+                "schedule_bucket": schedule_context.get("schedule_bucket"),
+                "matched_buckets": schedule_context.get("matched_buckets"),
+                "total_upph": schedule_context.get("total_upph"),
+                "workshop_names": schedule_context.get("workshop_names"),
+                "schedulable_workshop_names": schedule_context.get("schedulable_workshop_names"),
+                "non_schedulable_reasons": schedule_context.get("non_schedulable_reasons"),
+                "split_price_main_id": schedule_context.get("split_price_main_id"),
+                "split_rule_ready": schedule_context.get("split_rule_ready"),
+            },
+            "split_rules": split_rules,
+        },
+    })
+
+
 # ============ 一键排产相关API ============
 
 @router.get("/orders-for-scheduling", response_model=ResponseModel[PageResult[OrderForSchedulingOut]])
@@ -4192,13 +5217,24 @@ async def list_todo_workbench(
     risk_level: Optional[str] = Query(None),
     schedule_bucket: Optional[str] = Query(None, pattern="^(lean|assembly|packaging|mixed|pending)$"),
     todo_status: Optional[str] = Query(None, pattern="^(ready|pending|reschedule)$"),
-    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
-    db: AsyncSession = Depends(get_db),
+    skip_snapshot_reconcile: bool = Query(False),
+    read_context: dict = Depends(_get_production_schedule_read_context),
 ):
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info(f"=== todo-workbench CALLED: page={page}, page_size={page_size}, year={year}, month={month}")
-
+    request_started_at = perf_counter()
+    timings_ms: dict[str, float] = {}
+    dependency_timings_ms = dict(read_context.get("dependency_timings_ms") or {})
+    db: AsyncSession = read_context["db"]
+    cache_key = (
+        page,
+        page_size,
+        year or 0,
+        month or 0,
+        keyword or "",
+        risk_level or "",
+        schedule_bucket or "",
+        todo_status or "",
+        int(skip_snapshot_reconcile),
+    )
     stats = {
         "ready": 0,
         "pending": 0,
@@ -4213,6 +5249,23 @@ async def list_todo_workbench(
     }
 
     try:
+        cached_page = _get_runtime_page_cache(
+            _todo_workbench_cache,
+            cache_key,
+            ttl_seconds=TODO_WORKBENCH_CACHE_TTL_SECONDS,
+        )
+        if cached_page is not None:
+            logger.info(
+                "todo-workbench timing page=%s page_size=%s total=%s todo_status=%s bucket=%s keyword=%s timings_ms=%s",
+                page,
+                page_size,
+                cached_page.total,
+                todo_status or "all",
+                schedule_bucket or "all",
+                bool(keyword),
+                {"cache_hit": True},
+            )
+            return ResponseModel(data=cached_page)
         today = date.today()
         target_year = year or today.year
         target_month = month or today.month
@@ -4222,17 +5275,18 @@ async def list_todo_workbench(
         else:
             last_day = date(target_year, target_month + 1, 1) - timedelta(days=1)
 
-        active_plan_subq = (
-            select(
-                ProductionSchedulePlan.order_no.label("order_no"),
-                ProductionSchedulePlan.line_no.label("line_no"),
-            )
-            .where(ProductionSchedulePlan.is_active == True)
-            .group_by(ProductionSchedulePlan.order_no, ProductionSchedulePlan.line_no)
-            .subquery()
-        )
-
+        step_started_at = perf_counter()
         await _ensure_order_snapshot_table(db)
+        timings_ms["ensure_snapshot_table"] = round((perf_counter() - step_started_at) * 1000, 2)
+        updated_scheduled_snapshot_count = 0
+        if not skip_snapshot_reconcile:
+            step_started_at = perf_counter()
+            updated_scheduled_snapshot_count = await _sync_month_scheduled_snapshot_flags(
+                db,
+                first_day=first_day,
+                last_day=last_day,
+            )
+            timings_ms["sync_scheduled_snapshots"] = round((perf_counter() - step_started_at) * 1000, 2)
         snapshot_stats_base_conditions = [
             ProductionOrderScheduleSnapshot.promised_date >= first_day,
             ProductionOrderScheduleSnapshot.promised_date <= last_day,
@@ -4259,56 +5313,31 @@ async def list_todo_workbench(
             if snapshot_bucket_condition is not None:
                 snapshot_stats_base_conditions.append(snapshot_bucket_condition)
 
-        order_stats_stmt = (
+        snapshot_stats_stmt = (
             select(
                 ProductionOrderScheduleSnapshot.display_status,
+                ProductionOrderScheduleSnapshot.schedule_bucket_snapshot,
                 func.count().label("item_count"),
                 func.sum(
                     case((ProductionOrderScheduleSnapshot.is_missing_upph == True, 1), else_=0)
                 ).label("missing_upph_count"),
             )
             .select_from(ProductionOrderScheduleSnapshot)
-            .outerjoin(
-                active_plan_subq,
-                and_(
-                    ProductionOrderScheduleSnapshot.order_no == active_plan_subq.c.order_no,
-                    ProductionOrderScheduleSnapshot.line_no == active_plan_subq.c.line_no,
-                )
+            .where(*snapshot_stats_base_conditions)
+            .group_by(
+                ProductionOrderScheduleSnapshot.display_status,
+                ProductionOrderScheduleSnapshot.schedule_bucket_snapshot,
             )
-            .where(
-                *snapshot_stats_base_conditions,
-                active_plan_subq.c.order_no.is_(None),
-            )
-            .group_by(ProductionOrderScheduleSnapshot.display_status)
         )
-        for display_status_value, item_count, missing_upph_count in (await db.execute(order_stats_stmt)).all():
+        step_started_at = perf_counter()
+        for display_status_value, bucket_value, item_count, missing_upph_count in (await db.execute(snapshot_stats_stmt)).all():
             status_key = str(display_status_value or "")
             if status_key in {"ready", "pending"}:
-                stats[status_key] = int(item_count or 0)
+                stats[status_key] += int(item_count or 0)
                 stats["missing_upph"] += int(missing_upph_count or 0)
-
-        order_bucket_stats_stmt = (
-            select(
-                ProductionOrderScheduleSnapshot.schedule_bucket_snapshot,
-                func.count().label("item_count"),
-            )
-            .select_from(ProductionOrderScheduleSnapshot)
-            .outerjoin(
-                active_plan_subq,
-                and_(
-                    ProductionOrderScheduleSnapshot.order_no == active_plan_subq.c.order_no,
-                    ProductionOrderScheduleSnapshot.line_no == active_plan_subq.c.line_no,
-                )
-            )
-            .where(
-                *snapshot_stats_base_conditions,
-                active_plan_subq.c.order_no.is_(None),
-            )
-            .group_by(ProductionOrderScheduleSnapshot.schedule_bucket_snapshot)
-        )
-        for bucket_value, item_count in (await db.execute(order_bucket_stats_stmt)).all():
             for workspace_bucket in _resolve_workspace_bucket_hits(bucket_value):
                 stats["bucket_counts"][workspace_bucket] += int(item_count or 0)
+        timings_ms["snapshot_stats"] = round((perf_counter() - step_started_at) * 1000, 2)
 
         order_items: List[TodoWorkbenchItemOut] = []
         order_total = 0
@@ -4346,64 +5375,60 @@ async def list_todo_workbench(
 
             snapshot_base_stmt = (
                 select(ProductionOrderScheduleSnapshot)
-                .outerjoin(
-                    active_plan_subq,
-                    and_(
-                        ProductionOrderScheduleSnapshot.order_no == active_plan_subq.c.order_no,
-                        ProductionOrderScheduleSnapshot.line_no == active_plan_subq.c.line_no,
-                    )
-                )
-                .where(
-                    *snapshot_conditions,
-                    active_plan_subq.c.order_no.is_(None),
-                )
+                .where(*snapshot_conditions)
             )
-            order_total = (
-                await db.execute(select(func.count()).select_from(snapshot_base_stmt.subquery()))
-            ).scalar() or 0
+            if todo_status == "ready":
+                order_total = stats["ready"]
+            elif todo_status == "pending":
+                order_total = stats["pending"]
+            else:
+                order_total = stats["ready"] + stats["pending"]
 
         reschedule_items: List[TodoWorkbenchItemOut] = []
         reschedule_total = 0
-        plan_base_stmt = (
-            select(ProductionSchedulePlan)
-            .where(
-                ProductionSchedulePlan.is_active == True,
-            )
-            .order_by(ProductionSchedulePlan.plan_date.asc(), ProductionSchedulePlan.id.asc())
-        )
-        plan_stmt = plan_base_stmt
+        effective_reschedule_map: dict[int, dict[str, object]] = {}
+        plan_conditions = [ProductionSchedulePlan.is_active == True, ProductionSchedulePlan.needs_reschedule == True]
         if schedule_bucket:
             plan_bucket_condition = _build_workspace_bucket_filter_condition(
                 ProductionSchedulePlan.source_process_type,
                 schedule_bucket,
             )
             if plan_bucket_condition is not None:
-                plan_stmt = plan_stmt.where(plan_bucket_condition)
+                plan_conditions.append(plan_bucket_condition)
         if keyword:
             like = f"%{keyword}%"
-            keyword_condition = or_(
-                ProductionSchedulePlan.order_no.ilike(like),
-                ProductionSchedulePlan.line_no.ilike(like),
-                ProductionSchedulePlan.product_code.ilike(like),
-                ProductionSchedulePlan.source_product_code.ilike(like),
+            plan_conditions.append(
+                or_(
+                    ProductionSchedulePlan.order_no.ilike(like),
+                    ProductionSchedulePlan.line_no.ilike(like),
+                    ProductionSchedulePlan.product_code.ilike(like),
+                    ProductionSchedulePlan.source_product_code.ilike(like),
+                )
             )
-            plan_base_stmt = plan_base_stmt.where(keyword_condition)
-            plan_stmt = plan_stmt.where(keyword_condition)
-        plan_rows = list((await db.execute(plan_stmt)).scalars().all())
-        impact_config = await _get_impact_config(db)
-        effective_reschedule_map = await _build_effective_reschedule_map(db, plan_rows, impact_config=impact_config)
-        effective_plan_rows = [
-            plan
-            for plan in plan_rows
-            if bool((effective_reschedule_map.get(int(plan.id or 0)) or {}).get("needs_reschedule"))
-        ]
-        plan_order_line_map = await _build_latest_order_line_map(db, effective_plan_rows)
+        step_started_at = perf_counter()
+        effective_plan_rows = list((
+            await db.execute(
+                select(ProductionSchedulePlan)
+                .where(*plan_conditions)
+                .order_by(ProductionSchedulePlan.plan_date.asc(), ProductionSchedulePlan.id.asc())
+            )
+        ).scalars().all())
+        timings_ms["reschedule_plan_query"] = round((perf_counter() - step_started_at) * 1000, 2)
+        step_started_at = perf_counter()
+        plan_snapshot_map = await _load_order_snapshot_map_by_keys(
+            db,
+            {
+                (plan.order_no, plan.line_no)
+                for plan in effective_plan_rows
+                if plan.order_no and plan.line_no
+            },
+        )
         effective_plan_rows = [
             plan
             for plan in effective_plan_rows
             if _is_date_in_range(
                 (
-                    getattr(plan_order_line_map.get((plan.order_no, plan.line_no)), "promised_date", None)
+                    getattr(plan_snapshot_map.get((plan.order_no, plan.line_no)), "promised_date", None)
                     or plan.source_promised_date
                     or plan.end_date
                     or plan.plan_date
@@ -4412,9 +5437,11 @@ async def list_todo_workbench(
                 last_day=last_day,
             )
         ]
+        timings_ms["reschedule_supporting_queries"] = round((perf_counter() - step_started_at) * 1000, 2)
         stats["reschedule"] = len(effective_plan_rows)
+        step_started_at = perf_counter()
         for plan in effective_plan_rows:
-            effective_bucket = (effective_reschedule_map.get(int(plan.id or 0)) or {}).get("schedule_bucket") or _normalize_plan_source_bucket(plan.source_process_type)
+            effective_bucket = _normalize_plan_source_bucket(plan.source_process_type)
             for workspace_bucket in _resolve_workspace_bucket_hits(effective_bucket):
                 stats["bucket_counts"][workspace_bucket] += 1
 
@@ -4424,36 +5451,46 @@ async def list_todo_workbench(
                     id=plan.id,
                     todo_source="change_event",
                     todo_kind="reschedule",
-                    todo_due_date=plan.source_promised_date or plan.end_date or plan.plan_date,
+                    todo_due_date=(
+                        getattr(plan_snapshot_map.get((plan.order_no, plan.line_no)), "promised_date", None)
+                        or plan.source_promised_date
+                        or plan.end_date
+                        or plan.plan_date
+                    ),
                     todo_status_label="待重排",
                     todo_action_label="建议重排",
                     order_no=plan.order_no or "-",
                     line_no=plan.line_no or "-",
-                    bom_no=_get_order_line_bom_code(plan_order_line_map.get((plan.order_no, plan.line_no))),
+                    bom_no=getattr(plan_snapshot_map.get((plan.order_no, plan.line_no)), "bom_no", None),
                     product_code=plan.source_product_code or plan.product_code,
                     product_model=plan.source_product_model or plan.model_code,
                     model_code=plan.model_code,
                     order_qty=float(plan.source_order_qty or plan.quantity or 0),
                     quantity=float(plan.quantity or 0),
-                    promised_date=plan.source_promised_date,
-                    source_promised_date=plan.source_promised_date,
+                    promised_date=(
+                        getattr(plan_snapshot_map.get((plan.order_no, plan.line_no)), "promised_date", None)
+                        or plan.source_promised_date
+                    ),
+                    source_promised_date=(
+                        getattr(plan_snapshot_map.get((plan.order_no, plan.line_no)), "promised_date", None)
+                        or plan.source_promised_date
+                    ),
                     owner=plan.owner,
                     upph=float(plan.upph or 0),
                     source_upph=float(plan.source_upph or 0),
                     has_schedule=True,
-                    schedule_bucket=(effective_reschedule_map.get(int(plan.id or 0)) or {}).get("schedule_bucket") or _normalize_plan_source_bucket(plan.source_process_type),
-                    schedule_bucket_label=(effective_reschedule_map.get(int(plan.id or 0)) or {}).get("schedule_bucket_label") or SCHEDULE_BUCKET_LABELS.get(_normalize_plan_source_bucket(plan.source_process_type)),
+                    schedule_bucket=_normalize_plan_source_bucket(plan.source_process_type),
+                    schedule_bucket_label=SCHEDULE_BUCKET_LABELS.get(_normalize_plan_source_bucket(plan.source_process_type)),
                     scheduling_status="scheduled",
                     scheduling_status_label="已排产",
                     display_status="pending",
                     display_status_label="待确认",
                     scheduling_reason_code="reschedule_needed",
-                    scheduling_reason=((effective_reschedule_map.get(int(plan.id or 0)) or {}).get("reschedule_reason") or plan.reschedule_reason or "计划发生变化，建议重排"),
+                    scheduling_reason=(plan.reschedule_reason or "计划发生变化，建议重排"),
                     scheduling_reason_details=[
                         item
                         for item in [
-                            (effective_reschedule_map.get(int(plan.id or 0)) or {}).get("reschedule_reason"),
-                            (effective_reschedule_map.get(int(plan.id or 0)) or {}).get("impact_reason"),
+                            plan.reschedule_reason,
                         ]
                         if item
                     ],
@@ -4464,14 +5501,15 @@ async def list_todo_workbench(
                     plan_version=plan.plan_version,
                     previous_plan_id=plan.previous_plan_id,
                     needs_reschedule=True,
-                    impact_level=(effective_reschedule_map.get(int(plan.id or 0)) or {}).get("impact_level"),
-                    impact_score=(effective_reschedule_map.get(int(plan.id or 0)) or {}).get("impact_score"),
-                    impact_reason=(effective_reschedule_map.get(int(plan.id or 0)) or {}).get("impact_reason"),
-                    reschedule_reason=((effective_reschedule_map.get(int(plan.id or 0)) or {}).get("reschedule_reason") or plan.reschedule_reason),
+                    impact_level=None,
+                    impact_score=None,
+                    impact_reason=plan.reschedule_reason,
+                    reschedule_reason=plan.reschedule_reason,
                 )
                 for plan in effective_plan_rows
             ]
             reschedule_total = len(reschedule_items)
+        timings_ms["reschedule_serialize"] = round((perf_counter() - step_started_at) * 1000, 2)
 
         total = order_total + reschedule_total
         stats["bucket_counts"]["all"] = total
@@ -4485,6 +5523,7 @@ async def list_todo_workbench(
                     (ProductionOrderScheduleSnapshot.display_status == "ready", 0),
                     else_=1,
                 )
+                step_started_at = perf_counter()
                 snapshot_rows = (
                     await db.execute(
                         snapshot_base_stmt
@@ -4498,14 +5537,8 @@ async def list_todo_workbench(
                         .limit(snapshot_limit)
                     )
                 ).scalars().all()
-                snapshot_order_line_map = await _build_latest_order_line_map_by_keys(
-                    db,
-                    {
-                        (snapshot.order_no, snapshot.line_no)
-                        for snapshot in snapshot_rows
-                        if snapshot.order_no and snapshot.line_no
-                    },
-                )
+                timings_ms["snapshot_page_query"] = round((perf_counter() - step_started_at) * 1000, 2)
+                step_started_at = perf_counter()
                 order_items = [
                     TodoWorkbenchItemOut(
                         id=snapshot.sale_order_line_id or snapshot.id,
@@ -4517,9 +5550,7 @@ async def list_todo_workbench(
                         order_no=snapshot.order_no or "-",
                         line_no=snapshot.line_no or "-",
                         customer=snapshot.customer,
-                        bom_no=snapshot.bom_no or _get_order_line_bom_code(
-                            snapshot_order_line_map.get((snapshot.order_no, snapshot.line_no))
-                        ),
+                        bom_no=snapshot.bom_no,
                         product_code=snapshot.product_code,
                         product_model=snapshot.product_model,
                         model_code=snapshot.product_model,
@@ -4560,21 +5591,38 @@ async def list_todo_workbench(
                     )
                     for snapshot in snapshot_rows
                 ]
+                timings_ms["snapshot_serialize"] = round((perf_counter() - step_started_at) * 1000, 2)
 
         page_items = reschedule_items[start:end]
         if len(page_items) < page_size:
             page_items.extend(order_items[: page_size - len(page_items)])
-        return ResponseModel(
-            data=PageResult(
-                total=total,
-                page=page,
-                page_size=page_size,
-                items=page_items,
-                stats=stats,
-            )
+        timings_ms["total"] = round((perf_counter() - request_started_at) * 1000, 2)
+        logger.info(
+            "todo-workbench timing page=%s page_size=%s total=%s todo_status=%s bucket=%s keyword=%s timings_ms=%s",
+            page,
+            page_size,
+            total,
+            todo_status or "all",
+            schedule_bucket or "all",
+            bool(keyword),
+            {**timings_ms, "synced_scheduled_snapshots": updated_scheduled_snapshot_count},
         )
+        page_result = PageResult(
+            total=total,
+            page=page,
+            page_size=page_size,
+            items=page_items,
+            stats={
+                **stats,
+                "dependency_timings_ms": dependency_timings_ms,
+                "timings_ms": timings_ms,
+                "synced_scheduled_snapshots": updated_scheduled_snapshot_count,
+            },
+        )
+        _set_runtime_page_cache(_todo_workbench_cache, cache_key, page_result)
+        return ResponseModel(data=page_result)
     except Exception as e:
-        logger.exception(f"=== todo-workbench ERROR: {str(e)}")
+        logger.exception("todo-workbench error timings_ms=%s", timings_ms)
 
     return ResponseModel(
         data=PageResult(
@@ -4614,7 +5662,7 @@ async def refresh_todo_workbench_snapshots(
         # Manual refresh is intentionally forceful so UPPH/process updates
         # can be propagated to order snapshots even when order lines themselves
         # did not change.
-        await _refresh_order_schedule_snapshots(db, rows)
+        await _refresh_order_schedule_snapshots(db, rows, force_refresh=True)
 
     month_scope = f"{data.year or date.today().year}-{str(data.month or date.today().month).zfill(2)}"
     return ResponseModel(
@@ -4731,6 +5779,15 @@ async def auto_schedule(
         operator=current_user["username"],
     )
     await db.commit()
+    await _sync_snapshot_schedule_state_for_keys(
+        db,
+        {
+            (record.order_no, record.line_no)
+            for record in records
+            if record.order_no and record.line_no
+        },
+    )
+    _invalidate_schedule_runtime_caches()
     for record in records:
         await db.refresh(record)
     primary_record = records[0] if records else None
@@ -4764,6 +5821,7 @@ async def batch_auto_schedule(
     success_count = 0
     delay_warning_count = 0
     created_plan_ids: list[int] = []
+    synced_keys: set[tuple[str, str]] = set()
 
     for item in deduplicated_items:
         try:
@@ -4781,6 +5839,12 @@ async def batch_auto_schedule(
                 operation_remark="批量排产创建",
             )
             await db.commit()
+            synced_keys.update({
+                (record.order_no, record.line_no)
+                for record in records
+                if record.order_no and record.line_no
+            })
+            _invalidate_schedule_runtime_caches()
             for record in records:
                 await db.refresh(record)
 
@@ -4823,6 +5887,8 @@ async def batch_auto_schedule(
             remark=f"批量排产 {len(deduplicated_items)} 条订单，成功 {success_count} 条",
         )
         await db.commit()
+        await _sync_snapshot_schedule_state_for_keys(db, synced_keys)
+        _invalidate_schedule_runtime_caches()
 
     return ResponseModel(data=BatchAutoScheduleResponse(
         total=len(deduplicated_items),

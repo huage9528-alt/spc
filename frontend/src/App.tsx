@@ -37,6 +37,7 @@ import Positions from './pages/BasicDataCenter/Positions'
 import Employees from './pages/BasicDataCenter/Employees'
 import ProductionOverview from './pages/ProductionCenter/ProductionOverview/index'
 import SchedulePlans from './pages/ProductionCenter/SchedulePlans/index'
+import ScheduleBoard from './pages/ProductionCenter/ScheduleBoard/index'
 import FrontProcess from './pages/ProductionCenter/FrontProcess/index'
 import SMT from './pages/ProductionCenter/SMT/index'
 import Lean from './pages/ProductionCenter/Lean/index'
@@ -146,6 +147,7 @@ export default function App() {
           <Route path="production" element={<Navigate to="/production-overview" replace />} />
           <Route path="production-overview" element={<ProductionOverview />} />
           <Route path="schedule-plans" element={<SchedulePlans />} />
+          <Route path="schedule-board" element={<ScheduleBoard />} />
           <Route path="front-process" element={<FrontProcess />} />
           <Route path="smt" element={<SMT />} />
           <Route path="lean" element={<Lean />} />
