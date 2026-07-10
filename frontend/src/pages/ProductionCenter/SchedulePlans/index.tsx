@@ -5,66 +5,86 @@ import { ArrowUpOutlined, CheckCircleOutlined, ClockCircleOutlined, DeleteOutlin
 import dayjs from 'dayjs'
 import { productionApi } from '../../../services/api'
 import { formatDate, formatDateTime } from '../../../utils'
+import {
+  DEPARTMENTS,
+  BUCKET_OPTIONS,
+  PLAN_BUCKET_VIEW_OPTIONS,
+  TODO_FILTER_OPTIONS,
+  TODO_BUCKET_WORKSPACE_OPTIONS,
+  PLAN_SCOPE_OPTIONS,
+  EVENT_TYPE_OPTIONS,
+  STATUS_MAP,
+  PRIORITY_MAP,
+  RISK_MAP,
+  IMPACT_MAP,
+  EVENT_TYPE_MAP,
+  DELIVERY_STATUS_MAP,
+  BUCKET_COLOR_MAP,
+  ORDER_POOL_STATUS_COLOR_MAP,
+  TODO_STATUS_META,
+  ORDER_STAT_CARD_STYLE_MAP,
+  LEAN_CAPACITY_LOAD_MAP,
+  PAGE_CACHE_TTL_MS,
+} from './constants'
+import {
+  CopyableText,
+  renderCopyableText,
+  normalizePlanBoardBucket,
+  buildScheduleBoardLink,
+  getTaskNo,
+  getTargetReadyDateValue,
+  renderDeliveryStatusTag,
+  getDelayDaysDisplay,
+  getProjectedRescheduleEndDate,
+  getProjectedRescheduleStartDate,
+  renderBucketTag,
+  renderSchedulingStatusTag,
+  getReadableSchedulingReason,
+  renderSchedulingReasonCell,
+  renderWorkhourSuggestionCell,
+  renderUpphDeltaTag,
+  hasConflictAvoidance,
+  renderPlanExplainSummaryCell,
+  renderPlanExplainPanel,
+} from './helpers'
+import ScheduleModal from '../components/ScheduleModal'
+import DeleteModal from '../components/DeleteModal'
+import BatchScheduleModal from '../components/BatchScheduleModal'
+import RescheduleModal from '../components/RescheduleModal'
 
-const DEPARTMENTS = ['计划', '采购', '生产', '品质', '仓储']
-const WORKSPACES = [
-  { key: 'planner_hub', label: '计划排产工作台' },
-  { key: 'plan_board', label: '已排计划' },
-  { key: 'schedule_board', label: '排产看板' },
-]
-const PLANNER_HUB_TABS = [
-  { key: 'todo_workbench', label: '待处理' },
-  { key: 'change_events', label: '变更事件' },
-]
-const BUCKET_OPTIONS = [
-  { value: 'all', label: '全部' },
-  { value: 'lean', label: '精益' },
-  { value: 'assembly', label: '装配-组装' },
-  { value: 'packaging', label: '装配-包装' },
-  { value: 'mixed', label: '组装+包装' },
-  { value: 'pending', label: '待确认' },
-]
-const PLAN_BUCKET_VIEW_OPTIONS = [
-  { key: 'all', label: '全部计划' },
-  { key: 'lean', label: '精益页面' },
-  { key: 'assembly', label: '组装页面' },
-  { key: 'packaging', label: '包装页面' },
-]
-const WORKSPACE_STORAGE_KEY = 'production_schedule_workspace_v3'
-const TODO_FILTER_OPTIONS = [
-  { value: 'all', label: '全部待处理' },
-  { value: 'reschedule', label: '待重排' },
-  { value: 'ready', label: '待排产' },
-  { value: 'pending', label: '待确认' },
-]
-const TODO_BUCKET_WORKSPACE_OPTIONS = [
-  { value: 'all', label: '全部' },
-  { value: 'lean', label: '精益' },
-  { value: 'assembly', label: '组装' },
-  { value: 'packaging', label: '包装' },
-]
-const PLAN_SCOPE_OPTIONS = [
-  { value: 'active', label: '当前计划' },
-  { value: 'reschedule', label: '待重排' },
-  { value: 'history', label: '历史计划' },
-]
-const EVENT_TYPE_OPTIONS = [
-  { value: 'all', label: '全部事件' },
-  { value: 'upph_change', label: 'UPPH变化' },
-  { value: 'bucket_change', label: '排产段变化' },
-  { value: 'due_date_change', label: '交期变化' },
-  { value: 'quantity_change', label: '数量变化' },
-]
+const PERF_DEBUG = false
 
-const STATUS_MAP: Record<string, { label: string; color: string }> = {
-  planned: { label: '已计划', color: 'blue' },
-  in_progress: { label: '执行中', color: 'processing' },
-  completed: { label: '已完成', color: 'success' },
-  delayed: { label: '延期', color: 'warning' },
-  cancelled: { label: '已取消', color: 'default' },
+type TodoWorkbenchStats = {
+  ready: number
+  pending: number
+  reschedule: number
+  missing_upph: number
+  bucket_counts?: {
+    all: number
+    lean: number
+    assembly: number
+    packaging: number
+  }
+  dependency_timings_ms?: Record<string, any>
+  timings_ms?: Record<string, any>
+  synced_scheduled_snapshots?: number
 }
 
-const PERF_DEBUG = import.meta.env.DEV
+type PlanBoardCacheEntry = {
+  ts: number
+  items: any[]
+  total: number
+  backendTimingsMs?: Record<string, any>
+  dependencyTimingsMs?: Record<string, any>
+}
+
+type PlanBoardInflightResult = {
+  items: any[]
+  total: number
+  apiMs: number
+  backendTimingsMs?: Record<string, any>
+  dependencyTimingsMs?: Record<string, any>
+}
 
 const logSchedulePlansPerf = (event: string, payload: Record<string, any>) => {
   if (!PERF_DEBUG) return
@@ -80,313 +100,11 @@ const stringifyPerfPayload = (value: any) => {
   }
 }
 
-const PRIORITY_MAP: Record<string, { label: string; color: string }> = {
-  low: { label: '低', color: 'default' },
-  normal: { label: '普通', color: 'blue' },
-  high: { label: '高', color: 'orange' },
-  urgent: { label: '紧急', color: 'red' },
-}
-
-const RISK_MAP: Record<string, { label: string; color: string }> = {
-  red: { label: '红色', color: 'red' },
-  yellow: { label: '黄色', color: 'gold' },
-  blue: { label: '蓝色', color: 'blue' },
-  green: { label: '绿色', color: 'green' },
-}
-
-const IMPACT_MAP: Record<string, { label: string; color: string; priority: number }> = {
-  high: { label: '高', color: 'red', priority: 1 },
-  medium: { label: '中', color: 'orange', priority: 2 },
-  low: { label: '低', color: 'blue', priority: 3 },
-}
-
-const EVENT_TYPE_MAP: Record<string, { label: string; color: string }> = {
-  upph_change: { label: 'UPPH变化', color: 'purple' },
-  bucket_change: { label: '排产段变化', color: 'magenta' },
-  due_date_change: { label: '交期变化', color: 'gold' },
-  quantity_change: { label: '数量变化', color: 'cyan' },
-}
-
-const DELIVERY_STATUS_MAP: Record<string, { label: string; color: string }> = {
-  delayed: { label: '已延期', color: 'red' },
-  upcoming: { label: '临期', color: 'orange' },
-  normal: { label: '正常', color: 'green' },
-  early: { label: '提前', color: 'blue' },
-  unknown: { label: '待确认', color: 'default' },
-}
-
-const BUCKET_COLOR_MAP: Record<string, string> = {
-  lean: 'blue',
-  assembly: 'purple',
-  packaging: 'cyan',
-  mixed: 'gold',
-  pending: 'default',
-}
-
-const ORDER_POOL_STATUS_COLOR_MAP: Record<string, string> = {
-  ready: 'success',
-  pending: 'warning',
-  excluded: 'default',
-  scheduled: 'processing',
-}
-
-const TODO_STATUS_META: Record<string, { label: string; color: string; priority: number }> = {
-  reschedule: { label: '待重排', color: 'error', priority: 0 },
-  ready: { label: '待排产', color: 'processing', priority: 1 },
-  pending: { label: '待确认', color: 'warning', priority: 2 },
-}
-
-const ORDER_STAT_CARD_STYLE_MAP: Record<string, { background: string; border: string }> = {
-  ready: { background: '#e6f4ff', border: '#91caff' },
-  pending: { background: '#fff7e6', border: '#ffd591' },
-  excluded: { background: '#fafafa', border: '#d9d9d9' },
-  scheduled: { background: '#f6ffed', border: '#b7eb8f' },
-  missing_upph: { background: '#fff1f0', border: '#ffa39e' },
-}
-
-const LEAN_CAPACITY_LOAD_MAP: Record<string, { label: string; color: string }> = {
-  normal: { label: '正常', color: 'success' },
-  overtime: { label: '需加班', color: 'warning' },
-  sunday_production: { label: '周日生产', color: 'processing' },
-  move_earlier: { label: '需前挪', color: 'error' },
-}
-
-const PAGE_CACHE_TTL_MS = 30 * 1000
-
-const CopyableText = ({ value, label = '内容' }: { value?: string | number | null; label?: string }) => {
-  const [copied, setCopied] = useState(false)
-  if (value === null || value === undefined || value === '') return '-'
-
-  const handleCopy = async () => {
-    const text = String(value).trim()
-    if (!text) return
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      message.success(`已复制${label}`)
-      setTimeout(() => setCopied(false), 2000)
-    } catch {
-      message.error(`复制${label}失败，请手动复制`)
-    }
-  }
-
-  return (
-    <Tooltip title={copied ? `${label}已复制` : `点击复制${label}`}>
-      <span
-        role="button"
-        tabIndex={0}
-        onClick={handleCopy}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault()
-            handleCopy()
-          }
-        }}
-        style={{
-          cursor: 'copy',
-          userSelect: 'text',
-          color: copied ? '#389e0d' : '#1677ff',
-          textDecoration: copied ? 'none' : 'underline',
-          textDecorationStyle: 'dotted',
-          textUnderlineOffset: 3,
-        }}
-      >
-        {value}
-      </span>
-    </Tooltip>
-  )
-}
-
-const renderCopyableText = (value?: string | number | null, label = '内容') => <CopyableText value={value} label={label} />
-const normalizePlanBoardBucket = (bucket?: string | null) => (
-  bucket && ['lean', 'assembly', 'packaging'].includes(bucket) ? bucket : 'all'
-)
-const buildScheduleBoardLink = (row?: any) => {
-  const params = new URLSearchParams()
-  params.set('source', 'schedule_plans')
-  params.set('view', 'week')
-  if (row?.id) params.set('planId', String(row.id))
-  if (row?.order_no) params.set('keyword', row.order_no)
-  if (row?.schedule_bucket && ['lean', 'assembly', 'packaging', 'mixed', 'pending'].includes(row.schedule_bucket)) {
-    params.set('bucket', row.schedule_bucket)
-  }
-  const planDate = row?.start_date || row?.plan_date
-  if (planDate) params.set('planDate', planDate)
-  return `/schedule-board?${params.toString()}`
-}
-
-const getTaskNo = (row: any) => {
-  if (row?.task_no) return row.task_no
-  if (!row?.id) return null
-  const referenceDate = row?.created_at || row?.plan_date
-  const datePart = referenceDate ? dayjs(referenceDate).format('YYYYMMDD') : '00000000'
-  const versionPart = row?.plan_version || 1
-  return `SC${datePart}-${String(row.id).padStart(6, '0')}-V${versionPart}`
-}
-
-const getTargetReadyDateValue = (row: any) => {
-  if (row?.target_ready_date) return row.target_ready_date
-  if (row?.customer_due_date) return dayjs(row.customer_due_date).subtract(2, 'day').format('YYYY-MM-DD')
-  if (row?.source_promised_date) return dayjs(row.source_promised_date).subtract(2, 'day').format('YYYY-MM-DD')
-  return null
-}
-
-const renderDeliveryStatusTag = (statusValue?: string, row?: any) => {
-  const item = DELIVERY_STATUS_MAP[statusValue || 'unknown'] || DELIVERY_STATUS_MAP.unknown
-  const targetReadyDate = getTargetReadyDateValue(row)
-  if (statusValue === 'delayed') {
-    return <Tag color={item.color} icon={<ExclamationCircleOutlined />}>{item.label}</Tag>
-  }
-  if (statusValue === 'upcoming') {
-    return <Tag color={item.color} icon={<ClockCircleOutlined />}>{item.label}</Tag>
-  }
-  if (statusValue === 'early') {
-    const aheadDays = targetReadyDate && row?.end_date
-      ? Math.max(dayjs(targetReadyDate).startOf('day').diff(dayjs(row.end_date).startOf('day'), 'day'), 0)
-      : 0
-    return <Tag color={item.color} icon={<ArrowUpOutlined />}>{aheadDays > 0 ? `${item.label}${aheadDays}天` : item.label}</Tag>
-  }
-  if (statusValue === 'normal') {
-    return <Tag color={item.color} icon={<CheckCircleOutlined />}>{item.label}</Tag>
-  }
-  return <Tag color={item.color}>{item.label}</Tag>
-}
-
-const getDelayDaysDisplay = (row: any) => {
-  const targetReadyDate = getTargetReadyDateValue(row)
-  if (!targetReadyDate || !row?.end_date) return { text: '-', color: '#999' }
-  const diffDays = dayjs(row.end_date).startOf('day').diff(dayjs(targetReadyDate).startOf('day'), 'day')
-  if (diffDays > 0) return { text: `+${diffDays}天`, color: '#cf1322' }
-  if (diffDays < 0) return { text: `提前${Math.abs(diffDays)}天`, color: '#389e0d' }
-  return { text: '0天', color: '#1677ff' }
-}
-
-const getProjectedRescheduleEndDate = (row: any) => {
-  const targetReadyDate = getTargetReadyDateValue(row)
-  if (!targetReadyDate || !row?.current_days_needed) return null
-  let startDate = dayjs(targetReadyDate).startOf('day').subtract((row.current_days_needed || 1) - 1, 'day')
-  const today = dayjs().startOf('day')
-  if (startDate.isBefore(today)) startDate = today
-  return startDate.add((row.current_days_needed || 1) - 1, 'day')
-}
-
-const getProjectedRescheduleStartDate = (row: any) => {
-  const targetReadyDate = getTargetReadyDateValue(row)
-  if (!targetReadyDate || !row?.current_days_needed) return null
-  let startDate = dayjs(targetReadyDate).startOf('day').subtract((row.current_days_needed || 1) - 1, 'day')
-  const today = dayjs().startOf('day')
-  if (startDate.isBefore(today)) startDate = today
-  return startDate
-}
-
-const renderBucketTag = (row: any) => {
-  const label = row?.schedule_bucket_label || '未归类'
-  const color = BUCKET_COLOR_MAP[row?.schedule_bucket || 'pending'] || 'default'
-  return <Tag color={color}>{label}</Tag>
-}
-
-const renderSchedulingStatusTag = (row: any) => {
-  const label = row?.display_status_label || row?.scheduling_status_label || '待确认'
-  const color = ORDER_POOL_STATUS_COLOR_MAP[row?.display_status || row?.scheduling_status || 'pending'] || 'default'
-  return <Tag color={color}>{label}</Tag>
-}
-
-const getReadableSchedulingReason = (row: any) => {
-  const reasonCode = String(row?.scheduling_reason_code || '')
-  const status = String(row?.display_status || row?.scheduling_status || '')
-
-  if (reasonCode === 'no_capacity_match') return '未命中产能，请检查 BOM/产品编码'
-  if (reasonCode === 'non_schedulable_workshop') return '命中其他车间，当前不参与自动排产'
-  if (reasonCode === 'bucket_unclassified') return '工序未识别，暂未归类到精益/组装/包装'
-  if (reasonCode === 'lean_missing_upph') return '已命中精益，但缺有效 UPPH'
-  if (reasonCode === 'missing_upph') return '已命中产能，但缺有效 UPPH'
-  if (reasonCode === 'assembly_rule_pending') {
-    return status === 'ready' ? '已命中组装，满足排产条件' : '已命中组装，但组装阶段 UPPH 缺失'
-  }
-  if (reasonCode === 'packaging_rule_pending') {
-    return status === 'ready' ? '已命中包装，满足排产条件' : '已命中包装，但包装阶段 UPPH 缺失'
-  }
-  if (reasonCode === 'mixed_bucket_pending') {
-    return status === 'ready' ? '已识别组装+包装两段，满足排产条件' : '同时命中组装/包装，但阶段 UPPH 仍不完整'
-  }
-  if (reasonCode === 'zero_quantity') return '订单数量无效，当前不参与自动排产'
-  if (reasonCode === 'already_scheduled') return '已存在有效排产计划'
-  if (reasonCode === 'lean_ready') return '已命中精益，满足排产条件'
-  if (reasonCode === 'ready') return '满足排产条件'
-  return row?.scheduling_reason || '-'
-}
-
-const renderSchedulingReasonCell = (row: any) => {
-  const reason = getReadableSchedulingReason(row)
-  return <span>{reason}</span>
-}
-
-const renderWorkhourSuggestionCell = (row: any) => {
-  if (!row?.recommended_daily_hours) return <span style={{ color: '#999' }}>待试算</span>
-  const status = LEAN_CAPACITY_LOAD_MAP[row.capacity_load_status || 'normal'] || LEAN_CAPACITY_LOAD_MAP.normal
-  return (
-    <Tooltip title={row.work_hour_summary || undefined}>
-      <Space direction="vertical" size={2} style={{ width: '100%' }}>
-        <span style={{ fontWeight: 600 }}>{Number(row.recommended_daily_hours).toFixed(2)} 小时/天</span>
-        <Tag color={status.color}>{row.capacity_load_status_label || status.label}</Tag>
-      </Space>
-    </Tooltip>
-  )
-}
-
-const renderUpphDeltaTag = (row: any) => {
-  const current = Number(row?.upph ?? row?.current_upph ?? 0)
-  const source = Number(row?.source_upph ?? 0)
-  if (!source || !current) return <Tag>待补快照</Tag>
-  const deltaRatio = (current - source) / source
-  if (Math.abs(deltaRatio) < 0.01) return <Tag>基本不变</Tag>
-  if (deltaRatio > 0) return <Tag color="success">{`+${(deltaRatio * 100).toFixed(1)}%`}</Tag>
-  return <Tag color="error">{`${(deltaRatio * 100).toFixed(1)}%`}</Tag>
-}
-
-const hasConflictAvoidance = (row: any) => String(row?.remark || '').includes('产能避让')
-
-const renderPlanExplainSummaryCell = (row: any) => {
-  const targetReadyDate = formatDate(getTargetReadyDateValue(row))
-  const summaryParts = [
-    targetReadyDate ? `备货目标日 ${targetReadyDate}` : '',
-    row?.capacity_load_status_label || '',
-    row?.needs_sunday_work ? '周日生产' : '',
-    row?.needs_move_earlier ? `前挪 ${row?.move_earlier_days || 0} 天` : '',
-    hasConflictAvoidance(row) ? '已避让冲突' : '',
-  ].filter(Boolean)
-
-  return (
-    <span style={{ fontWeight: 500 }}>{summaryParts.join('；') || '按排产规则自动生成'}</span>
-  )
-}
-
-const renderPlanExplainPanel = (row: any) => {
-  const summary = [
-    row?.schedule_bucket_label ? `排产段：${row.schedule_bucket_label}` : '',
-    row?.recommended_daily_hours ? `建议工时：${Number(row.recommended_daily_hours).toFixed(2)} 小时/天` : '',
-    row?.capacity_load_status_label ? `负荷状态：${row.capacity_load_status_label}` : '',
-    hasConflictAvoidance(row) ? '已执行冲突避让' : '',
-    row?.remark ? '详细冲突备注已保留在后端调试链路' : '',
-  ].filter(Boolean).join('；')
-
-  return (
-    <div style={{ padding: '4px 8px' }}>
-      <Alert
-        showIcon
-        type={row?.delivery_status === 'delayed' || row?.needs_move_earlier ? 'warning' : 'info'}
-        message="排产摘要"
-        description={summary || `当前按 ${row?.schedule_bucket_label || '默认'} 规则生成计划。`}
-      />
-    </div>
-  )
-}
-
 export default function SchedulePlans() {
   const location = useLocation()
   const navigate = useNavigate()
-  const [workspace, setWorkspace] = useState('planner_hub')
-  const [plannerHubTab, setPlannerHubTab] = useState('todo_workbench')
+  const workspace: string = 'plan_board'
+  const plannerHubTab: string = 'todo_workbench'
   const [loading, setLoading] = useState(false)
   const [workHours, setWorkHours] = useState(8)
   const [workHoursByBucket, setWorkHoursByBucket] = useState<Record<string, number>>({})
@@ -396,7 +114,7 @@ export default function SchedulePlans() {
 
   const [todoData, setTodoData] = useState<any[]>([])
   const [todoTotal, setTodoTotal] = useState(0)
-  const [todoStats, setTodoStats] = useState<Record<string, number>>({
+  const [todoStats, setTodoStats] = useState<TodoWorkbenchStats>({
     ready: 0,
     pending: 0,
     reschedule: 0,
@@ -450,11 +168,11 @@ export default function SchedulePlans() {
   const [selectedBatchPlanIds, setSelectedBatchPlanIds] = useState<number[]>([])
   const [batchPreviewOpen, setBatchPreviewOpen] = useState(false)
   const [missingUpphData, setMissingUpphData] = useState<any[]>([])
-  const todoWorkbenchCacheRef = useRef<Record<string, { ts: number; items: any[]; total: number; stats: any }>>({})
-  const planBoardCacheRef = useRef<Record<string, { ts: number; items: any[]; total: number }>>({})
+  const todoWorkbenchCacheRef = useRef<Record<string, { ts: number; items: any[]; total: number; stats: TodoWorkbenchStats }>>({})
+  const planBoardCacheRef = useRef<Record<string, PlanBoardCacheEntry>>({})
   const impactPlansCacheRef = useRef<Record<string, { ts: number; items: any[]; total: number; stats: any }>>({})
   const todoWorkbenchInflightRef = useRef<Record<string, Promise<{ items: any[]; total: number; stats: any; apiMs: number }>>>({})
-  const planBoardInflightRef = useRef<Record<string, Promise<{ items: any[]; total: number; apiMs: number }>>>({})
+  const planBoardInflightRef = useRef<Record<string, Promise<PlanBoardInflightResult>>>({})
   const impactPlansInflightRef = useRef<Record<string, Promise<{ items: any[]; total: number; stats: any; apiMs: number }>>>({})
   const todoWorkbenchSkipSnapshotReconcileRef = useRef(false)
   const invalidatePageCaches = useCallback(() => {
@@ -480,6 +198,7 @@ export default function SchedulePlans() {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
   const [deletingPlan, setDeletingPlan] = useState<any>(null)
   const [deleteReason, setDeleteReason] = useState('')
+  const [breakFrozenReason, setBreakFrozenReason] = useState('')
   const [backfillPreview, setBackfillPreview] = useState<any>(null)
   const [backfillPreviewOpen, setBackfillPreviewOpen] = useState(false)
   const [planHistoryOpen, setPlanHistoryOpen] = useState(false)
@@ -509,7 +228,6 @@ export default function SchedulePlans() {
     planDate?: string | null
     status?: string
   }) => {
-    setWorkspace('plan_board')
     setPlanScope(options?.scope || 'active')
     setPlanPage(1)
     setPlanStatus(options?.status)
@@ -745,6 +463,8 @@ export default function SchedulePlans() {
   const loadPlanBoard = useCallback(async (force = false) => {
     if (!force && workspace !== 'plan_board') return
     const requestStartedAt = performance.now()
+    const monthStart = dayjs(`${year}-${String(month).padStart(2, '0')}-01`).startOf('month').format('YYYY-MM-DD')
+    const monthEnd = dayjs(monthStart).endOf('month').format('YYYY-MM-DD')
     setLoading(true)
     try {
       const params: Record<string, any> = {
@@ -752,8 +472,6 @@ export default function SchedulePlans() {
         page_size: planPageSize,
         is_active: planScope !== 'history',
       }
-      const monthStart = dayjs(`${year}-${String(month).padStart(2, '0')}-01`).startOf('month').format('YYYY-MM-DD')
-      const monthEnd = dayjs(monthStart).endOf('month').format('YYYY-MM-DD')
       if (planKeyword.trim()) params.keyword = planKeyword.trim()
       if (planStatus) params.status = planStatus
       if (planBucketFilter !== 'all') params.schedule_bucket = planBucketFilter
@@ -918,15 +636,6 @@ export default function SchedulePlans() {
     setSelectedOrderRows([])
   }, [])
 
-  const handlePlannerHubTabChange = useCallback((key: string) => {
-    setPlannerHubTab(key)
-    setSelectedOrderKeys([])
-    setSelectedOrderRows([])
-    setSelectedImpactKeys([])
-    setOrderPage(1)
-    setAlertPage(1)
-  }, [])
-
   const handleRefreshTodoSnapshots = useCallback(async () => {
     try {
       setRefreshingSnapshots(true)
@@ -953,21 +662,24 @@ export default function SchedulePlans() {
   }, [invalidatePageCaches, month, orderKeyword, refreshTodoWorkbenchPanel, riskLevel, year])
 
   useEffect(() => { loadWorkHours() }, [loadWorkHours])
-  useEffect(() => { localStorage.setItem(WORKSPACE_STORAGE_KEY, workspace) }, [workspace])
 
   useEffect(() => {
     const params = new URLSearchParams(location.search)
-    const workspaceParam = params.get('workspace')
     const planIdParam = Number(params.get('planId') || 0)
-    if (workspaceParam !== 'plan_board' && planIdParam <= 0) return
-
     const planDateParam = params.get('planDate')
     const keywordParam = params.get('keyword') || ''
     const bucketParam = params.get('bucket')
     const scopeParam = params.get('scope')
+    const hasPlanBoardContext = Boolean(
+      planIdParam > 0 ||
+      planDateParam ||
+      keywordParam ||
+      bucketParam ||
+      scopeParam
+    )
+    if (!hasPlanBoardContext) return
     const targetDate = planDateParam ? dayjs(planDateParam) : null
 
-    setWorkspace('plan_board')
     setPlanScope(scopeParam === 'history' || scopeParam === 'reschedule' ? scopeParam : 'active')
     setPlanPage(1)
     setPlanPageSize(100)
@@ -1048,8 +760,20 @@ export default function SchedulePlans() {
   const openDeleteModal = (row: any) => {
     setDeletingPlan(row)
     setDeleteReason('')
+    setBreakFrozenReason('')
     setDeleteModalOpen(true)
   }
+
+  // v2 阶段 2：判断计划是否在冷冻区（plan_date 在 today+1 ~ today+3）
+  const isPlanInFrozenZone = (planDateStr?: string | null): boolean => {
+    if (!planDateStr) return false
+    const today = dayjs().startOf('day')
+    const planDate = dayjs(planDateStr).startOf('day')
+    if (!planDate.isValid()) return false
+    const diff = planDate.diff(today, 'day')
+    return diff >= 1 && diff <= 3
+  }
+  const deletingInFrozen = isPlanInFrozenZone(deletingPlan?.plan_date)
 
   const openCreate = () => {
     setEditing(null)
@@ -1257,7 +981,7 @@ export default function SchedulePlans() {
     }
   }
 
-  const handleAutoSchedule = async () => {
+  const handleAutoSchedule = async (confirmRisky: boolean = false) => {
     try {
       const values = await scheduleForm.validateFields()
       const planDate = values.plan_date ? values.plan_date.format('YYYY-MM-DD') : null
@@ -1269,8 +993,31 @@ export default function SchedulePlans() {
         upph: selectedOrder?.schedule_bucket === 'lean' ? values.upph : undefined,
         daily_work_hours: values.daily_work_hours ?? undefined,
         owner: values.owner,
+        confirm_risky: confirmRisky,
       }
       const res: any = await productionApi.autoSchedule(payload)
+
+      // v2 阶段 4：周日生产/前挪强制人工确认
+      if (res.data?.needs_confirm && !confirmRisky) {
+        const calcResult = res.data?.calculation_result || {}
+        const warningText = res.data?.message || '此排产需要人工确认'
+        Modal.confirm({
+          title: '⚠ 排产风险确认',
+          content: (
+            <div>
+              <p style={{ color: '#cf1322', fontWeight: 600 }}>{warningText}</p>
+              {calcResult.work_hour_summary && <p>{calcResult.work_hour_summary}</p>}
+              <p style={{ color: '#595959' }}>确认后将按此方案落库。取消则不排产。</p>
+            </div>
+          ),
+          okText: '确认排产',
+          cancelText: '取消',
+          okButtonProps: { danger: true },
+          onOk: () => handleAutoSchedule(true),
+        })
+        return
+      }
+
       const result = res.data?.calculation_result || {}
       invalidatePageCaches()
       setScheduleModalOpen(false)
@@ -1398,12 +1145,18 @@ export default function SchedulePlans() {
 
   const handleDelete = async () => {
     if (!deletingPlan?.id) return
+    // v2 阶段 2：冷冻区操作必须填破冻理由
+    if (isPlanInFrozenZone(deletingPlan?.plan_date) && !breakFrozenReason.trim()) {
+      message.warning('该计划在冷冻区（1-3 天内开工），必须填写破冻理由')
+      return
+    }
     const requestStartedAt = performance.now()
     try {
       setLoading(true)
       const apiStartedAt = performance.now()
       const res: any = await productionApi.getDeleteSchedulePlanPreview(deletingPlan.id, {
         reason: deleteReason?.trim() || undefined,
+        break_frozen_reason: breakFrozenReason?.trim() || undefined,
       })
       const apiMs = performance.now() - apiStartedAt
       const result = res.data || {}
@@ -1440,6 +1193,7 @@ export default function SchedulePlans() {
       const res: any = await productionApi.confirmDeleteSchedulePlan(deletingPlan.id, {
         reason: backfillPreview?.reason || deleteReason?.trim() || '计划员手动删除计划',
         execute_backfill: executeBackfill,
+        break_frozen_reason: breakFrozenReason?.trim() || undefined,
       })
       const apiMs = performance.now() - apiStartedAt
       const result = res.data || {}
@@ -1503,24 +1257,7 @@ export default function SchedulePlans() {
       if (executeBackfill) {
         openPlanBoardView({ scope: 'active', bucket: preview?.release_bucket || 'all' })
       } else {
-        // #region debug-point delete-only-refresh-flow
-        logSchedulePlansPerf('delete-confirm-navigate', {
-          fromWorkspace: workspace,
-          fromPlannerHubTab: plannerHubTab,
-          toWorkspace: 'planner_hub',
-          toPlannerHubTab: 'todo_workbench',
-          orderKeyword: targetTodoKeyword,
-          orderBucketFilter: targetTodoBucket,
-          skipSnapshotReconcileOnce: true,
-        })
-        // #endregion
-        todoWorkbenchSkipSnapshotReconcileRef.current = true
-        setWorkspace('planner_hub')
-        setPlannerHubTab('todo_workbench')
-        setOrderPage(1)
-        setTodoStatusFilter('all')
-        setOrderKeyword(targetTodoKeyword)
-        setOrderBucketFilter(targetTodoBucket)
+        navigate('/todo-workbench')
       }
     } catch (e: any) {
       logSchedulePlansPerf('delete-confirm-error', {
@@ -2235,388 +1972,99 @@ export default function SchedulePlans() {
   return (
     <div>
       <div className="card-modern" style={{ padding: '12px 20px', marginBottom: 16 }}>
-        <Tabs
-          activeKey={workspace}
-          onChange={(key) => {
-            setWorkspace(key)
-            setSelectedOrderKeys([])
-            setSelectedOrderRows([])
-            setSelectedImpactKeys([])
-            setOrderPage(1)
-            setPlanPage(1)
-            setAlertPage(1)
-          }}
-          items={WORKSPACES.map((item) => ({ key: item.key, label: item.label }))}
-        />
-
-        {workspace === 'planner_hub' && (
-          <Tabs
-            activeKey={plannerHubTab}
-            onChange={handlePlannerHubTabChange}
-            items={PLANNER_HUB_TABS.map((item) => ({ key: item.key, label: item.label }))}
-          />
-        )}
-
-        {workspace === 'planner_hub' && plannerHubTab === 'todo_workbench' && (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Tabs
-              activeKey={orderBucketFilter}
-              onChange={handleTodoBucketWorkspaceChange}
-              items={TODO_BUCKET_WORKSPACE_OPTIONS.map((item) => ({
-                key: item.value,
-                label: `${item.label} (${todoBucketCounts[item.value as keyof typeof todoBucketCounts] || 0})`,
-              }))}
-            />
-            <Row gutter={12}>
-              {[
-                { key: 'reschedule', label: '待重排', value: todoCounts.reschedule, color: '#cf1322' },
-                { key: 'ready', label: '待排产', value: todoCounts.ready, color: '#1677ff' },
-                { key: 'pending', label: '待确认', value: todoCounts.pending, color: '#fa8c16' },
-              ].map((item) => (
-                <Col key={item.label} xs={12} md={8}>
-                  {(() => {
-                    const isActive = todoStatusFilter === item.key
-                    return (
-                      <div
-                        className="card-modern"
-                        style={{
-                          padding: 16,
-                          cursor: 'pointer',
-                          background: isActive ? '#f0f5ff' : '#fff',
-                          border: isActive ? '1px solid #1677ff' : '1px solid #f0f0f0',
-                          boxShadow: isActive ? '0 0 0 2px rgba(22,119,255,0.08)' : 'none',
-                        }}
-                        onClick={() => {
-                          setTodoStatusFilter(item.key)
-                          setSelectedOrderKeys([])
-                          setSelectedOrderRows([])
-                        }}
-                      >
-                        <Statistic title={item.label} value={item.value} valueStyle={{ color: item.color, fontSize: 24 }} />
-                      </div>
-                    )
-                  })()}
-                </Col>
-              ))}
-            </Row>
-            <Row gutter={12} align="middle">
-              <Col>
-                <Select value={year} onChange={(v) => { setYear(v); setOrderPage(1) }} style={{ width: 110 }} options={Array.from({ length: 7 }, (_, i) => ({ value: dayjs().year() - 3 + i, label: `${dayjs().year() - 3 + i}年` }))} />
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Row align="middle" justify="space-between">
+            <Col>
+              <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>排产台账</div>
+              <div style={{ color: '#64748b', fontSize: 12 }}>
+                面向计划与管理的后台操作页，聚焦计划查询、调整、删除、重排、历史与日志
+              </div>
+            </Col>
+            <Col>
+              <Space>
+                <Button size="small" onClick={() => navigate('/todo-workbench')}>📋 待排工作台</Button>
+                <Button size="small" onClick={() => navigate('/change-events')}>🔄 变更事件中心</Button>
+                <Button size="small" onClick={() => navigate('/schedule-board')}>📅 排产看板</Button>
+                <Button size="small" onClick={() => navigate('/production-dashboard')}>🏠 驾驶舱</Button>
+              </Space>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            {planStats.map((item) => (
+              <Col key={item.label} xs={12} md={6}>
+                <div className="card-modern" style={{ padding: 16 }}>
+                  <Statistic title={item.label} value={item.value} valueStyle={{ color: item.color, fontSize: 24 }} />
+                </div>
               </Col>
-              <Col>
-                <Select value={month} onChange={(v) => { setMonth(v); setOrderPage(1) }} style={{ width: 90 }} options={Array.from({ length: 12 }, (_, i) => ({ value: i + 1, label: `${i + 1}月` }))} />
-              </Col>
-              <Col>
-                <Input
-                  prefix={<SearchOutlined />}
-                  value={orderKeyword}
-                  onChange={(e) => { setOrderKeyword(e.target.value); setOrderPage(1) }}
-                  placeholder="搜索订单/BOM/产品"
-                  allowClear
-                  style={{ width: 240 }}
-                />
-              </Col>
-              <Col>
-                <Select value={todoStatusFilter} onChange={(v) => { setTodoStatusFilter(v); setSelectedOrderKeys([]); setSelectedOrderRows([]) }} style={{ width: 130 }} options={TODO_FILTER_OPTIONS} />
-              </Col>
-              <Col flex="auto" />
-              <Col>
-                <Space>
-                  <span style={{ color: '#595959' }}>
-                    当前入口 {todoTotal} 条，待排产 {todoCounts.ready} 条，待重排 {todoCounts.reschedule} 条，已选 {selectedOrderRows.length} 条
-                  </span>
-                  <Button onClick={handleDetectChanges}>检测变更</Button>
-                  <Button loading={refreshingSnapshots} onClick={handleRefreshTodoSnapshots}>刷新快照</Button>
-                  <Button icon={<ReloadOutlined />} onClick={() => { refreshTodoWorkbenchPanel(true) }}>刷新</Button>
-                  <Tooltip title={orderSelectableCount > 0 ? `当前已选中 ${orderSelectableCount} 条待排产订单` : '当前未勾选待排产订单'}>
-                    <Button type="primary" icon={<ThunderboltOutlined />} disabled={selectedOrderRows.length === 0} onClick={openBatchSchedule}>
-                      批量排产
-                    </Button>
-                  </Tooltip>
-                  <Tooltip title={selectedRescheduleRows.length > 0 ? `当前已选中 ${selectedRescheduleRows.length} 条待重排行` : '当前未勾选待重排行'}>
-                    <Button type="primary" ghost icon={<ThunderboltOutlined />} disabled={selectedRescheduleRows.length === 0} onClick={openBatchReschedulePreview}>
-                      批量重排
-                    </Button>
-                  </Tooltip>
-                </Space>
-              </Col>
-            </Row>
-          </Space>
-        )}
-
-        {workspace === 'plan_board' && (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Row gutter={12}>
-              {planStats.map((item) => (
-                <Col key={item.label} xs={12} md={6}>
-                  <div className="card-modern" style={{ padding: 16 }}>
-                    <Statistic title={item.label} value={item.value} valueStyle={{ color: item.color, fontSize: 24 }} />
-                  </div>
-                </Col>
-              ))}
-            </Row>
-            <Row gutter={12} align="middle">
-              <Col>
-                <Select value={planScope} onChange={(v) => { setPlanScope(v); setPlanPage(1) }} style={{ width: 120 }} options={PLAN_SCOPE_OPTIONS} />
-              </Col>
-              <Col>
-                <Input
-                  prefix={<SearchOutlined />}
-                  value={planKeyword}
-                  onChange={(e) => { setPlanKeyword(e.target.value); setPlanPage(1) }}
-                  placeholder="搜索订单/产品/型号"
-                  allowClear
-                  style={{ width: 240 }}
-                />
-              </Col>
-              <Col>
-                <Select allowClear placeholder="计划状态" value={planStatus} onChange={(v) => { setPlanStatus(v); setPlanPage(1) }} style={{ width: 130 }} options={Object.entries(STATUS_MAP).map(([value, item]) => ({ value, label: item.label }))} />
-              </Col>
-              <Col>
-                <DatePicker.RangePicker onChange={(dates) => {
-                  setPlanDateRange(dates && dates[0] && dates[1] ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)
-                  setPlanPage(1)
-                }} />
-              </Col>
-              <Col flex="auto" />
-              <Col>
-                <Space>
-                  <Button onClick={openSimulate}>测试试算</Button>
-                  <Button onClick={openLeanPlanBoard}>只看精益计划</Button>
-                  <Button onClick={openLeanRescheduleBoard}>只看精益待重排</Button>
-                  <Button onClick={() => openOperationLogs()}>操作日志</Button>
-                  <Button icon={<ReloadOutlined />} onClick={() => { loadPlanBoard(true) }}>刷新</Button>
-                  <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增计划</Button>
-                </Space>
-              </Col>
-            </Row>
-            <Tabs
-              activeKey={planBucketFilter}
-              onChange={(key) => {
-                setPlanBucketFilter(key)
+            ))}
+          </Row>
+          <Row gutter={12} align="middle">
+            <Col>
+              <Select value={planScope} onChange={(v) => { setPlanScope(v); setPlanPage(1) }} style={{ width: 120 }} options={PLAN_SCOPE_OPTIONS} />
+            </Col>
+            <Col>
+              <Input
+                prefix={<SearchOutlined />}
+                value={planKeyword}
+                onChange={(e) => { setPlanKeyword(e.target.value); setPlanPage(1) }}
+                placeholder="搜索订单/产品/型号"
+                allowClear
+                style={{ width: 240 }}
+              />
+            </Col>
+            <Col>
+              <Select allowClear placeholder="计划状态" value={planStatus} onChange={(v) => { setPlanStatus(v); setPlanPage(1) }} style={{ width: 130 }} options={Object.entries(STATUS_MAP).map(([value, item]) => ({ value, label: item.label }))} />
+            </Col>
+            <Col>
+              <DatePicker.RangePicker onChange={(dates) => {
+                setPlanDateRange(dates && dates[0] && dates[1] ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)
                 setPlanPage(1)
-              }}
-              items={PLAN_BUCKET_VIEW_OPTIONS.map((item) => ({ key: item.key, label: item.label }))}
-            />
-          </Space>
-        )}
-
-        {workspace === 'planner_hub' && plannerHubTab === 'change_events' && (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Row gutter={12} align="middle">
-              <Col>
-                <Statistic title="待处理事件" value={eventStats.pending} />
-              </Col>
-              <Col>
-                <Statistic title="高影响" value={eventStats.high} />
-              </Col>
-              <Col>
-                <Statistic title="UPPH变化" value={eventStats.upph_change} />
-              </Col>
-              <Col>
-                <Statistic title="排产段变化" value={eventStats.bucket_change} />
-              </Col>
-              <Col>
-                <Statistic title="交期变化" value={eventStats.due_date_change} />
-              </Col>
-              <Col>
-                <Statistic title="数量变化" value={eventStats.quantity_change} />
-              </Col>
-              <Col>
-                <Statistic title="暂不处理" value={eventStats.watching} />
-              </Col>
-              <Col>
-                <Statistic title="已处理" value={eventStats.resolved} />
-              </Col>
-              <Col flex="auto" />
-              <Col>
-                <Input
-                  prefix={<SearchOutlined />}
-                  value={alertKeyword}
-                  onChange={(e) => { setAlertKeyword(e.target.value); setAlertPage(1) }}
-                  placeholder="搜索订单/产品/负责人"
-                  allowClear
-                  style={{ width: 220 }}
-                />
-              </Col>
-              <Col>
-                <Select value={impactBucketFilter} onChange={(v) => { setImpactBucketFilter(v); setAlertPage(1) }} style={{ width: 130 }} options={BUCKET_OPTIONS} />
-              </Col>
-              <Col>
-                <Select allowClear placeholder="影响等级" value={impactLevel} onChange={(v) => { setImpactLevel(v); setAlertPage(1) }} style={{ width: 120 }} options={Object.entries(IMPACT_MAP).map(([value, item]) => ({ value, label: item.label }))} />
-              </Col>
-              <Col>
-                <Select value={eventTypeFilter} onChange={(v) => { setEventTypeFilter(v); setAlertPage(1) }} style={{ width: 130 }} options={EVENT_TYPE_OPTIONS} />
-              </Col>
-              <Col>
-                <Button type={onlyPendingEvents ? 'primary' : 'default'} onClick={() => { setOnlyPendingEvents((prev) => !prev); setAlertPage(1) }}>
-                  {onlyPendingEvents ? '只看待处理' : '全部事件'}
-                </Button>
-              </Col>
-              <Col>
-                <Space>
-                  <Button onClick={() => handleSelectImpactRows('lean')}>勾选当前精益</Button>
-                  <Button disabled={selectedImpactKeys.length === 0} onClick={() => handleUpdateEventStatus('watching')}>批量暂不处理</Button>
-                  <Button disabled={selectedImpactKeys.length === 0} onClick={() => handleUpdateEventStatus('resolved')}>批量已处理</Button>
-                  <Button icon={<ReloadOutlined />} onClick={() => { loadImpactPlans(true) }}>刷新</Button>
-                  <Button type="primary" icon={<ThunderboltOutlined />} disabled={selectedBatchPlanIds.length === 0} onClick={() => setBatchPreviewOpen(true)}>
-                    预览并重排
-                  </Button>
-                </Space>
-              </Col>
-            </Row>
-          </Space>
-        )}
-
-        {workspace === 'schedule_board' && (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Alert
-              showIcon
-              type="info"
-              message="排产看板入口已预留"
-              description="这里后续承接甘特图、时间轴、车间泳道、组装包装衔接、产能负荷和拖拽调整。当前先保留工作台和已排计划原功能不变。"
-            />
-            <Row gutter={12}>
-              <Col xs={24} md={8}>
-                <div className="card-modern" style={{ padding: 16, minHeight: 120 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>未来放什么</div>
-                  <div style={{ color: '#595959', lineHeight: 1.8 }}>按日期看生产节奏、按车间看负荷、按订单看组装与包装衔接。</div>
-                </div>
-              </Col>
-              <Col xs={24} md={8}>
-                <div className="card-modern" style={{ padding: 16, minHeight: 120 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>先去哪里处理</div>
-                  <div style={{ color: '#595959', lineHeight: 1.8 }}>今天先排什么，回工作台；已经排了什么，去已排计划。</div>
-                </div>
-              </Col>
-              <Col xs={24} md={8}>
-                <div className="card-modern" style={{ padding: 16, minHeight: 120 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>后续能力</div>
-                  <div style={{ color: '#595959', lineHeight: 1.8 }}>甘特图、泳道图、拖拽调整、冲突高亮、延期预警定位。</div>
-                </div>
-              </Col>
-            </Row>
-            <Space>
-              <Button type="primary" onClick={() => navigate('/schedule-board')}>进入独立排产看板</Button>
-              <Button type="primary" onClick={() => { setWorkspace('planner_hub'); setPlannerHubTab('todo_workbench') }}>回计划排产工作台</Button>
-              <Button onClick={() => setWorkspace('plan_board')}>去已排计划</Button>
-            </Space>
-          </Space>
-        )}
+              }} />
+            </Col>
+            <Col flex="auto" />
+            <Col>
+              <Space>
+                <Button onClick={openSimulate}>测试试算</Button>
+                <Button onClick={openLeanPlanBoard}>只看精益计划</Button>
+                <Button onClick={openLeanRescheduleBoard}>只看精益待重排</Button>
+                <Button onClick={() => openOperationLogs()}>操作日志</Button>
+                <Button icon={<ReloadOutlined />} onClick={() => { loadPlanBoard(true) }}>刷新</Button>
+                <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增计划</Button>
+              </Space>
+            </Col>
+          </Row>
+          <Tabs
+            activeKey={planBucketFilter}
+            onChange={(key) => {
+              setPlanBucketFilter(key)
+              setPlanPage(1)
+            }}
+            items={PLAN_BUCKET_VIEW_OPTIONS.map((item) => ({ key: item.key, label: item.label }))}
+          />
+        </Space>
       </div>
 
-      <div className="card-modern" style={{ padding: '0 0 4px', marginBottom: ['planner_hub', 'plan_board', 'schedule_board'].includes(workspace) ? 16 : 0 }}>
-        {workspace === 'planner_hub' && plannerHubTab === 'todo_workbench' && (
-          <Table
-            rowKey={(row: any) => row.id || `${row.order_no}-${row.line_no}-${row.todo_kind}`}
-            rowSelection={{
-              selectedRowKeys: selectedOrderKeys,
-              onChange: (keys, rows) => {
-                setSelectedOrderKeys(keys)
-                setSelectedOrderRows(rows)
-              },
-              getCheckboxProps: (row: any) => ({ disabled: row.todo_kind === 'pending' }),
-            }}
-            columns={todoColumns}
-            dataSource={filteredTodoItems}
-            loading={loading}
-            size="small"
-            scroll={{ x: 1680, y: 600 }}
-            locale={{
-              emptyText: (
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="当前筛选下没有待处理事项，可切换筛选或先检测变更。"
-                />
-              ),
-            }}
-            pagination={{
-              total: todoTotal,
-              current: orderPage,
-              pageSize: orderPageSize,
-              showSizeChanger: false,
-              showQuickJumper: false,
-              onChange: (page, pageSize) => { 
-                console.log("=== todo table pagination change:", page, pageSize);
-                setOrderPage(page); 
-                setOrderPageSize(pageSize);
-              },
-              showTotal: (total) => `共 ${total} 条`,
-            }}
-          />
-        )}
-
-        {workspace === 'plan_board' && (
-          <Table
-            rowKey="id"
-            columns={planColumns}
-            dataSource={planData}
-            loading={loading}
-            size="small"
-            scroll={{ x: 2350, y: 600 }}
-            onRow={(row: any) => ({
-              style: Number(row.id) === highlightPlanId ? { backgroundColor: '#fffbe6' } : undefined,
-            })}
-            pagination={{
-              total: planTotal,
-              current: planPage,
-              pageSize: planPageSize,
-              showSizeChanger: true,
-              onChange: (page, pageSize) => { setPlanPage(page); setPlanPageSize(pageSize) },
-              showTotal: (total) => `共 ${total} 条`,
-            }}
-          />
-        )}
-
-        {workspace === 'planner_hub' && plannerHubTab === 'change_events' && (
-          <Table
-            rowKey="event_id"
-            rowSelection={{
-              selectedRowKeys: selectedImpactKeys,
-              onChange: (keys, rows) => {
-                setSelectedImpactKeys(keys)
-                setSelectedBatchPlanIds(Array.from(new Set((rows as any[]).map((row) => Number(row.id)).filter(Boolean))))
-              },
-              getCheckboxProps: (row: any) => ({ disabled: row.process_status !== 'pending' }),
-            }}
-            columns={changeEventColumns}
-            dataSource={eventData}
-            loading={loading}
-            size="small"
-            pagination={{
-              total: eventTotal,
-              current: alertPage,
-              pageSize: alertPageSize,
-              showSizeChanger: true,
-              onChange: (page, pageSize) => { setAlertPage(page); setAlertPageSize(pageSize) },
-              showTotal: (total) => `共 ${total} 条`,
-            }}
-            scroll={{ x: 1750 }}
-            locale={{ emptyText: <Empty description="当前没有需要处理的变更事件。" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-          />
-        )}
+      <div className="card-modern" style={{ padding: '0 0 4px', marginBottom: 16 }}>
+        <Table
+          rowKey="id"
+          columns={planColumns}
+          dataSource={planData}
+          loading={loading}
+          size="small"
+          scroll={{ x: 2350, y: 600 }}
+          onRow={(row: any) => ({
+            style: Number(row.id) === highlightPlanId ? { backgroundColor: '#fffbe6' } : undefined,
+          })}
+          pagination={{
+            total: planTotal,
+            current: planPage,
+            pageSize: planPageSize,
+            showSizeChanger: true,
+            onChange: (page, pageSize) => { setPlanPage(page); setPlanPageSize(pageSize) },
+            showTotal: (total) => `共 ${total} 条`,
+          }}
+        />
       </div>
-
-      {workspace === 'planner_hub' && plannerHubTab === 'todo_workbench' && (
-        <div className="card-modern" style={{ padding: 16 }}>
-          <Space size={8} wrap>
-            <Tag color="red">待重排 {todoCounts.reschedule}</Tag>
-            <Tag color="blue">待排产 {todoCounts.ready}</Tag>
-            <Tag color="orange">待确认 {todoCounts.pending}</Tag>
-            <Tag color="red">缺UPPH {todoStats.missing_upph || 0}</Tag>
-            <Button size="small" onClick={() => { setWorkspace('planner_hub'); handlePlannerHubTabChange('change_events') }}>查看变更事件</Button>
-            <Button
-              size="small"
-              onClick={() => {
-                handleTodoBucketWorkspaceChange('lean')
-                setTodoStatusFilter('pending')
-              }}
-            >
-              只看精益待确认
-            </Button>
-          </Space>
-        </div>
-      )}
 
       <Drawer
         title={detailSource === 'order_pool' ? '订单详情' : '排产详情'}
@@ -2796,140 +2244,13 @@ export default function SchedulePlans() {
         </Space>
       </Modal>
 
-      <Modal
-        title={`重排预览${reschedulePreviewData?.order_no ? ` - ${reschedulePreviewData.order_no}` : ''}`}
+      <RescheduleModal
         open={reschedulePreviewOpen}
-        destroyOnHidden
-        onCancel={() => {
-          setReschedulePreviewOpen(false)
-          setReschedulePreviewRow(null)
-        }}
-        onOk={async () => {
-          if (!reschedulePreviewData?.id) return
-          setReschedulePreviewOpen(false)
-          await handleReschedule(reschedulePreviewData.id)
-          setReschedulePreviewRow(null)
-        }}
-        okText="确认重排"
-        cancelText="取消"
-        confirmLoading={loading}
-        width={820}
-      >
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Alert
-            showIcon
-            type={(reschedulePreviewData?.change_days || 0) > 0 ? 'warning' : 'info'}
-            message="先看影响，再决定是否重排"
-            description="这里展示触发重排的变更原因，以及按最新订单快照和当前能力口径预估后的日期影响。"
-          />
-          <Descriptions bordered size="small" column={2}>
-            <Descriptions.Item label="这是什么" span={2}>
-              {reschedulePreviewData?.order_no || '-'} / {reschedulePreviewData?.line_no || '-'}，当前版本 V{reschedulePreviewData?.plan_version || 1}
-            </Descriptions.Item>
-            <Descriptions.Item label="为什么弹出来" span={2}>
-              <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                <span>触发事件：{EVENT_TYPE_MAP[reschedulePreviewData?.event_type || 'upph_change']?.label || '变更事件'}</span>
-                <span>变更前：{reschedulePreviewData?.before_value_text || '-'}</span>
-                <span>变更后：{reschedulePreviewData?.after_value_text || '-'}</span>
-                <span>{reschedulePreviewData?.impact_reason || reschedulePreviewData?.reschedule_reason || 'UPPH 变化后建议重排'}</span>
-              </Space>
-            </Descriptions.Item>
-            <Descriptions.Item label="如果我做了会怎样" span={2}>
-              <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                <span>旧计划：{formatDate(reschedulePreviewData?.start_date)} 至 {formatDate(reschedulePreviewData?.end_date)}</span>
-                <span>新计划：{formatDate(reschedulePreviewData?.projected_start_date)} 至 {formatDate(reschedulePreviewData?.projected_end_date)}</span>
-                <span>变化天数：{reschedulePreviewData?.change_days === null || reschedulePreviewData?.change_days === undefined ? '无法预估' : `${reschedulePreviewData.change_days > 0 ? '+' : ''}${reschedulePreviewData.change_days} 天`}</span>
-                <span>交期影响：{renderDeliveryStatusTag(reschedulePreviewData?.projected_status, { target_ready_date: reschedulePreviewData?.target_ready_date, end_date: reschedulePreviewData?.projected_end_date })}</span>
-              </Space>
-            </Descriptions.Item>
-            <Descriptions.Item label="我现在可以做什么" span={2}>
-              <span>确认后将按最新订单快照与当前能力重新生成新版本计划，旧版本保留为历史记录。</span>
-            </Descriptions.Item>
-          </Descriptions>
-        </Space>
-      </Modal>
+        planData={reschedulePreviewRow}
+        onClose={() => { setReschedulePreviewOpen(false); setReschedulePreviewRow(null) }}
+        onSuccess={async () => { invalidatePageCaches(); await refreshAllViews() }}
+      />
 
-      <Modal
-        title="删除预览与补位建议"
-        open={backfillPreviewOpen}
-        destroyOnHidden
-        onCancel={() => {
-          setBackfillPreviewOpen(false)
-          setBackfillPreview(null)
-        }}
-        footer={[
-          <Button key="close" onClick={() => {
-            setBackfillPreviewOpen(false)
-            setBackfillPreview(null)
-          }}>关闭</Button>,
-          <Button
-            key="delete-only"
-            type="primary"
-            loading={loading}
-            onClick={() => handleConfirmDelete(false)}
-          >
-            只删除，回待处理
-          </Button>,
-          <Button
-            key="execute-backfill"
-            danger
-            disabled={(backfillPreview?.items || []).length === 0}
-            loading={loading}
-            onClick={() => {
-              handleConfirmDelete(true)
-            }}
-          >
-            删除并补位，保留在已排计划
-          </Button>,
-        ]}
-        width={980}
-      >
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Alert
-            showIcon
-            type="warning"
-            message="请先确认删除后的去向"
-            description={
-              <div>
-                <div>点“只删除，回待处理”：这张单据会离开已排计划，并回到待处理工作台。</div>
-                <div>点“删除并补位，保留在已排计划”：系统会立即生成新的补位计划，不会回待处理。</div>
-                <div>如果原释放计划日已经过去，系统只会从“最早可补位日”开始补位，不会把新计划前移到过去日期。</div>
-              </div>
-            }
-          />
-          <Row gutter={12}>
-            <Col span={6}>
-              <div className="card-modern" style={{ padding: 16 }}>
-                <Statistic title="原释放计划日" value={backfillPreview?.release_plan_date || '-'} />
-              </div>
-            </Col>
-            <Col span={6}>
-              <div className="card-modern" style={{ padding: 16 }}>
-                <Statistic title="最早可补位日" value={backfillPreview?.earliest_backfill_date || backfillPreview?.release_plan_date || '-'} />
-              </div>
-            </Col>
-            <Col span={6}>
-              <div className="card-modern" style={{ padding: 16 }}>
-                <Statistic title="释放排产段" value={backfillPreview?.release_bucket_label || '-'} />
-              </div>
-            </Col>
-            <Col span={6}>
-              <div className="card-modern" style={{ padding: 16 }}>
-                <Statistic title="候选补位数" value={backfillPreview?.affected_count || 0} />
-              </div>
-            </Col>
-          </Row>
-          <Table
-            rowKey="plan_id"
-            columns={backfillColumns}
-            dataSource={backfillPreview?.items || []}
-            size="small"
-            pagination={false}
-            scroll={{ x: 1100, y: 320 }}
-            locale={{ emptyText: <Empty description="当前没有可前移的补位计划" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-          />
-        </Space>
-      </Modal>
 
       <Modal
         title={`版本历史${planHistoryTarget?.order_no ? ` - ${planHistoryTarget.order_no}/${planHistoryTarget.line_no}` : ''}`}
@@ -2988,6 +2309,7 @@ export default function SchedulePlans() {
             { title: '操作时间', dataIndex: 'operation_at', width: 160, render: (v: string) => formatDateTime(v) },
             { title: '操作人', dataIndex: 'operator', width: 110, render: (v: string) => v || '-' },
             { title: '操作类型', dataIndex: 'operation_type', width: 130, render: (v: string) => <Tag color="blue">{v || '-'}</Tag> },
+            { title: '破冻', dataIndex: 'is_frozen_break', width: 80, render: (v: boolean) => v ? <Tag color="red">破冻</Tag> : '-' },
             { title: '订单号', dataIndex: 'order_no', width: 150, render: (v: string) => v || '-' },
             { title: '行号', dataIndex: 'line_no', width: 90, render: (v: string) => v || '-' },
             { title: '版本', dataIndex: 'plan_version', width: 80, render: (v: number) => v ? `V${v}` : '-' },
@@ -3108,49 +2430,12 @@ export default function SchedulePlans() {
         </Space>
       </Modal>
 
-      <Modal
-        title="删除计划"
+      <DeleteModal
         open={deleteModalOpen}
-        destroyOnHidden
-        onOk={handleDelete}
-        onCancel={() => {
-          setDeleteModalOpen(false)
-          setDeletingPlan(null)
-          setDeleteReason('')
-        }}
-        okText="下一步：预览删除影响"
-        cancelText="取消"
-        confirmLoading={loading}
-        width={560}
-      >
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Alert
-            showIcon
-            type="warning"
-            message="先输入删除原因，再预览删除影响"
-            description="本次只允许删除未开始、未投产且未锁定的当前有效计划。下一步会先展示释放窗口和补位候选，再由你决定是只删除，还是删除并补位。"
-          />
-          <div>
-            <div style={{ marginBottom: 8, color: '#595959' }}>当前计划</div>
-            <div style={{ lineHeight: 1.8 }}>
-              <div>订单：{deletingPlan?.order_no || '-'}/{deletingPlan?.line_no || '-'}</div>
-              <div>计划日：{formatDate(deletingPlan?.plan_date)}</div>
-              <div>排产段：{deletingPlan?.schedule_bucket_label || '-'}</div>
-            </div>
-          </div>
-          <div>
-            <div style={{ marginBottom: 8, color: '#595959' }}>删除原因</div>
-            <Input.TextArea
-              value={deleteReason}
-              onChange={(e) => setDeleteReason(e.target.value)}
-              rows={4}
-              placeholder="例如：客户改交期、客户暂缓、计划调整"
-              maxLength={200}
-              showCount
-            />
-          </div>
-        </Space>
-      </Modal>
+        planData={deletingPlan}
+        onClose={() => { setDeleteModalOpen(false); setDeletingPlan(null) }}
+        onSuccess={async () => { invalidatePageCaches(); await refreshAllViews() }}
+      />
 
       <Modal
         title={editing ? '编辑计划排产' : '新增计划排产'}
@@ -3196,110 +2481,27 @@ export default function SchedulePlans() {
         </Form>
       </Modal>
 
-      <Modal
-        title={`单条排产${selectedOrder?.schedule_bucket_label ? ` - ${selectedOrder.schedule_bucket_label}` : ''}`}
+      <ScheduleModal
         open={scheduleModalOpen}
-        destroyOnHidden
-        onOk={handleAutoSchedule}
-        onCancel={() => setScheduleModalOpen(false)}
-        width={640}
-      >
-        <Alert
-          showIcon
-          type="info"
-          style={{ marginBottom: 12 }}
-          message={selectedOrder?.schedule_bucket === 'lean'
-            ? `精益会自动试算建议工时：先按 ${leanStandardHours} 小时、必要时加班到 ${leanMaxHours} 小时；当前建议 ${selectedOrder?.recommended_daily_hours ? Number(selectedOrder.recommended_daily_hours).toFixed(2) : '-'} 小时/天。`
-            : selectedOrder?.schedule_bucket === 'mixed'
-              ? `当前订单会自动拆成“组装 + 包装”两条计划；包装按组装前一日释放量滚动承接，不再手填 UPPH。`
-              : selectedOrder?.recommended_daily_hours
-                ? `${selectedOrder?.schedule_bucket_label || '当前阶段'}会自动试算建议工时；当前建议 ${Number(selectedOrder.recommended_daily_hours).toFixed(2)} 小时/天，当前负荷为 ${selectedOrder?.capacity_load_status_label || '正常'}${selectedOrder?.needs_sunday_work ? '，已启用周日生产' : ''}。`
-                : `系统默认按交期前 ${readyOffsetDays} 天备货完成倒排；当前排产段默认工时 ${getRecommendedDailyWorkHours(selectedOrder?.schedule_bucket)} 小时/天，UPPH按明细单价汇总自动计算。`}
-        />
-        <Form form={scheduleForm} layout="vertical">
-          <Row gutter={16}>
-            <Col span={12}><Form.Item name="order_no" label="订单号"><Input disabled /></Form.Item></Col>
-            <Col span={12}><Form.Item name="line_no" label="行号"><Input disabled /></Form.Item></Col>
-            <Col span={12}><Form.Item name="product_code" label="产品编码"><Input disabled /></Form.Item></Col>
-            <Col span={12}><Form.Item name="model_code" label="型号"><Input disabled /></Form.Item></Col>
-            <Col span={12}><Form.Item name="quantity" label="数量"><InputNumber disabled style={{ width: '100%' }} /></Form.Item></Col>
-            <Col span={12}><Form.Item name="promised_date" label="交期"><DatePicker disabled style={{ width: '100%' }} /></Form.Item></Col>
-            <Col span={12}>
-              <Form.Item name="department" label="部门" rules={[{ required: true }]}>
-                <Select options={DEPARTMENTS.map((item) => ({ value: item, label: item }))} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="plan_date" label="计划日期（留空则按倒排开始日）">
-                  <DatePicker style={{ width: '100%' }} placeholder="不填则系统自动倒排" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                name="upph"
-                label="UPPH"
-                rules={selectedOrder?.schedule_bucket === 'lean' ? [{ required: true, type: 'number', min: 0.001 }] : []}
-              >
-                <InputNumber min={0.001} disabled={selectedOrder?.schedule_bucket !== 'lean'} style={{ width: '100%' }} placeholder={selectedOrder?.schedule_bucket === 'lean' ? '' : '装配由系统自动计算'} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="daily_work_hours" label="每日工时（可留空自动）">
-                <InputNumber min={1} max={24} style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col span={24}><Form.Item name="owner" label="负责人"><Input /></Form.Item></Col>
-          </Row>
-        </Form>
-      </Modal>
+        orderData={selectedOrder}
+        onClose={() => setScheduleModalOpen(false)}
+        onSuccess={async () => {
+          invalidatePageCaches()
+          await refreshAllViews()
+        }}
+      />
 
-      <Modal
-        title={`批量排产（${selectedOrderRows.length} 条）`}
+      <BatchScheduleModal
         open={batchScheduleOpen}
-        destroyOnHidden
-        onOk={handleBatchSchedule}
-        onCancel={() => setBatchScheduleOpen(false)}
-        width={720}
-      >
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Alert showIcon type="info" message={`仅勾选“可排产”的订单会执行批量排产，后端会统一处理并返回失败原因；精益默认自动试算工时，先按 ${leanStandardHours} 小时、必要时加班到 ${leanMaxHours} 小时。`} />
-          <Form form={batchScheduleForm} layout="vertical">
-            <Row gutter={16}>
-              <Col span={8}>
-                <Form.Item name="department" label="部门" rules={[{ required: true }]}>
-                  <Select options={DEPARTMENTS.map((item) => ({ value: item, label: item }))} />
-                </Form.Item>
-              </Col>
-              <Col span={8}>
-                <Form.Item name="plan_date" label="计划日期（留空则按倒排开始日）">
-                  <DatePicker style={{ width: '100%' }} placeholder="不填则系统自动倒排" />
-                </Form.Item>
-              </Col>
-              <Col span={8}>
-                <Form.Item name="daily_work_hours" label="每日工时（留空则按订单自动试算）">
-                  <InputNumber min={1} max={24} style={{ width: '100%' }} />
-                </Form.Item>
-              </Col>
-              <Col span={24}><Form.Item name="owner" label="负责人"><Input placeholder="可选，批量写入负责人" /></Form.Item></Col>
-            </Row>
-          </Form>
-          <Table
-            rowKey={(row: any) => `${row.order_no}-${row.line_no}`}
-            size="small"
-            pagination={false}
-            dataSource={selectedOrderRows}
-            columns={[
-              { title: '订单号', dataIndex: 'order_no', width: 150, render: (v: string) => renderCopyableText(v, '订单号') },
-              { title: '行号', dataIndex: 'line_no', width: 90, render: (v: string) => renderCopyableText(v, '行号') },
-              { title: '排产段', width: 110, render: (_: any, row: any) => renderBucketTag(row) },
-              { title: 'BOM编码', dataIndex: 'bom_no', width: 180, render: (v: string) => renderCopyableText(v, 'BOM编码') },
-              { title: '数量', dataIndex: 'order_qty', width: 90, render: (v: number) => v ?? '-' },
-              { title: 'UPPH', dataIndex: 'upph', width: 90, render: (v: number) => v ? Number(v).toFixed(2) : '-' },
-            ]}
-            scroll={{ x: 900, y: 280 }}
-          />
-        </Space>
-      </Modal>
+        orderRows={selectedOrderRows}
+        onClose={() => setBatchScheduleOpen(false)}
+        onSuccess={async () => {
+          setSelectedOrderKeys([])
+          setSelectedOrderRows([])
+          invalidatePageCaches()
+          await refreshAllViews()
+        }}
+      />
     </div>
   )
 }

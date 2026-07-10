@@ -157,6 +157,7 @@ class ProductionSchedulePlanOut(BaseModel):
     product_code: Optional[str] = None
     model_code: Optional[str] = None
     quantity: Optional[float] = None
+    planned_qty: Optional[float] = None  # v2 Q8：本段计划负责数量
     owner: Optional[str] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
@@ -219,6 +220,7 @@ class ProductionSchedulePlanCreate(BaseModel):
     product_code: Optional[str] = None
     model_code: Optional[str] = None
     quantity: Optional[float] = None
+    planned_qty: Optional[float] = None  # v2 Q8：本段计划负责数量
     owner: Optional[str] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
@@ -396,6 +398,7 @@ class AutoScheduleRequest(BaseModel):
     upph: Optional[float] = None
     daily_work_hours: Optional[float] = None
     owner: Optional[str] = None
+    confirm_risky: bool = False  # v2 阶段 4：周日生产/前挪需人工确认，前端二次提交时传 true
 
 
 class AutoScheduleResponse(BaseModel):
@@ -403,6 +406,7 @@ class AutoScheduleResponse(BaseModel):
     message: str
     schedule_plan: Optional[ProductionSchedulePlanOut] = None
     calculation_result: Optional[dict] = None
+    needs_confirm: bool = False  # v2 阶段 4：True 表示需要人工确认（周日/前挪），前端应弹确认框
 
 
 class ProductionSimulationRequest(BaseModel):
@@ -634,11 +638,13 @@ class DeleteSchedulePlanPreviewOut(BaseModel):
     affected_count: int = 0
     affected_plan_ids: List[int] = Field(default_factory=list)
     items: List[DeleteSchedulePlanBackfillItemOut] = Field(default_factory=list)
+    in_frozen: bool = False  # v2 阶段 2：是否在冷冻区（前端据此提示破冻）
 
 
 class DeleteSchedulePlanConfirmRequest(BaseModel):
     reason: Optional[str] = None
     execute_backfill: bool = False
+    break_frozen_reason: Optional[str] = None  # v2 阶段 2：破冻理由（冷冻区必填）
 
 
 class DeleteBackfillExecuteItemIn(BaseModel):
@@ -682,6 +688,7 @@ class ProductionScheduleOperationLogOut(BaseModel):
     remark: Optional[str]
     affected_plan_ids: Optional[str]
     previous_version_id: Optional[int]
+    is_frozen_break: bool = False  # v2 阶段 2：是否破冻操作
 
     model_config = {"from_attributes": True}
 

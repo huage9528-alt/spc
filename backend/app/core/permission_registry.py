@@ -40,7 +40,7 @@ def declare_permission(
 
     用法:
         declare_permission("production", "生产协同中心", module="production")
-        declare_permission("production.schedule_plans", "计划排产", module="production",
+        declare_permission("production.schedule_plans", "排产台账", module="production",
                           parent_code="production", route_path="/schedule-plans")
     """
     if code in _declared_permissions:
@@ -156,7 +156,7 @@ declare_permission("materials.supplier_payment", "供应商付款排程", module
 # 生产协同中心
 declare_permission("production", "生产协同中心", module="production", sort_order=5)
 declare_permission("production.overview", "生产总览", module="production", parent_code="production", route_path="/production-overview", sort_order=1)
-declare_permission("production.schedule_plans", "计划排产", module="production", parent_code="production", route_path="/schedule-plans", sort_order=2)
+declare_permission("production.schedule_plans", "排产台账", module="production", parent_code="production", route_path="/schedule-plans", sort_order=2)
 declare_permission("production.product_process_capacities", "产品工序产能", module="production", parent_code="production", route_path="/product-process-capacities", sort_order=3)
 declare_permission("production.front_process", "前道管理", module="production", parent_code="production", route_path="/front-process", sort_order=4)
 declare_permission("production.smt", "贴片管理", module="production", parent_code="production", route_path="/smt", sort_order=5)

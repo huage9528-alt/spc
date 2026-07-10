@@ -1,7 +1,7 @@
 
 """Production schedule plan operation log."""
 
-from sqlalchemy import Column, DateTime, Integer, String, Text, Index
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, Index
 from sqlalchemy.sql import func
 
 from app.core.database import Base
@@ -21,6 +21,7 @@ class ProductionScheduleOperationLog(Base):
     remark = Column(Text, nullable=True, comment="操作备注")
     affected_plan_ids = Column(Text, nullable=True, comment="影响的计划ID列表（JSON数组）")
     previous_version_id = Column(Integer, nullable=True, comment="上一版本计划ID")
+    is_frozen_break = Column(Boolean, nullable=False, default=False, comment="v2 阶段2：是否破冻操作（提权干预）")
 
     __table_args__ = (
         Index("ix_prod_schedule_op_plan_id_type", "plan_id", "operation_type"),

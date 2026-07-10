@@ -7,11 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.production.schedule_plan import ProductionSchedulePlan
 from app.models.order.sale_order import SaleOrderLine
 from app.models.production.sale_order_line_change_log import SaleOrderLineChangeLog
+from app.services.production.upph_calculation_service import UpphCalculationService
+from app.services.production.frozen_zone_service import is_plan_in_frozen_zone
 
 
 class ProductionChangeService:
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.upph_service = UpphCalculationService(db)
 
     async def detect_and_log_sale_order_line_changes(self) -> List[SaleOrderLineChangeLog]:
         """检测销售订单行变更并记录日志，同时标记相关排产计划需要重排"""
@@ -82,6 +85,27 @@ class ProductionChangeService:
             #         f"产品编码从 {plan.source_product_code} 变为 {current_sale_order_line.product_code}"
             #     )
 
+            # v2 阶段 4：UPPH 变化检测（比对 plan.source_upph 与当前匹配 UPPH）
+            upph_change_note = await self._detect_upph_change(plan, current_sale_order_line)
+            if upph_change_note:
+                # 冷冻区只报警不自动重排（v2 R：UPPH 变化影响冷冻区的只报警）
+                in_frozen = is_plan_in_frozen_zone(plan.plan_date)
+                if in_frozen:
+                    # 冷冻区：记日志但不触发重排
+                    change_log = SaleOrderLineChangeLog(
+                        order_no=plan.order_no,
+                        line_no=plan.line_no,
+                        change_type="upph_changed",
+                        old_value=f"source_upph={float(plan.source_upph) if plan.source_upph else None}",
+                        new_value=upph_change_note,
+                        is_processed=0,
+                    )
+                    self.db.add(change_log)
+                    changed_logs.append(change_log)
+                else:
+                    # 非冷冻区：报警 + 触发重排
+                    changes.append(upph_change_note)
+
             if changes:
                 # 记录变更日志
                 change_log = SaleOrderLineChangeLog(
@@ -113,3 +137,50 @@ class ProductionChangeService:
         
         await self.db.commit()
         return changed_logs
+
+    async def _detect_upph_change(
+        self,
+        plan: ProductionSchedulePlan,
+        current_sale_order_line: SaleOrderLine,
+    ) -> str:
+        """v2 阶段 4：检测 UPPH 变化。返回变化描述字符串，无变化返回空字符串。
+
+        比对 plan.source_upph（排产时快照）与当前 UPPH（实时计算）。
+        阈值：变化幅度 >= 1% 才报警（避免浮点抖动）。
+        """
+        # 没有 source_upph 快照，无法比对
+        if plan.source_upph is None:
+            return ""
+        try:
+            source_upph = float(plan.source_upph)
+        except (TypeError, ValueError):
+            return ""
+        if source_upph <= 0:
+            return ""
+
+        # 用订单行的 product_code + bom_code 算当前 UPPH
+        #（plan.source_product_code 可能为空，fallback 用订单行的）
+        product_code = plan.source_product_code or current_sale_order_line.product_code
+        bom_code = getattr(current_sale_order_line, "bom_code", None) or getattr(current_sale_order_line, "bom_no", None)
+        if not bom_code:
+            return ""
+
+        try:
+            current_upph, _used = await self.upph_service.calculate_total_upph(
+                product_code=product_code,
+                bom_code=bom_code,
+            )
+        except Exception:
+            return ""
+
+        if current_upph is None or current_upph <= 0:
+            return ""
+
+        delta_ratio = (current_upph - source_upph) / source_upph
+        if abs(delta_ratio) < 0.01:
+            # 变化幅度 < 1%，忽略
+            return ""
+
+        direction = "上升" if delta_ratio > 0 else "下降"
+        pct = abs(delta_ratio) * 100
+        return f"UPPH{direction} {pct:.1f}%（{source_upph:.2f} -> {current_upph:.2f}）"

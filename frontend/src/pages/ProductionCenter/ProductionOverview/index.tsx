@@ -6,6 +6,7 @@ import {
   WarningOutlined, ExclamationCircleOutlined, BarChartOutlined,
 } from '@ant-design/icons'
 import { productionApi } from '../../../services/api'
+import { PROCESS_STATUS_MAP } from '../constants'
 
 interface ProcessTypeStat {
   process_type: string
@@ -48,12 +49,7 @@ const PROCESS_LABELS: Record<string, string> = {
   front_process: '前道', smt: '贴片', lean: '精益', assembly: '组装', packaging: '包装',
 }
 
-const STATUS_MAP: Record<string, { label: string; color: string }> = {
-  completed: { label: '已完成', color: 'success' },
-  pending: { label: '进行中', color: 'processing' },
-  overdue: { label: '逾期', color: 'error' },
-  abnormal: { label: '异常', color: 'warning' },
-}
+const STATUS_MAP = PROCESS_STATUS_MAP
 
 const renderStatus = (v: string | null) =>
   v ? <Tag color={(STATUS_MAP[v] || {}).color || 'default'}>{(STATUS_MAP[v] || {}).label || v}</Tag> : <span style={{ color: '#cbd5e1' }}>-</span>

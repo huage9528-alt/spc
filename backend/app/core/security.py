@@ -192,6 +192,7 @@ class PermissionChecker:
 
     async def __call__(self, token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
         from app.core.token_blacklist import is_token_blacklisted
+        from app.core.permission_cache import get_cached_user_payload, set_cached_user_payload
 
         payload = decode_access_token(token)
         role = payload.get("role", "")
@@ -209,6 +210,56 @@ class PermissionChecker:
         user_id = payload.get("sub")
         if not user_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无效的认证凭据")
+
+        db_login_version = 0  # 默认值，is_share 路径不查库
+
+        # === 性能优化：先查 payload 缓存（命中则跳过所有数据库查询） ===
+        # 缓存 key 含 login_version，重新登录自动失效
+        if not is_share:
+            cached = await get_cached_user_payload(int(user_id), int(token_login_version or 0))
+            if cached and cached.get("role") and token_login_version == cached.get("login_version"):
+                # 命中缓存：payload 复用缓存的 role/supplier/oa/org_scope
+                payload.update({
+                    "role": cached["role"],
+                    "supplier_name": cached.get("supplier_name"),
+                    "supplier_code": cached.get("supplier_code"),
+                    "oa_user_id": cached.get("oa_user_id"),
+                    "org_scope_ids": set(cached.get("org_scope_ids", [])),
+                })
+                role = cached["role"]
+                # admin 直接返回
+                if role == "admin":
+                    return payload
+                # 非 admin 还是要校验权限（permissions 不入缓存，因为容易变）
+                # 但省了 user/role/employee/org_scope 的 4 次查询
+                # 走下面的权限校验分支，permissions 单独查
+                result = await db.execute(
+                    select(SysRole.permissions)
+                    .join(SysUser, SysUser.role_id == SysRole.id)
+                    .where(SysUser.id == int(user_id))
+                )
+                row = result.one_or_none()
+                if not row or not row[0]:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="用户角色配置异常")
+                permissions = row[0]
+                if not isinstance(permissions, dict):
+                    permissions = {}
+                permissions = self._role_permission_additions(role, permissions)
+                for resource in self._resource_candidates():
+                    allowed_actions = permissions.get(resource, [])
+                    if self.action in allowed_actions:
+                        return payload
+                for resource in self._resource_candidates():
+                    if "." not in resource:
+                        continue
+                    parent = resource.split(".")[0]
+                    parent_actions = permissions.get(parent, [])
+                    if self.action in parent_actions:
+                        return payload
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"缺少 {self.resource}.{self.action} 权限",
+                )
 
         if not is_share:
             user_result = await db.execute(
@@ -241,9 +292,36 @@ class PermissionChecker:
                     detail="您的账号已在其他设备登录，请重新登录",
                     headers={"X-Force-Logout": "true"},
                 )
+            # 写入缓存（含 role/supplier/oa/org_scope），下次请求命中即跳过 4 次查询
+            try:
+                await self._enrich_payload(payload, db, user_id)
+                await set_cached_user_payload(int(user_id), int(db_login_version), {
+                    "role": payload.get("role"),
+                    "supplier_name": payload.get("supplier_name"),
+                    "supplier_code": payload.get("supplier_code"),
+                    "oa_user_id": payload.get("oa_user_id"),
+                    "org_scope_ids": list(payload.get("org_scope_ids", set())),
+                    "login_version": int(db_login_version),
+                })
+            except Exception:
+                pass
 
         if role == "admin":
-            return await self._enrich_payload(payload, db, user_id)
+            if not payload.get("oa_user_id") and not is_share:
+                # admin 缓存未命中时才补 oa/org_scope
+                await self._enrich_payload(payload, db, user_id)
+                try:
+                    await set_cached_user_payload(int(user_id), int(db_login_version or 0), {
+                        "role": "admin",
+                        "supplier_name": payload.get("supplier_name"),
+                        "supplier_code": payload.get("supplier_code"),
+                        "oa_user_id": payload.get("oa_user_id"),
+                        "org_scope_ids": list(payload.get("org_scope_ids", set())),
+                        "login_version": int(db_login_version or 0),
+                    })
+                except Exception:
+                    pass
+            return payload
 
         if role == "supplier" and self.action != "read":
             raise HTTPException(

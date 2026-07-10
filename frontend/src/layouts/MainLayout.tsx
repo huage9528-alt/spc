@@ -34,6 +34,11 @@ import {
   IdcardOutlined,
   SafetyOutlined,
   ApiOutlined,
+  ClockCircleOutlined,
+  ThunderboltOutlined,
+  ScheduleOutlined,
+  AlertOutlined,
+  HomeOutlined,
 } from '@ant-design/icons'
 import { useAuthStore } from '../store/auth'
 import { usePermissionStore, PermNode } from '../store/permission'
@@ -188,12 +193,17 @@ const allMenuItems: PermissionAwareItem[] = [
     label: '生产协同中心',
     permission: 'production',
     children: [
+        { key: '/production-dashboard', icon: <HomeOutlined />, label: '生产驾驶舱', permission: 'production.overview' },
+      { key: '/todo-workbench', icon: <ThunderboltOutlined />, label: '待排工作台', permission: 'production.schedule_plans' },
+      { key: '/change-events', icon: <AlertOutlined />, label: '变更事件中心', permission: 'production.schedule_plans' },
+      { key: '/schedule-plans', icon: <ProjectOutlined />, label: '排产台账', permission: 'production.schedule_plans' },
+      { key: '/schedule-board', icon: <ScheduleOutlined />, label: '排产看板', permission: 'production.schedule_plans' },
       { key: '/production-overview', icon: <DashboardOutlined />, label: '生产总览', permission: 'production.overview' },
-      { key: '/schedule-plans', icon: <ProjectOutlined />, label: '计划排产', permission: 'production.schedule_plans' },
       { key: '/product-process-capacities', icon: <DatabaseOutlined />, label: '产品工序产能', permission: 'production.product_process_capacities' },
       { key: '/front-process', icon: <ContainerOutlined />, label: '前道管理', permission: 'production.front_process' },
       { key: '/smt', icon: <ExperimentOutlined />, label: '贴片管理', permission: 'production.smt' },
-      { key: '/lean', icon: <AuditOutlined />, label: '精益管理', permission: 'production.lean' },
+      { key: '/lean', icon: <AuditOutlined />, label: '精益今日看板', permission: 'production.lean' },
+      { key: '/lean-management', icon: <AuditOutlined />, label: '精益管理', permission: 'production.lean' },
       { key: '/assembly', icon: <ToolOutlined />, label: '组装管理', permission: 'production.assembly' },
       { key: '/packaging', icon: <ContainerOutlined />, label: '包装管理', permission: 'production.packaging' },
       { key: '/process-exceptions', icon: <WarningOutlined />, label: '工序异常池', permission: 'production.exceptions' },
@@ -278,6 +288,16 @@ const allMenuItems: PermissionAwareItem[] = [
       { key: '/announcements', icon: <NotificationOutlined />, label: '公告管理', permission: 'announcements' },
     ],
   },
+  {
+    key: 'purchase-center',
+    icon: <AccountBookOutlined />,
+    label: '采购中心',
+    children: [
+      { key: '/purchase/price-change', icon: <FileTextOutlined />, label: '调价单管理' },
+      { key: '/purchase/price-change/pending', icon: <ClockCircleOutlined />, label: '待我审批' },
+      { key: '/purchase/price-change/config', icon: <SettingOutlined />, label: '审批配置' },
+    ],
+  },
 ]
 
 function filterMenuByPermission(items: PermissionAwareItem[], hasPermission: (resource: string, action: string) => boolean): PermissionAwareItem[] {
@@ -341,12 +361,22 @@ const pathToGroupKey: Record<string, string> = {
   '/kit-analysis': 'material-center',
   '/supplier-risk': 'material-center',
   '/supplier-payment': 'material-center',
+  '/production-dashboard': 'production-center',
+  '/todo-workbench': 'production-center',
+  '/change-events': 'production-center',
   '/production-overview': 'production-center',
   '/schedule-plans': 'production-center',
   '/product-process-capacities': 'production-center',
   '/front-process': 'production-center',
   '/smt': 'production-center',
   '/lean': 'production-center',
+  '/lean-today': 'production-center',
+  '/lean-management': 'production-center',
+
+  '/purchase/price-change': 'purchase-center',
+  '/purchase/price-change/new': 'purchase-center',
+  '/purchase/price-change/pending': 'purchase-center',
+  '/purchase/price-change/config': 'purchase-center',
   '/assembly': 'production-center',
   '/packaging': 'production-center',
   '/process-exceptions': 'production-center',
@@ -405,12 +435,18 @@ const pathToPermission: Record<string, string> = {
   '/quality-issues': 'exceptions.quality',
   '/product-samples': 'exceptions.product_samples',
   '/closure-tracking': 'exceptions.closure',
+  '/production-dashboard': 'production.overview',
+  '/todo-workbench': 'production.schedule_plans',
+  '/change-events': 'production.schedule_plans',
+  '/schedule-board': 'production.schedule_plans',
   '/production-overview': 'production.overview',
   '/schedule-plans': 'production.schedule_plans',
   '/product-process-capacities': 'production.product_process_capacities',
   '/front-process': 'production.front_process',
   '/smt': 'production.smt',
   '/lean': 'production.lean',
+  '/lean-today': 'production.lean',
+  '/lean-management': 'production.lean',
   '/assembly': 'production.assembly',
   '/packaging': 'production.packaging',
   '/process-exceptions': 'production.exceptions',
@@ -480,7 +516,33 @@ export default function MainLayout() {
   // 动态菜单项：优先使用 API 数据，fallback 到硬编码
   const dynamicMenuItems = useMemo(() => {
     if (permLoaded && permTree.length > 0) {
-      return buildMenuItemsFromTree(permTree)
+      const items = buildMenuItemsFromTree(permTree)
+      // 注入 v2 新页面（共享 schedule_plans 权限，不在后端权限树里）
+      const v2ExtraItems: PermissionAwareItem[] = [
+      { key: '/production-dashboard', icon: <HomeOutlined />, label: '生产驾驶舱', permission: 'production.overview' },
+        { key: '/todo-workbench', icon: <ThunderboltOutlined />, label: '待排工作台', permission: 'production.schedule_plans' },
+        { key: '/change-events', icon: <AlertOutlined />, label: '变更事件中心', permission: 'production.schedule_plans' },
+        { key: '/schedule-board', icon: <ScheduleOutlined />, label: '排产看板', permission: 'production.schedule_plans' },
+        { key: '/lean-today', icon: <AuditOutlined />, label: '精益今日看板', permission: 'production.lean' },
+        { key: '/lean-management', icon: <AuditOutlined />, label: '精益管理', permission: 'production.lean' },
+      ]
+      const merged = items.map(item =>
+        item.permission === 'production'
+          ? { ...item, children: [...v2ExtraItems, ...(item.children || [])] }
+          : item
+      )
+      // 采购中心（新模块，不在权限树里）
+      merged.push({
+        key: 'purchase-center',
+        icon: <AccountBookOutlined />,
+        label: '采购中心',
+        children: [
+          { key: '/purchase/price-change', icon: <FileTextOutlined />, label: '调价单管理' },
+          { key: '/purchase/price-change/pending', icon: <ClockCircleOutlined />, label: '待我审批' },
+          { key: '/purchase/price-change/config', icon: <SettingOutlined />, label: '审批配置' },
+        ],
+      })
+      return merged
     }
     return allMenuItems
   }, [permLoaded, permTree])
@@ -657,7 +719,8 @@ export default function MainLayout() {
     if (isSupplierUser()) {
       return toAntdItems(filterSupplierPortalMenu(dynamicMenuItems, hasPermission))
     }
-    return toAntdItems(filterMenuByPermission(dynamicMenuItems, hasPermission))
+    const filtered = filterMenuByPermission(dynamicMenuItems, hasPermission)
+    return toAntdItems(filtered)
   }, [hasPermission, currentUser, isSupplierUser, isShareUser, getShareTargetPath, dynamicMenuItems])
 
   const requiredPermission = getRequiredPermission(location.pathname, dynamicPathToPermission)

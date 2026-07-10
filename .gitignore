@@ -25,3 +25,18 @@ data/uploads/
 .DS_Store
 Thumbs.db
 data/
+
+# Dev logs
+backend_dev.log
+frontend_dev.log
+*.dev.log
+
+# Build cache
+*.tsbuildinfo
+
+# Temp scripts（本机调试用，不提交）
+backend/check_*.py
+backend/perf_test.py
+backend/migrate_frozen.py
+backend/seed_process_test_data.py
+backend/test_delete_preview.py

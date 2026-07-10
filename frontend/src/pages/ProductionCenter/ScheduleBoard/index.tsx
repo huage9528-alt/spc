@@ -299,21 +299,31 @@ export default function ScheduleBoard() {
     })
   }, [bucketFilter, plans, weekDays])
 
-  const progressStats = useMemo(() => {
-    const statusCount: Record<string, number> = {
+  const progressStats = useMemo<{
+    total: number
+    delayed: number
+    reschedule: number
+    planned: number
+    in_progress: number
+    completed: number
+  }>(() => {
+    const statusCount: {
+      planned: number
+      in_progress: number
+      completed: number
+    } = {
       planned: 0,
       in_progress: 0,
       completed: 0,
-      delayed: 0,
     }
     plans.forEach((item) => {
-      const key = item.status || 'planned'
-      if (statusCount[key] !== undefined) statusCount[key] += 1
+      const key = (item.status || 'planned') as keyof typeof statusCount
+      if (key in statusCount) statusCount[key] += 1
     })
     return {
       total: plans.length,
-      delayed: plans.filter((item) => getDelayFlag(item)).length,
       reschedule: plans.filter((item) => item.needs_reschedule).length,
+      delayed: plans.filter((item) => getDelayFlag(item)).length,
       ...statusCount,
     }
   }, [plans])
@@ -413,12 +423,6 @@ export default function ScheduleBoard() {
     <div>
       <div className="card-modern" style={{ padding: 16, marginBottom: 16 }}>
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Alert
-            showIcon
-            type="info"
-            message="排产看板首版已独立"
-            description="首版看板只读复用已排计划数据，不影响现有计划排产、删除补位与重排链路；当前优先提供周视图、负荷概览和执行进度。"
-          />
           {focusedPlanId ? (
             <Alert
               showIcon

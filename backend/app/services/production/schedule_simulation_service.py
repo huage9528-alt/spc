@@ -214,6 +214,14 @@ class ScheduleSimulationService:
             0,
         )
 
+        # L1 硬约束：如果 move_earlier 方案的每天工时仍然超过上限，标产能超限
+        # 不硬排不可能的工时，让计划员看到警告后决定（拆单/延期/调交期）
+        if sunday_candidate["required_daily_hours"] > LEAN_MAX_DAILY_HOURS:
+            capacity_load_status = "capacity_overflow"
+            sunday_rest_allowed = False
+            needs_sunday_work = True
+            needs_move_earlier = True
+
         if normal_candidate["feasible"]:
             chosen_candidate = normal_candidate
             capacity_load_status = "normal"
@@ -253,6 +261,8 @@ class ScheduleSimulationService:
             summary_parts.append("周日可休，但需加班")
         elif capacity_load_status == "sunday_production":
             summary_parts.append("需启用周日生产")
+        elif capacity_load_status == "capacity_overflow":
+            summary_parts.append(f"⚠ 产能超限：即使 {LEAN_MAX_DAILY_HOURS}h/天+周日也需 {move_earlier_days} 天，建议拆单或调整交期")
         else:
             summary_parts.append(f"按 12 小时/天且周日生产仍需前挪 {move_earlier_days} 天")
 

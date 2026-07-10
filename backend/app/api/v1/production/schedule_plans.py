@@ -379,6 +379,10 @@ DELETE_PREVIEW_CACHE_TTL_SECONDS = 60
 _effective_reschedule_map_cache: dict[tuple, tuple[datetime, dict[int, dict[str, object]]]] = {}
 _todo_workbench_cache: dict[tuple, tuple[datetime, PageResult]] = {}
 _schedule_plan_list_cache: dict[tuple, tuple[datetime, PageResult]] = {}
+
+# 变更事件缓存（逐条检测太重，30 秒内复用）
+_change_events_cache: list = []
+_change_events_ts: float = 0
 _delete_preview_cache: dict[int, tuple[datetime, dict]] = {}
 _order_snapshot_table_ready = False
 
@@ -684,6 +688,7 @@ async def _log_schedule_operation(
     remark: Optional[str] = None,
     affected_plan_ids: Optional[List[int]] = None,
     previous_version_id: Optional[int] = None,
+    is_frozen_break: bool = False,
 ) -> Optional[ProductionScheduleOperationLog]:
     """记录排产操作日志（日志表缺失时不影响主业务事务）"""
     import json
@@ -702,6 +707,7 @@ async def _log_schedule_operation(
                 remark=remark,
                 affected_plan_ids=json.dumps(affected_plan_ids) if affected_plan_ids else None,
                 previous_version_id=previous_version_id,
+                is_frozen_break=is_frozen_break,
             )
             db.add(log_item)
             await db.flush([log_item])
@@ -921,6 +927,7 @@ LEAN_CAPACITY_LOAD_LABELS = {
     "overtime": "需加班",
     "sunday_production": "周日生产",
     "move_earlier": "需前挪",
+    "capacity_overflow": "产能超限",
 }
 
 
@@ -934,6 +941,7 @@ def _build_delete_preview_response(
     record: ProductionSchedulePlan,
     remark: Optional[str],
     preview_result: dict,
+    in_frozen: bool = False,
 ) -> dict:
     return {
         "plan_id": record.id,
@@ -953,6 +961,7 @@ def _build_delete_preview_response(
             }
             for item in (preview_result.get("items") or [])
         ],
+        "in_frozen": in_frozen,
     }
 
 
@@ -2232,7 +2241,6 @@ async def _find_active_plan_conflicts(
     conditions = [
         ProductionSchedulePlan.department == department,
         ProductionSchedulePlan.is_active == True,
-        ProductionSchedulePlan.status == "planned",
         ProductionSchedulePlan.start_date <= end_date,
         ProductionSchedulePlan.end_date >= start_date,
     ]
@@ -3035,6 +3043,7 @@ async def _save_schedule_plan_record(
         product_code=order_line.product_code,
         model_code=order_line.product_model,
         quantity=float(order_line.order_qty),
+        planned_qty=float(order_line.order_qty),  # v2 Q8：本段计划负责数量（mixed 两段都处理全量）
         start_date=calculation_result["start_date"],
         end_date=calculation_result["end_date"],
         priority=priority,
@@ -3069,6 +3078,72 @@ async def _save_schedule_plan_record(
         remark=operation_remark or calculation_result.get("warning") or "自动排产创建",
     )
     return record
+
+
+async def _preview_schedule_risk(
+    db: AsyncSession,
+    *,
+    order_no: str,
+    line_no: str,
+    plan_date: Optional[date],
+    upph: Optional[float],
+    daily_work_hours: Optional[float],
+) -> dict:
+    """v2 阶段 4：试算排产风险（不落库），用于判断是否需要人工确认。
+
+    返回 dict：
+      needs_confirm: bool - 是否需要人工确认（周日/前挪）
+      warning: str - 警告文案
+      calculation_result: dict - 试算结果（供前端展示）
+    """
+    row = await _get_latest_sale_order_line(db, order_no, line_no)
+    if not row:
+        return {"needs_confirm": False, "warning": "", "calculation_result": None}
+    order_line = row.SaleOrderLine
+    if not order_line.promised_date or not order_line.order_qty:
+        return {"needs_confirm": False, "warning": "", "calculation_result": None}
+
+    try:
+        simulation_service = ScheduleSimulationService(db)
+        # 精益才走 lean_workhour_plan 判断周日/前挪
+        bom_code = _get_order_line_bom_code(order_line)
+        upph_value = upph
+        if not upph_value:
+            upph_service = UpphCalculationService(db)
+            capacities, _ = await upph_service.calculate_total_upph(
+                product_code=order_line.product_code,
+                bom_code=bom_code,
+            )
+            upph_value = capacities or 0
+        if not upph_value or upph_value <= 0:
+            return {"needs_confirm": False, "warning": "", "calculation_result": None}
+
+        lean_workhour_plan = simulation_service.build_lean_workhour_plan(
+            quantity=float(order_line.order_qty),
+            upph=float(upph_value),
+            promised_date=order_line.promised_date,
+        )
+        if not lean_workhour_plan:
+            return {"needs_confirm": False, "warning": "", "calculation_result": None}
+
+        needs_sunday = bool(lean_workhour_plan.get("needs_sunday_work"))
+        needs_move_earlier = bool(lean_workhour_plan.get("needs_move_earlier"))
+        move_earlier_days = lean_workhour_plan.get("move_earlier_days") or 0
+        needs_confirm = needs_sunday or needs_move_earlier
+        warning_parts = []
+        if needs_sunday:
+            warning_parts.append("需周日生产")
+        if needs_move_earlier:
+            warning_parts.append(f"需前挪 {move_earlier_days} 天")
+        warning = "、".join(warning_parts) + "，请人工确认是否接受"
+        return {
+            "needs_confirm": needs_confirm,
+            "warning": warning,
+            "calculation_result": lean_workhour_plan,
+        }
+    except Exception:
+        # 试算失败不阻塞，让原有流程处理（落库或报错）
+        return {"needs_confirm": False, "warning": "", "calculation_result": None}
 
 
 async def _create_schedule_plan_from_request(
@@ -4009,6 +4084,7 @@ async def list_schedule_plans(
     needs_reschedule: Optional[bool] = Query(None),
     is_active: Optional[bool] = Query(True),
     schedule_bucket: Optional[str] = Query(None, pattern="^(lean|assembly|packaging|mixed|pending)$"),
+    time_zone: Optional[str] = Query(None, pattern="^(today|frozen|material|pending)$"),
     read_context: dict = Depends(_get_production_schedule_read_context),
 ):
     # 列表查询优先走数据库已固化字段，避免切页时全量动态重算。
@@ -4016,6 +4092,38 @@ async def list_schedule_plans(
     timings_ms: dict[str, float] = {}
     dependency_timings_ms = dict(read_context.get("dependency_timings_ms") or {})
     db: AsyncSession = read_context["db"]
+
+    # v2 R1: time_zone 动态派生，WHERE 展开为 plan_date 范围条件（不走 CASE WHEN，走索引）
+    # today 口径特殊：用区间相交（在产），其他用 plan_date 归属
+    today_date = date.today()
+    if time_zone == "today":
+        # R2: 今日栏口径 = 区间相交 start_date <= today AND end_date >= today
+        conditions_initial = [
+            ProductionSchedulePlan.is_active == True,
+            ProductionSchedulePlan.start_date <= today_date,
+            ProductionSchedulePlan.end_date >= today_date,
+        ]
+    elif time_zone == "frozen":
+        conditions_initial = [
+            ProductionSchedulePlan.is_active == True,
+            ProductionSchedulePlan.plan_date.between(today_date + timedelta(days=1), today_date + timedelta(days=3)),
+        ]
+    elif time_zone == "material":
+        conditions_initial = [
+            ProductionSchedulePlan.is_active == True,
+            ProductionSchedulePlan.plan_date.between(today_date + timedelta(days=4), today_date + timedelta(days=10)),
+        ]
+    elif time_zone == "pending":
+        conditions_initial = [
+            ProductionSchedulePlan.is_active == True,
+            or_(
+                ProductionSchedulePlan.plan_date.is_(None),
+                ProductionSchedulePlan.plan_date > today_date + timedelta(days=10),
+            ),
+        ]
+    else:
+        conditions_initial = []
+
     cache_key = (
         page,
         page_size,
@@ -4027,6 +4135,7 @@ async def list_schedule_plans(
         needs_reschedule,
         is_active,
         schedule_bucket or "",
+        time_zone or "",
     )
     cached_page = _get_runtime_page_cache(
         _schedule_plan_list_cache,
@@ -4035,17 +4144,18 @@ async def list_schedule_plans(
     )
     if cached_page is not None:
         logger.info(
-            "schedule-plans timing page=%s page_size=%s total=%s needs_reschedule=%s keyword=%s bucket=%s timings_ms=%s",
+            "schedule-plans timing page=%s page_size=%s total=%s needs_reschedule=%s keyword=%s bucket=%s time_zone=%s timings_ms=%s",
             page,
             page_size,
             cached_page.total,
             needs_reschedule,
             bool(keyword),
             schedule_bucket or "all",
+            time_zone or "all",
             {"cache_hit": True},
         )
         return ResponseModel(data=cached_page)
-    conditions = []
+    conditions = list(conditions_initial)
     if department:
         conditions.append(ProductionSchedulePlan.department == department)
     if status:
@@ -4223,8 +4333,10 @@ async def update_schedule_plan(
 async def get_delete_schedule_plan_preview(
     record_id: int,
     reason: Optional[str] = Query(None, description="删除原因"),
+    break_frozen_reason: Optional[str] = Query(None, description="破冻理由（冷冻区操作必填）"),
     read_context: dict = Depends(_get_production_schedule_read_context),
 ):
+    from app.services.production.frozen_zone_service import is_plan_in_frozen_zone, require_break_frozen_reason
     request_started_at = perf_counter()
     dependency_timings_ms = dict(read_context.get("dependency_timings_ms") or {})
     db: AsyncSession = read_context["db"]
@@ -4235,6 +4347,10 @@ async def get_delete_schedule_plan_preview(
         raise HTTPException(status_code=404, detail="计划不存在")
     if not record.is_active:
         raise HTTPException(status_code=400, detail="仅允许删除当前有效计划")
+
+    # v2 阶段 2：冷冻区干预机制 — 必须提供破冻理由
+    require_break_frozen_reason(record.plan_date, break_frozen_reason)
+    in_frozen = is_plan_in_frozen_zone(record.plan_date)
 
     delete_service = PlanDeleteAndBackfillService(db)
     if not delete_service.can_participate_backfill(record):
@@ -4260,6 +4376,7 @@ async def get_delete_schedule_plan_preview(
         record=record,
         remark=remark,
         preview_result=preview_result,
+        in_frozen=in_frozen,
     )))
 
 
@@ -4280,6 +4397,11 @@ async def confirm_delete_schedule_plan(
         raise HTTPException(status_code=404, detail="计划不存在")
     if not record.is_active:
         raise HTTPException(status_code=400, detail="仅允许删除当前有效计划")
+
+    # v2 阶段 2：冷冻区干预机制 — 必须提供破冻理由
+    from app.services.production.frozen_zone_service import is_plan_in_frozen_zone, require_break_frozen_reason
+    require_break_frozen_reason(record.plan_date, data.break_frozen_reason)
+    in_frozen = is_plan_in_frozen_zone(record.plan_date)
 
     delete_service = PlanDeleteAndBackfillService(db)
     if not delete_service.can_participate_backfill(record):
@@ -4316,6 +4438,7 @@ async def confirm_delete_schedule_plan(
         line_no=record.line_no,
         remark=remark,
         affected_plan_ids=preview_result.get("affected_plan_ids"),
+        is_frozen_break=in_frozen,
     )
     await db.delete(record)
     delete_mark_ms = round((perf_counter() - step_started_at) * 1000, 2)
@@ -4509,6 +4632,64 @@ async def detect_sale_order_line_changes(
     return ResponseModel(data=[log for log in changed_logs])
 
 
+@router.get("/planned-qty-audit", response_model=ResponseModel)
+async def planned_qty_audit(
+    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """v2 Q8：拆分对账 —— 检查 active 计划的 planned_qty 一致性
+
+    返回：
+      total_orders: 涉及订单行数
+      mismatch_count: 不一致订单行数
+      mismatches: [{order_no, line_no, source_order_qty, planned_qty_sum, status}]
+      status:
+        - ok: 求和匹配
+        - missing: 有订单但没 active 计划
+        - mismatch: 求和不等（mixed 两段 planned_qty 应该都等于 source_order_qty）
+    """
+    # 查所有有 active 计划的 order_no+line_no 组合
+    stmt = (
+        select(
+            ProductionSchedulePlan.order_no,
+            ProductionSchedulePlan.line_no,
+            ProductionSchedulePlan.source_order_qty,
+            func.sum(ProductionSchedulePlan.planned_qty).label("planned_sum"),
+            func.count(ProductionSchedulePlan.id).label("plan_count"),
+        )
+        .where(
+            ProductionSchedulePlan.is_active == True,
+            ProductionSchedulePlan.order_no.isnot(None),
+            ProductionSchedulePlan.line_no.isnot(None),
+        )
+        .group_by(
+            ProductionSchedulePlan.order_no,
+            ProductionSchedulePlan.line_no,
+            ProductionSchedulePlan.source_order_qty,
+        )
+    )
+    rows = (await db.execute(stmt)).all()
+    mismatches = []
+    for row in rows:
+        source_qty = float(row.source_order_qty) if row.source_order_qty else 0
+        planned_sum = float(row.planned_sum) if row.planned_sum else 0
+        # 容忍 0.01 浮点误差
+        if abs(source_qty - planned_sum) > 0.01:
+            mismatches.append({
+                "order_no": row.order_no,
+                "line_no": row.line_no,
+                "source_order_qty": source_qty,
+                "planned_qty_sum": planned_sum,
+                "plan_count": row.plan_count,
+                "status": "mismatch",
+            })
+    return ResponseModel(data={
+        "total_order_lines": len(rows),
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches,
+    })
+
+
 @router.post("/{plan_id}/reschedule", response_model=ResponseModel[ProductionSchedulePlanOut])
 async def reschedule_plan(
     plan_id: int,
@@ -4606,32 +4787,27 @@ async def list_schedule_change_events(
     schedule_bucket: Optional[str] = Query(None, pattern="^(lean|assembly|packaging|mixed|pending)$"),
     event_type: Optional[str] = Query(None, pattern="^(upph_change|bucket_change|due_date_change|quantity_change)$"),
     only_pending: bool = Query(False, description="是否只看待处理事件"),
-    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
+    token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ):
-    conditions = [ProductionSchedulePlan.is_active == True]
-    if department:
-        conditions.append(ProductionSchedulePlan.department == department)
-    if keyword:
-        like = f"%{keyword}%"
-        conditions.append(
-            or_(
-                ProductionSchedulePlan.order_no.ilike(like),
-                ProductionSchedulePlan.line_no.ilike(like),
-                ProductionSchedulePlan.product_code.ilike(like),
-                ProductionSchedulePlan.model_code.ilike(like),
-                ProductionSchedulePlan.owner.ilike(like),
-            )
+    current_user = decode_access_token(token)
+    # 进程内缓存：变更事件计算很重（逐条检测），30 秒内复用
+    import time as _time
+    global _change_events_cache, _change_events_ts
+    if _change_events_cache and (_time.time() - _change_events_ts) < 30:
+        items = list(_change_events_cache)
+    else:
+        conditions_change = [ProductionSchedulePlan.is_active == True]
+        result = await db.execute(
+            select(ProductionSchedulePlan)
+            .where(*conditions_change)
+            .order_by(ProductionSchedulePlan.plan_date.desc(), ProductionSchedulePlan.id.desc())
         )
-
-    result = await db.execute(
-        select(ProductionSchedulePlan)
-        .where(*conditions)
-        .order_by(ProductionSchedulePlan.plan_date.desc(), ProductionSchedulePlan.id.desc())
-    )
-    plans = list(result.scalars().all())
-    impact_config = await _get_impact_config(db)
-    items = await _build_schedule_change_event_items(db, plans, impact_config=impact_config)
+        plans = list(result.scalars().all())
+        impact_config = await _get_impact_config(db)
+        items = await _build_schedule_change_event_items(db, plans, impact_config=impact_config)
+        _change_events_cache = list(items)
+        _change_events_ts = _time.time()
 
     if impact_level:
         items = [item for item in items if item.impact_level == impact_level]
@@ -5766,7 +5942,31 @@ async def auto_schedule(
     current_user: dict = Depends(PermissionChecker("production.schedule_plans", "create")),
     db: AsyncSession = Depends(get_db),
 ):
-    """一键排产"""
+    """一键排产
+
+    v2 阶段 4 工时干预：周日生产/前挪两档强制人工确认。
+    - 第一次调用（confirm_risky=False）：若试算结果需要周日/前挪，返回 needs_confirm=True + calculation_result，不落库
+    - 第二次调用（confirm_risky=True）：直接落库
+    """
+    # v2 阶段 4：风险试算（不落库）——仅当未确认时检查
+    if not data.confirm_risky:
+        risky_preview = await _preview_schedule_risk(
+            db,
+            order_no=data.order_no,
+            line_no=data.line_no,
+            plan_date=data.plan_date,
+            upph=data.upph,
+            daily_work_hours=data.daily_work_hours,
+        )
+        if risky_preview.get("needs_confirm"):
+            return ResponseModel(data=AutoScheduleResponse(
+                success=False,
+                message=risky_preview.get("warning", "此排产需要人工确认（周日生产或前挪），请确认后再提交"),
+                schedule_plan=None,
+                calculation_result=risky_preview.get("calculation_result"),
+                needs_confirm=True,
+            ))
+
     records, calculation_result, response_message = await _create_schedule_plan_from_request(
         db,
         order_no=data.order_no,
