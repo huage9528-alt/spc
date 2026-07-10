@@ -248,6 +248,9 @@ class DatabaseInitializer:
             "production_schedule_operation_log": {
                 "is_frozen_break": "BOOLEAN NOT NULL DEFAULT FALSE",
             },
+            "approval_config": {
+                "biz_name": "VARCHAR(128)",
+            },
         }
         # 删除已废弃的列
         drop_columns = {
@@ -502,6 +505,8 @@ class DatabaseInitializer:
                             "materials.kit_analysis": ["create", "read", "update", "import"],
                             "materials.supplier_risk": ["create", "read", "update", "import"],
                             "materials.supplier_payment": ["create", "read", "update", "import"],
+                            "purchase.price_change": ["create", "read", "update"],
+                            "purchase.price_change.pending": ["read"],
                             "exceptions.pool": ["read"],
                             "exceptions.issue_log": ["read"],
                             "exceptions.change_log": ["read"],
@@ -575,6 +580,9 @@ class DatabaseInitializer:
                             "materials.kit_analysis": ["create", "read", "update", "delete", "import"],
                             "materials.supplier_risk": ["create", "read", "update", "delete", "import"],
                             "materials.supplier_payment": ["create", "read", "update", "delete", "import"],
+                            "purchase.price_change": ["create", "read", "update", "delete"],
+                            "purchase.price_change.pending": ["read"],
+                            "purchase.price_change.config": ["create", "read", "update", "delete"],
                             "exceptions.pool": ["read", "update"],
                             "exceptions.issue_log": ["read", "update"],
                             "exceptions.change_log": ["read", "update"],

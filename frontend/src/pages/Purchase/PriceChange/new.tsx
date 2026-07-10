@@ -244,14 +244,7 @@ export default function PriceChangeNew() {
     { title:'单位',width:50,render:(_:any,r:any)=><Input size="small" value={r.unit} style={{width:50,background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={e=>upItem(r.key,'unit',e.target.value)} /> },
     { title:'订货量',width:80,render:(_:any,r:any)=><InputNumber size="small" value={r.order_qty} min={0} precision={4} style={{width:'100%',background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={v=>upItem(r.key,'order_qty',v)} /> },
     { title:'到货量',width:80,render:(_:any,r:any)=><InputNumber size="small" value={r.delivery_qty} min={0} precision={4} style={{width:'100%',background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={v=>upItem(r.key,'delivery_qty',v)} /> },
-    { title:'原价',width:145,render:(_:any,r:any)=><div>
-      <InputNumber size="small" value={r.old_price} min={0} precision={4} style={{width:'100%',background:r.old_price_date?'#f6ffed':'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={v=>upItem(r.key,'old_price',v)} />
-      <div style={{ marginTop: 4 }}>
-        {r.old_price_date
-          ? <Tag color="green" style={{ marginInlineEnd: 0 }}>自动带出 {r.old_price_date}</Tag>
-          : <Tag style={{ marginInlineEnd: 0, color: '#64748b' }}>手工录入</Tag>}
-      </div>
-    </div> },
+    { title:'原价',width:85,render:(_:any,r:any)=><InputNumber size="small" value={r.old_price} min={0} precision={4} style={{width:'100%',background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={v=>upItem(r.key,'old_price',v)} /> },
     { title:'现价',width:85,render:(_:any,r:any)=><InputNumber size="small" value={r.new_price} min={0} precision={4} style={{width:'100%',background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={v=>upItem(r.key,'new_price',v)} /> },
     { title:'涨幅',width:75,render:(_:any,r:any)=>{const o=parseFloat(r.old_price),n=parseFloat(r.new_price);if(!o||!n||o===0)return<span style={{color:'#cbd5e1'}}>--</span>;const p=((n/o)-1)*100;return<span style={{color:p>=0?'#dc2626':'#16a34a',fontWeight:600}}>{p>=0?'+':''}{p.toFixed(1)}%</span>}},
     { title:'备注',width:90,render:(_:any,r:any)=><Input size="small" value={r.remark} style={{background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={e=>upItem(r.key,'remark',e.target.value)} /> },

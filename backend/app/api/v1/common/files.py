@@ -5,6 +5,8 @@
 from datetime import datetime
 from typing import Optional
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, func, or_, select
@@ -219,5 +221,7 @@ async def download_file(
         finally:
             fh.close()
 
-    headers = {"Content-Disposition": f'attachment; filename="{asset.name}"'}
+    safe_name = asset.name or "download"
+    encoded_name = quote(safe_name)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"}
     return StreamingResponse(_iter(), media_type=asset.mime or "application/octet-stream", headers=headers)

@@ -10,16 +10,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import oauth2_scheme, decode_access_token
+from app.core.security import PermissionChecker, oauth2_scheme, decode_access_token
 from app.schemas.common import ResponseModel
 from app.services.purchase.price_change_service import PriceChangeService
-
-router = APIRouter()
 
 
 async def get_current_username(token: str = Depends(oauth2_scheme)) -> str:
     payload = decode_access_token(token)
     return payload.get("sub", "anonymous")
+
+router = APIRouter()
 
 
 @router.get("", response_model=ResponseModel)
@@ -32,6 +32,7 @@ async def list_price_changes(
     date_end: str = Query(""),
     applicant: str = Query(""),
     username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "read")),
     db: AsyncSession = Depends(get_db),
 ):
     service = PriceChangeService(db)
@@ -45,7 +46,11 @@ async def list_price_changes(
 
 
 @router.get("/pending", response_model=ResponseModel)
-async def list_pending_approvals(username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def list_pending_approvals(
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change.pending", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     items = await service.pending_approvals()
     return ResponseModel(data=items)
@@ -53,7 +58,11 @@ async def list_pending_approvals(username: str = Depends(get_current_username), 
 
 # ---------- 通用审批配置（支持多 biz_type）----------
 @router.get("/approval-configs", response_model=ResponseModel)
-async def list_approval_configs(username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def list_approval_configs(
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change.config", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     rows = await db.execute(
         text("SELECT biz_type, biz_name, nodes, is_active, updated_by, updated_at FROM approval_config ORDER BY biz_type")
     )
@@ -61,7 +70,7 @@ async def list_approval_configs(username: str = Depends(get_current_username), d
     for r in rows:
         d = dict(r._mapping)
         if isinstance(d.get("nodes"), str):
-            d["nodes"] = json.loads(d["nodes"] or "[]")
+            d["nodes"] = json.loads(d.get("nodes") or "[]")
         if isinstance(d.get("updated_at"), datetime):
             d["updated_at"] = d["updated_at"].isoformat()
         items.append(d)
@@ -69,7 +78,12 @@ async def list_approval_configs(username: str = Depends(get_current_username), d
 
 
 @router.get("/approval-configs/{biz_type}", response_model=ResponseModel)
-async def get_approval_config(biz_type: str, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def get_approval_config(
+    biz_type: str,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change.config", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     row = await db.execute(
         text("SELECT biz_type, biz_name, nodes, is_active, updated_by, updated_at FROM approval_config WHERE biz_type=:bt LIMIT 1"),
         {"bt": biz_type},
@@ -79,14 +93,20 @@ async def get_approval_config(biz_type: str, username: str = Depends(get_current
         return ResponseModel(data={"biz_type": biz_type, "nodes": []})
     d = dict(r._mapping)
     if isinstance(d.get("nodes"), str):
-        d["nodes"] = json.loads(d["nodes"] or "[]")
+        d["nodes"] = json.loads(d.get("nodes") or "[]")
     if isinstance(d.get("updated_at"), datetime):
         d["updated_at"] = d["updated_at"].isoformat()
     return ResponseModel(data=d)
 
 
 @router.put("/approval-configs/{biz_type}", response_model=ResponseModel)
-async def save_approval_config(biz_type: str, data: dict, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def save_approval_config(
+    biz_type: str,
+    data: dict,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change.config", "update")),
+    db: AsyncSession = Depends(get_db),
+):
     nodes = data.get("nodes", [])
     biz_name = data.get("biz_name", "")
     is_active = data.get("is_active", True)
@@ -109,14 +129,24 @@ async def save_approval_config(biz_type: str, data: dict, username: str = Depend
 
 
 @router.delete("/approval-configs/{biz_type}", response_model=ResponseModel)
-async def delete_approval_config(biz_type: str, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def delete_approval_config(
+    biz_type: str,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change.config", "delete")),
+    db: AsyncSession = Depends(get_db),
+):
     await db.execute(text("DELETE FROM approval_config WHERE biz_type=:bt"), {"bt": biz_type})
     await db.commit()
     return ResponseModel(data={"biz_type": biz_type}, message="已删除")
 
 
 @router.get("/{change_id}", response_model=ResponseModel)
-async def get_price_change(change_id: int, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def get_price_change(
+    change_id: int,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     record = await service.get_price_change(change_id)
     if not record:
@@ -125,7 +155,12 @@ async def get_price_change(change_id: int, username: str = Depends(get_current_u
 
 
 @router.post("", response_model=ResponseModel)
-async def create_price_change(data: dict, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def create_price_change(
+    data: dict,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "create")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     submit = data.pop("submit", False)
     main_data = {k: v for k, v in data.items() if k not in ("items", "submit")}
@@ -141,7 +176,13 @@ async def create_price_change(data: dict, username: str = Depends(get_current_us
 
 
 @router.put("/{change_id}", response_model=ResponseModel)
-async def update_price_change(change_id: int, data: dict, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def update_price_change(
+    change_id: int,
+    data: dict,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "update")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     main_data = {k: v for k, v in data.items() if k not in ("items", "submit")}
     if main_data.get("change_date") and isinstance(main_data["change_date"], str):
@@ -158,7 +199,12 @@ async def update_price_change(change_id: int, data: dict, username: str = Depend
 
 
 @router.post("/{change_id}/submit", response_model=ResponseModel)
-async def submit_for_approval(change_id: int, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def submit_for_approval(
+    change_id: int,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "update")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     record = await service.submit_for_approval(change_id, applicant=username)
     if not record:
@@ -168,7 +214,12 @@ async def submit_for_approval(change_id: int, username: str = Depends(get_curren
 
 
 @router.post("/{change_id}/ai-analyze", response_model=ResponseModel)
-async def rerun_ai_analysis(change_id: int, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def rerun_ai_analysis(
+    change_id: int,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "update")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     record = await service.rerun_ai_analysis(change_id)
     if not record:
@@ -178,7 +229,13 @@ async def rerun_ai_analysis(change_id: int, username: str = Depends(get_current_
 
 
 @router.post("/{change_id}/approve", response_model=ResponseModel)
-async def approve_price_change(change_id: int, data: dict, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def approve_price_change(
+    change_id: int,
+    data: dict,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change.pending", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     result = await service.approve(change_id, approver=username, comment=data.get("comment", ""))
     if not result["success"]:
@@ -189,7 +246,13 @@ async def approve_price_change(change_id: int, data: dict, username: str = Depen
 
 
 @router.post("/{change_id}/reject", response_model=ResponseModel)
-async def reject_price_change(change_id: int, data: dict, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def reject_price_change(
+    change_id: int,
+    data: dict,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change.pending", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     result = await service.reject(change_id, approver=username, comment=data.get("comment", ""))
     if not result["success"]:
@@ -199,7 +262,12 @@ async def reject_price_change(change_id: int, data: dict, username: str = Depend
 
 
 @router.post("/{change_id}/recall", response_model=ResponseModel)
-async def recall_price_change(change_id: int, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def recall_price_change(
+    change_id: int,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "update")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     ok = await service.recall(change_id)
     if not ok:
@@ -209,7 +277,12 @@ async def recall_price_change(change_id: int, username: str = Depends(get_curren
 
 
 @router.delete("/{change_id}", response_model=ResponseModel)
-async def delete_price_change(change_id: int, username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def delete_price_change(
+    change_id: int,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "delete")),
+    db: AsyncSession = Depends(get_db),
+):
     service = PriceChangeService(db)
     ok = await service.delete(change_id)
     if not ok:
@@ -219,7 +292,13 @@ async def delete_price_change(change_id: int, username: str = Depends(get_curren
 
 
 @router.get("/supplier-last-price", response_model=ResponseModel)
-async def get_supplier_last_price(material_code: str = Query(""), supplier_code: str = Query(""), username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def get_supplier_last_price(
+    material_code: str = Query(""),
+    supplier_code: str = Query(""),
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     if not material_code:
         return ResponseModel(data=None)
     from sqlalchemy import text
@@ -228,7 +307,14 @@ async def get_supplier_last_price(material_code: str = Query(""), supplier_code:
     if row:
         return ResponseModel(data={"old_price": float(row[0]), "old_price_date": str(row[1])})
 @router.get("/employees/search", response_model=ResponseModel)
-async def search_employees(keyword: str = Query(""), page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=50), username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def search_employees(
+    keyword: str = Query(""),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     """轻量级员工搜索（不查权限，直接查 scm_employee 表）"""
     from sqlalchemy import text
     if keyword:
@@ -251,7 +337,14 @@ async def search_employees(keyword: str = Query(""), page: int = Query(1, ge=1),
 
 
 @router.get("/suppliers/search", response_model=ResponseModel)
-async def search_suppliers(keyword: str = Query(""), page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=50), username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def search_suppliers(
+    keyword: str = Query(""),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     """轻量级供应商搜索（不查权限，直接查 scm_supplier 表）"""
     from sqlalchemy import text
     if keyword:
@@ -273,7 +366,14 @@ async def search_suppliers(keyword: str = Query(""), page: int = Query(1, ge=1),
     return ResponseModel(data={"items": items, "total": total})
 
 @router.get("/materials/search", response_model=ResponseModel)
-async def search_materials(keyword: str = Query(""), page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=50), username: str = Depends(get_current_username), db: AsyncSession = Depends(get_db)):
+async def search_materials(
+    keyword: str = Query(""),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "read")),
+    db: AsyncSession = Depends(get_db),
+):
     from sqlalchemy import text
     if keyword:
         like = f"%{keyword}%"
@@ -296,6 +396,7 @@ async def export_price_changes(
     date_end: str = Query(""),
     applicant: str = Query(""),
     username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "read")),
     db: AsyncSession = Depends(get_db),
 ):
     service = PriceChangeService(db)
