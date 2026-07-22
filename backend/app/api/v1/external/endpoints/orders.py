@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl
 
 from sqlalchemy import select, func, or_
 
-from app.models.order.sale_order import SaleOrder
+from app.models.order.sale_order import SaleOrder, SaleOrderLine
 
 from ..registry import register_external, ExternalCallContext
 
@@ -137,6 +137,133 @@ async def orders_list(ctx: ExternalCallContext) -> dict:
             "planned_start_date": r.planned_start_date.isoformat() if r.planned_start_date else None,
             "owner": r.owner,
             "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        })
+
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@register_external(
+    "order_details.list",
+    "订单明细列表",
+    method="GET",
+    path="/order-details/list",
+    description="销售订单明细行列表查询，支持按订单号、产品、BOM、状态、合同交期范围、增量同步",
+    tags=["订单"],
+)
+async def order_details_list(ctx: ExternalCallContext) -> dict:
+    """销售订单明细行列表（外部定制版，基于 SaleOrderLine）
+
+    参数（query）：
+        page, page_size: 分页
+        order_no: 订单号精确匹配（拉取某订单的全部明细行）
+        keyword: 关键字（订单号 / 产品名 / 产品型号 模糊匹配）
+        product_code: 产品编码精确匹配
+        status: 明细行状态，多选逗号分隔，如 open,closed
+        bom_no: BOM编号精确匹配
+        promised_date_start, promised_date_end: 合同交期范围 YYYY-MM-DD
+        updated_after: 增量同步，仅返回 updated_at >= 此时间的记录 (ISO 8601)
+    """
+    params = ctx.params
+    db = ctx.db
+
+    page = max(int(params.get("page", 1) or 1), 1)
+    page_size = min(max(int(params.get("page_size", 20) or 20), 1), 200)
+    order_no = params.get("order_no")
+    keyword = params.get("keyword")
+    product_code = params.get("product_code")
+    status = params.get("status")
+    bom_no = params.get("bom_no")
+    promised_start = _parse_date(params.get("promised_date_start"))
+    promised_end = _parse_date(params.get("promised_date_end"))
+    updated_after_raw = params.get("updated_after")
+
+    query = select(
+        SaleOrderLine,
+        SaleOrder.customer,
+        SaleOrder.customer_code,
+    ).outerjoin(SaleOrder, SaleOrderLine.sale_order_id == SaleOrder.id)
+
+    count_query = select(func.count()).select_from(SaleOrderLine)
+
+    if order_no:
+        query = query.where(SaleOrderLine.order_no == order_no)
+        count_query = count_query.where(SaleOrderLine.order_no == order_no)
+
+    if keyword:
+        like_expr = f"%{keyword}%"
+        kw_cond = or_(
+            SaleOrderLine.order_no.ilike(like_expr),
+            SaleOrderLine.product_name.ilike(like_expr),
+            SaleOrderLine.product_model.ilike(like_expr),
+        )
+        query = query.where(kw_cond)
+        count_query = count_query.where(kw_cond)
+
+    if product_code:
+        query = query.where(SaleOrderLine.product_code == product_code)
+        count_query = count_query.where(SaleOrderLine.product_code == product_code)
+
+    if status:
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        if len(statuses) == 1:
+            query = query.where(SaleOrderLine.status == statuses[0])
+            count_query = count_query.where(SaleOrderLine.status == statuses[0])
+        elif statuses:
+            query = query.where(SaleOrderLine.status.in_(statuses))
+            count_query = count_query.where(SaleOrderLine.status.in_(statuses))
+
+    if bom_no:
+        query = query.where(SaleOrderLine.bom_no == bom_no)
+        count_query = count_query.where(SaleOrderLine.bom_no == bom_no)
+
+    if promised_start:
+        query = query.where(SaleOrderLine.promised_date >= promised_start)
+        count_query = count_query.where(SaleOrderLine.promised_date >= promised_start)
+    if promised_end:
+        query = query.where(SaleOrderLine.promised_date <= promised_end)
+        count_query = count_query.where(SaleOrderLine.promised_date <= promised_end)
+
+    if updated_after_raw:
+        try:
+            ua_dt = datetime.fromisoformat(updated_after_raw)
+            query = query.where(SaleOrderLine.updated_at >= ua_dt)
+            count_query = count_query.where(SaleOrderLine.updated_at >= ua_dt)
+        except ValueError:
+            pass
+
+    total = (await db.execute(count_query)).scalar() or 0
+
+    query = (
+        query.order_by(SaleOrderLine.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    rows = (await db.execute(query)).all()
+
+    items = []
+    for row in rows:
+        line = row.SaleOrderLine
+        items.append({
+            "id": line.id,
+            "sale_order_id": line.sale_order_id,
+            "order_no": line.order_no,
+            "erp_line_id": line.erp_line_id,
+            "line_no": line.line_no,
+            "product_code": line.product_code,
+            "product_name": line.product_name,
+            "product_model": line.product_model,
+            "order_qty": float(line.order_qty) if line.order_qty is not None else None,
+            "order_amount": float(line.order_amount) if line.order_amount is not None else None,
+            "promised_date": line.promised_date.isoformat() if line.promised_date else None,
+            "planned_start_date": line.planned_start_date.isoformat() if line.planned_start_date else None,
+            "batch_no": line.batch_no,
+            "bom_no": line.bom_no,
+            "bom_id": line.bom_id,
+            "status": line.status,
+            "customer": row.customer,
+            "customer_code": row.customer_code,
+            "created_at": line.created_at.isoformat() if line.created_at else None,
+            "updated_at": line.updated_at.isoformat() if line.updated_at else None,
         })
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
