@@ -103,15 +103,29 @@ export default function WorkshopFrontView({ processType, workshopLabel }: Worksh
 
   // 汇总数据
   const totalQty = todayPlans.reduce((sum, p) => sum + (Number(p.source_order_qty) || 0), 0)
-  const totalHours = todayPlans.reduce((sum, p) => sum + (Number(p.daily_work_hours) || 8.5), 0)
+  // 实际工时: 每条计划的当天实际占用 = 总工时 / 天数(不是 daily_work_hours 直接累加)
+  const getActualHours = (p: any) => {
+    const qty = Number(p.quantity || p.source_order_qty || 0)
+    const upph = Number(p.upph || 0)
+    const mp = Number(p.manpower || 10)
+    if (qty > 0 && upph > 0 && mp > 0) {
+      const totalH = qty / (upph * mp)
+      const start = p.start_date ? new Date(p.start_date) : null
+      const end = p.end_date ? new Date(p.end_date) : null
+      const days = start && end ? Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 86400000) + 1) : 1
+      return totalH / days
+    }
+    return Number(p.daily_work_hours) || 0
+  }
+  const totalHours = todayPlans.reduce((sum, p) => sum + getActualHours(p), 0)
   const inProgressCount = todayPlans.filter(p => p.status === 'in_progress').length
   const completedCount = todayPlans.filter(p => p.status === 'completed').length
   const urgentCount = todayPlans.filter(p => p.priority === 'urgent' || p.priority === 'high').length
-  const isBusy = totalHours > todayPlans.length * 10
+  const isBusy = totalHours > 12
 
   // 明日汇总
   const tomorrowQty = tomorrowPlans.reduce((sum, p) => sum + (Number(p.source_order_qty) || 0), 0)
-  const tomorrowHours = tomorrowPlans.reduce((sum, p) => sum + (Number(p.daily_work_hours) || 8.5), 0)
+  const tomorrowHours = tomorrowPlans.reduce((sum, p) => sum + getActualHours(p), 0)
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto' }}>

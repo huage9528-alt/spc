@@ -20,44 +20,57 @@ class PriceChangeService:
         conditions = ["1=1"]
         params = {}
         if keyword:
-            conditions.append("(change_no ILIKE :kw OR supplier_name ILIKE :kw OR title ILIKE :kw)")
+            conditions.append("(pc.change_no ILIKE :kw OR pc.supplier_name ILIKE :kw OR pc.title ILIKE :kw)")
             params["kw"] = f"%{keyword}%"
         if status:
-            conditions.append("approval_status = :st")
+            conditions.append("pc.approval_status = :st")
             params["st"] = status
         if date_start:
-            conditions.append("change_date >= :ds")
+            conditions.append("pc.change_date >= :ds")
             params["ds"] = date_start
         if date_end:
-            conditions.append("change_date <= :de")
+            conditions.append("pc.change_date <= :de")
             params["de"] = date_end
         if applicant:
-            conditions.append("applicant = :ap")
+            conditions.append("pc.applicant = :ap")
             params["ap"] = applicant
 
         where = " AND ".join(conditions)
-        total_row = await self.db.execute(text(f"SELECT COUNT(*) FROM purchase_price_change WHERE {where}"), params)
+        total_row = await self.db.execute(text(f"SELECT COUNT(*) FROM purchase_price_change pc WHERE {where}"), params)
         total = total_row.scalar() or 0
 
         offset = (page - 1) * page_size
         rows = await self.db.execute(
-            text(f"SELECT * FROM purchase_price_change WHERE {where} ORDER BY created_at DESC LIMIT :lim OFFSET :off"),
+            text(f"""
+                SELECT pc.*, COALESCE(u.display_name, pc.applicant) AS applicant_display
+                FROM purchase_price_change pc
+                LEFT JOIN sys_user u ON u.username = pc.applicant OR CAST(u.id AS VARCHAR) = pc.applicant
+                WHERE {where}
+                ORDER BY pc.created_at DESC LIMIT :lim OFFSET :off
+            """),
             {**params, "lim": page_size, "off": offset},
         )
-        items = [dict(r._mapping) for r in rows]
-        for item in items:
-            if isinstance(item.get("change_date"), date):
-                item["change_date"] = item["change_date"].isoformat()
-            if isinstance(item.get("created_at"), datetime):
-                item["created_at"] = item["created_at"].isoformat()
-            if isinstance(item.get("updated_at"), datetime):
-                item["updated_at"] = item["updated_at"].isoformat()
-            if isinstance(item.get("attachments"), str):
-                item["attachments"] = json.loads(item["attachments"] or "[]")
+        items = []
+        for r in rows:
+            d = dict(r._mapping)
+            if isinstance(d.get("change_date"), date):
+                d["change_date"] = d["change_date"].isoformat()
+            if isinstance(d.get("created_at"), datetime):
+                d["created_at"] = d["created_at"].isoformat()
+            if isinstance(d.get("updated_at"), datetime):
+                d["updated_at"] = d["updated_at"].isoformat()
+            if isinstance(d.get("attachments"), str):
+                d["attachments"] = json.loads(d["attachments"] or "[]")
+            items.append(d)
         return items, total
 
     async def get_price_change(self, change_id: int) -> Optional[dict]:
-        row = await self.db.execute(text("SELECT * FROM purchase_price_change WHERE id = :id"), {"id": change_id})
+        row = await self.db.execute(text("""
+            SELECT pc.*, COALESCE(u.display_name, pc.applicant) AS applicant_display
+            FROM purchase_price_change pc
+            LEFT JOIN sys_user u ON u.username = pc.applicant OR CAST(u.id AS VARCHAR) = pc.applicant
+            WHERE pc.id = :id
+        """), {"id": change_id})
         r = row.fetchone()
         if not r:
             return None
@@ -94,8 +107,8 @@ class PriceChangeService:
         change_no = await self._gen_change_no()
         current = datetime.now()
         await self.db.execute(
-            text("""INSERT INTO purchase_price_change (change_no, title, change_type, price_direction, supplier_code, supplier_name, phone, fax, contact_person, address, customer, customer_phone, customer_fax, purchase_contact, tax_rate, payment_method, settlement_method, change_date, attachments, remark, signature_opinion, approval_status, approval_level, version, applicant, submitted_at)
-                 VALUES (:no, :title, :ct, :pd, :sc, :sn, :ph, :fx, :cp, :ad, :cu, :cph, :cfx, :pc, :tr, :pm, :sm, :cd, :att, :rm, :so, :st, :lv, :v, :ap, :sub) RETURNING id"""),
+            text("""INSERT INTO purchase_price_change (change_no, title, change_type, price_direction, supplier_code, supplier_name, phone, fax, contact_person, address, customer, customer_phone, customer_fax, purchase_contact, tax_rate, payment_method, settlement_method, change_date, attachments, remark, signature_opinion, approval_status, approval_level, version, applicant, submitted_at, erp_price_snapshot)
+                 VALUES (:no, :title, :ct, :pd, :sc, :sn, :ph, :fx, :cp, :ad, :cu, :cph, :cfx, :pc, :tr, :pm, :sm, :cd, :att, :rm, :so, :st, :lv, :v, :ap, :sub, :eps) RETURNING id"""),
             {
                 "no": change_no, "title": data.get("title"), "ct": data.get("change_type", "price_change"),
                 "pd": data.get("price_direction"), "sc": data.get("supplier_code"), "sn": data.get("supplier_name"),
@@ -108,6 +121,7 @@ class PriceChangeService:
                 "rm": data.get("remark"), "so": data.get("signature_opinion"),
                 "st": "pending" if submit else "draft", "lv": 1, "v": 1,
                 "ap": applicant, "sub": current if submit else None,
+                "eps": json.dumps(data.get("erp_price_snapshot") or []),
             },
         )
         row = await self.db.execute(text("SELECT id FROM purchase_price_change WHERE change_no = :no"), {"no": change_no})
@@ -142,15 +156,17 @@ class PriceChangeService:
             text("""UPDATE purchase_price_change SET title=:title, supplier_code=:sc, supplier_name=:sn,
                  phone=:ph, fax=:fx, contact_person=:cp, address=:ad, customer=:cu, customer_phone=:cph,
                  customer_fax=:cfx, purchase_contact=:pc, tax_rate=:tr, payment_method=:pm,
-                 settlement_method=:sm, change_date=:cd, attachments=:att, remark=:rm, price_direction=:pd,
-                 updated_at=:now WHERE id=:cid"""),
+                  settlement_method=:sm, change_date=:cd, attachments=:att, remark=:rm, price_direction=:pd,
+                  erp_price_snapshot=:eps, updated_at=:now WHERE id=:cid"""),
             {"title": data.get("title"), "sc": data.get("supplier_code"), "sn": data.get("supplier_name"),
              "ph": data.get("phone"), "fx": data.get("fax"), "cp": data.get("contact_person"),
              "ad": data.get("address"), "cu": data.get("customer"), "cph": data.get("customer_phone"),
              "cfx": data.get("customer_fax"), "pc": data.get("purchase_contact"),
              "tr": data.get("tax_rate"), "pm": data.get("payment_method"), "sm": data.get("settlement_method"),
              "cd": data.get("change_date"), "att": json.dumps(data.get("attachments") or []),
-             "rm": data.get("remark"), "pd": data.get("price_direction"), "now": datetime.now(), "cid": change_id},
+             "rm": data.get("remark"), "pd": data.get("price_direction"),
+             "eps": json.dumps(data.get("erp_price_snapshot") or []),
+             "now": datetime.now(), "cid": change_id},
         )
 
         await self.db.execute(text("DELETE FROM purchase_price_change_item WHERE change_id=:cid"), {"cid": change_id})
@@ -181,42 +197,202 @@ class PriceChangeService:
         await self._add_approval_log(change_id, None, "submit", applicant, "提交审批")
         await self._init_approval_snapshot(change_id)
         await self._run_ai_analysis(change_id)  # 异步触发 AI 分析
+        # 通知 L1 审批人
+        await self._notify_approvers_of_level(change_id, 1)
         return await self.get_price_change(change_id)
 
-    async def approve(self, change_id: int, approver: str, comment=""):
+    def _check_node_permission(self, node: dict, approver: str, approver_role: str) -> tuple[bool, str]:
+        """校验当前用户是否有权操作该审批节点。返回 (ok, message)。
+        优先校验 approvers 列表（动态部门经理），其次校验 role。
+        admin 绕过所有校验。
+        """
+        if approver_role == "admin":
+            return True, ""
+        approvers = node.get("approvers")
+        if approvers is not None:
+            # 动态节点：approvers 是 [{username, user_id}] 列表，当前用户匹配任一字段即可
+            if approvers:
+                matched = any(
+                    approver == a.get("username") or approver == a.get("user_id")
+                    for a in approvers
+                )
+                if matched:
+                    return True, ""
+                names = ", ".join(a.get("username", "?") for a in approvers)
+                return False, f"当前级别 [{node.get('label')}] 需 {names} 审批，您无权操作"
+            return False, f"当前级别 [{node.get('label')}] 部门经理解析失败（申请人可能未关联员工），请联系管理员"
+        # 固定角色节点
+        required_role = node.get("role")
+        if required_role and approver_role != required_role:
+            return False, f"当前级别 [{node.get('label')}] 需角色 {required_role} 审批，您的角色（{approver_role or '未知'}）无权操作"
+        return True, ""
+
+    async def _get_node_approver_usernames(self, node: dict) -> set[str]:
+        """解析节点的具体审批人 username 集合，用于"同人重复跳过"判断。
+        动态节点从 approvers 字段取（同时含 username 和 user_id 以兼容两种标识）；
+        固定角色节点查 sys_role+sys_user（同样含两者）。
+        """
+        approvers = node.get("approvers")
+        if approvers is not None:
+            result = set()
+            for a in approvers:
+                if a.get("username"):
+                    result.add(a["username"])
+                if a.get("user_id"):
+                    result.add(str(a["user_id"]))
+            return result
+        role = node.get("role")
+        if not role or role == "__dept_manager__":
+            return set()
+        rows = await self.db.execute(text("""
+            SELECT u.username, u.id FROM sys_user u
+            JOIN sys_role r ON u.role_id = r.id
+            WHERE r.role_code = :rc AND u.is_active = TRUE
+        """), {"rc": role})
+        result = set()
+        for r in rows:
+            if r[0]:
+                result.add(r[0])
+            result.add(str(r[1]))
+        return result
+
+    async def _earlier_approvers(self, change_id: int, before_level: int) -> set[str]:
+        """查询 change_id 在 before_level 之前（不含）已经审批过的人集合。
+        approval_log.approver 存的是 username，这里 JOIN sys_user 同时返回 user_id，
+        以便和 _get_node_approver_usernames（含 username+user_id）做 issubset 比对。
+        """
+        rows = await self.db.execute(text("""
+            SELECT DISTINCT l.approver, u.id::text
+            FROM purchase_price_change_approval_log l
+            LEFT JOIN sys_user u ON u.username = l.approver
+            WHERE l.change_id=:cid AND l.approval_level<:lv AND l.action IN ('approve', 'auto_skip')
+        """), {"cid": change_id, "lv": before_level})
+        result = set()
+        for r in rows:
+            if r[0]:
+                result.add(str(r[0]))
+            if r[1]:
+                result.add(str(r[1]))
+        return result
+
+    async def approve(self, change_id: int, approver: str, comment="", *, approver_role: str = "", expected_version: int = None):
         record = await self.get_price_change(change_id)
         if not record or record.get("approval_status") != "pending":
             return {"success": False, "message": "状态不正确"}
+
+        # 乐观锁：客户端传入 expected_version，必须与当前 version 匹配
+        current_version = record.get("version", 1)
+        if expected_version is not None and int(expected_version) != int(current_version):
+            return {"success": False, "message": "数据已被他人更新，请刷新后重试"}
 
         snap = record.get("approval_snapshot") or []
         current_level = record.get("approval_level", 1)
-        next_node = next((n for n in snap if n.get("seq") == current_level + 1), None)
 
+        # 审批链空 → 拒绝（堵"未配置即通过"漏洞）
+        if not snap:
+            return {"success": False, "message": "审批链未配置，请联系管理员在审批配置中设置审批节点"}
+        current_node = next((n for n in snap if n.get("seq") == current_level), None)
+        if not current_node:
+            return {"success": False, "message": f"当前审批级别 {current_level} 在审批链中不存在"}
+
+        ok, msg = self._check_node_permission(current_node, approver, approver_role)
+        if not ok:
+            return {"success": False, "message": msg}
+
+        # 通过当前节点
         await self._add_approval_log(change_id, current_level, "approve", approver, comment)
 
-        if next_node:
-            await self.db.execute(text("UPDATE purchase_price_change SET approval_level=:lv WHERE id=:cid"), {"lv": current_level + 1, "cid": change_id})
-            return {"success": True, "level": current_level, "finished": False}
-        else:
-            await self.db.execute(
-                text("UPDATE purchase_price_change SET approval_status='approved', approved_by=:ap, approved_at=:now WHERE id=:cid"),
-                {"ap": approver, "now": datetime.now(), "cid": change_id},
-            )
-            return {"success": True, "level": current_level, "finished": True}
+        # 推进到下一节点：若下一节点的审批人包含当前审批人，或下一节点所有审批人都已在更早节点审过，自动跳过
+        # 循环处理连续多个节点都需要跳过的情况
+        next_level = current_level + 1
+        skipped_levels = []
+        while True:
+            next_node = next((n for n in snap if n.get("seq") == next_level), None)
+            if not next_node:
+                # 没有后续节点（含全部被跳过的情况）→ 归档
+                result = await self.db.execute(
+                    text("UPDATE purchase_price_change SET approval_status='approved', approved_by=:ap, approved_at=:now, version=version+1 WHERE id=:cid AND version=:v"),
+                    {"ap": approver, "now": datetime.now(), "cid": change_id, "v": current_version},
+                )
+                if result.rowcount == 0:
+                    return {"success": False, "message": "数据已被他人更新，请刷新后重试"}
+                msg_extra = f"（自动跳过 L{','.join(map(str, skipped_levels))} 同人节点）" if skipped_levels else ""
+                # 全部归档 → 通知申请人
+                await self._notify_applicant(
+                    change_id,
+                    "[调价单] 审批通过",
+                    f"您的调价单 {record.get('change_no', '')} 已全部审批通过，已归档。"
+                )
+                return {"success": True, "level": current_level, "finished": True, "skipped": skipped_levels, "message_extra": msg_extra}
+            next_approvers = await self._get_node_approver_usernames(next_node)
+            # 跳过条件 1：当前审批人也在下一节点的审批人集合里（连续同人）
+            skip = approver in next_approvers
+            # 跳过条件 2：下一节点的所有审批人都已在更早节点审过（跨级同人，如 L1 和 L3 同人但 L2 不同人）
+            if not skip and next_approvers:
+                earlier = await self._earlier_approvers(change_id, next_level)
+                # 把刚审完的当前 approver 也算进去
+                earlier = earlier | {approver}
+                if next_approvers.issubset(earlier):
+                    skip = True
+            if skip:
+                await self._add_approval_log(change_id, next_level, "auto_skip", approver, "自动通过（审批人已在更早节点审过，避免重复审批）")
+                skipped_levels.append(next_level)
+                next_level += 1
+                continue
+            break
 
-    async def reject(self, change_id: int, approver: str, comment=""):
+        # 推进到下一个需要别人审的节点
+        result = await self.db.execute(
+            text("UPDATE purchase_price_change SET approval_level=:lv, version=version+1 WHERE id=:cid AND version=:v"),
+            {"lv": next_level, "cid": change_id, "v": current_version},
+        )
+        if result.rowcount == 0:
+            return {"success": False, "message": "数据已被他人更新，请刷新后重试"}
+        msg_extra = f"（自动跳过 L{','.join(map(str, skipped_levels))} 同人节点）" if skipped_levels else ""
+        # 推进到下一节点 → 通知下一节点审批人
+        await self._notify_approvers_of_level(change_id, next_level)
+        return {"success": True, "level": current_level, "finished": False, "skipped": skipped_levels, "message_extra": msg_extra}
+
+    async def reject(self, change_id: int, approver: str, comment="", *, approver_role: str = "", expected_version: int = None):
         record = await self.get_price_change(change_id)
         if not record or record.get("approval_status") != "pending":
             return {"success": False, "message": "状态不正确"}
-        await self._add_approval_log(change_id, record.get("approval_level"), "reject", approver, comment)
-        await self.db.execute(text("UPDATE purchase_price_change SET approval_status='rejected' WHERE id=:cid"), {"cid": change_id})
+
+        # 乐观锁
+        current_version = record.get("version", 1)
+        if expected_version is not None and int(expected_version) != int(current_version):
+            return {"success": False, "message": "数据已被他人更新，请刷新后重试"}
+
+        snap = record.get("approval_snapshot") or []
+        current_level = record.get("approval_level", 1)
+        if snap:
+            current_node = next((n for n in snap if n.get("seq") == current_level), None)
+            if current_node:
+                ok, msg = self._check_node_permission(current_node, approver, approver_role)
+                if not ok:
+                    return {"success": False, "message": msg}
+
+        await self._add_approval_log(change_id, current_level, "reject", approver, comment)
+        result = await self.db.execute(
+            text("UPDATE purchase_price_change SET approval_status='rejected', version=version+1 WHERE id=:cid AND version=:v"),
+            {"cid": change_id, "v": current_version},
+        )
+        if result.rowcount == 0:
+            return {"success": False, "message": "数据已被他人更新，请刷新后重试"}
+        # 通知申请人：被驳回
+        await self._notify_applicant(
+            change_id,
+            "[调价单] 审批被驳回",
+            f"您的调价单 {record.get('change_no', '')} 被 {approver} 驳回。意见：{comment or '无'}。请修改后重新提交。"
+        )
         return {"success": True}
 
-    async def recall(self, change_id: int):
+    async def recall(self, change_id: int, applicant: str = ""):
         record = await self.get_price_change(change_id)
         if not record or record.get("approval_status") != "pending":
             return False
-        await self.db.execute(text("UPDATE purchase_price_change SET approval_status='recalled' WHERE id=:cid"), {"cid": change_id})
+        await self.db.execute(text("UPDATE purchase_price_change SET approval_status='recalled', version=version+1 WHERE id=:cid"), {"cid": change_id})
+        await self._add_approval_log(change_id, record.get("approval_level"), "recall", applicant or record.get("applicant", ""), "申请人撤回")
         return True
 
     async def delete(self, change_id: int):
@@ -228,7 +404,8 @@ class PriceChangeService:
         await self.db.execute(text("DELETE FROM purchase_price_change WHERE id = :cid"), {"cid": change_id})
         return True
 
-    async def pending_approvals(self):
+    async def pending_approvals(self, *, approver_username: str = "", approver_role: str = ""):
+        """待审批列表。传入 approver_username/role 时只返回当前用户有权审批的（admin 看全部）。"""
         rows = await self.db.execute(text("SELECT * FROM purchase_price_change WHERE approval_status='pending' ORDER BY submitted_at DESC NULLS LAST"))
         items = []
         for r in rows:
@@ -244,6 +421,18 @@ class PriceChangeService:
                     pass
             elif d.get("approval_snapshot") is None:
                 d["approval_snapshot"] = []
+
+            # 权限过滤：非 admin 只返回当前级别归自己审的单子
+            if approver_role != "admin":
+                snap = d.get("approval_snapshot") or []
+                current_level = d.get("approval_level", 1)
+                current_node = next((n for n in snap if n.get("seq") == current_level), None)
+                if not current_node:
+                    continue  # 审批链异常的单子不展示
+                ok, _ = self._check_node_permission(current_node, approver_username, approver_role)
+                if not ok:
+                    continue  # 当前用户无权审批这一级 → 不显示
+
             # 附加最新 AI 分析状态/摘要
             ai_row = await self.db.execute(
                 text("""SELECT ai_status, ai_risk_level, ai_conclusion, ai_error_msg, ai_analyzed_at
@@ -281,16 +470,33 @@ class PriceChangeService:
         seq = int(max_no.split("-")[-1]) + 1
         return f"PC{today}-{seq:03d}"
 
+    async def _resolve_dept_manager(self, applicant: str) -> list[dict]:
+        """动态解析申请人的部门经理（直接上级）。applicant 可能是 user_id 或 username。
+        返回 [{username, user_id}] 列表（通常 1 个），解析失败返回空列表。
+        """
+        if not applicant:
+            return []
+        rows = await self.db.execute(text("""
+            SELECT mgr_user.username, mgr_user.id
+            FROM sys_user u
+            JOIN scm_employee e ON e.emp_code = u.emp_code
+            JOIN scm_employee mgr ON mgr.oa_user_id = e.manager_oa_user_id AND mgr.status = 1
+            JOIN sys_user mgr_user ON mgr_user.emp_code = mgr.emp_code AND mgr_user.is_active = TRUE
+            WHERE (u.id::text = :a OR u.username = :a)
+        """), {"a": applicant})
+        return [{"username": r[0], "user_id": str(r[1])} for r in rows if r[0]]
+
     async def _init_approval_snapshot(self, change_id: int, biz_type: str = "price_change"):
-        # 获取单据的关键字段用于条件匹配
+        # 获取单据的关键字段 + 申请人（用于动态部门经理解析）
         r = await self.db.execute(
-            text("SELECT price_direction FROM purchase_price_change WHERE id=:cid"),
+            text("SELECT price_direction, applicant FROM purchase_price_change WHERE id=:cid"),
             {"cid": change_id},
         )
         rec = r.fetchone()
         if not rec:
             return
         price_direction = rec[0]
+        applicant = rec[1]
 
         r2 = await self.db.execute(
             text("SELECT nodes FROM approval_config WHERE biz_type=:bt AND is_active=TRUE"),
@@ -300,6 +506,10 @@ class PriceChangeService:
         if not row:
             return
         all_nodes = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or [])
+
+        # 预解析动态部门经理（同一申请人只查一次）
+        cached_dept_mgrs: list[str] | None = None
+
         snapshot = []
         for node in all_nodes:
             cond = node.get("condition")
@@ -307,7 +517,19 @@ class PriceChangeService:
                 field_val = price_direction  # 当前单据只有 price_direction 字段可匹配
                 if field_val not in cond.get("value", []):
                     continue
-            snapshot.append({"seq": node.get("seq"), "label": node.get("label"), "role": node.get("role")})
+            node_role = node.get("role")
+            snap_node = {"seq": node.get("seq"), "label": node.get("label"), "role": node_role}
+            # 动态部门经理：解析申请人直接上级，冻结进 snapshot
+            if node_role == "__dept_manager__":
+                if cached_dept_mgrs is None:
+                    cached_dept_mgrs = await self._resolve_dept_manager(applicant)
+                snap_node["approvers"] = cached_dept_mgrs
+                snap_node["resolver"] = "dept_manager"
+                if cached_dept_mgrs:
+                    logger.info(f"部门经理解析 change_id={change_id} applicant={applicant} → {[a['username'] for a in cached_dept_mgrs]}")
+                else:
+                    logger.warning(f"部门经理解析失败 change_id={change_id} applicant={applicant}（无 emp_code 或上级无账号）")
+            snapshot.append(snap_node)
         await self.db.execute(
             text("UPDATE purchase_price_change SET approval_snapshot=:snap WHERE id=:cid"),
             {"snap": json.dumps(snapshot), "cid": change_id},
@@ -382,6 +604,20 @@ class PriceChangeService:
                 )
             lines.append("---历史价格走势---")
             lines.append(history_text)
+            # 附加 ERP 供应商比价数据
+            erp_snap = record.get("erp_price_snapshot")
+            if erp_snap:
+                if isinstance(erp_snap, str):
+                    try: erp_snap = json.loads(erp_snap)
+                    except Exception: erp_snap = None
+                if erp_snap and isinstance(erp_snap, list) and len(erp_snap) > 0:
+                    lines.append("---ERP供应商比价数据(提交时快照)---")
+                    for ep in erp_snap:
+                        lines.append(
+                            f"  供应商: {ep.get('supplier_name')} | "
+                            f"单价: {ep.get('price')} | "
+                            f"报价日期: {ep.get('start_date')}"
+                        )
             prompt = "\n".join(lines)
 
             class PriceAnalysis(BaseModel):
@@ -458,3 +694,191 @@ class PriceChangeService:
                 d["created_at"] = d["created_at"].isoformat()
             items.append(d)
         return items
+
+    # ==================== 通知 ====================
+
+    async def _notify_user(self, user_id: int, title: str, content: str, *, ref_type: str = "price_change", ref_id: int = None, priority: str = "normal"):
+        """给指定用户推一条通知（顶栏铃铛可见）"""
+        try:
+            await self.db.execute(text("""
+                INSERT INTO notification (user_id, type, title, content, ref_type, ref_id, priority, is_read, created_at)
+                VALUES (:uid, 'price_change', :title, :content, :rt, :rid, :p, FALSE, NOW())
+            """), {"uid": user_id, "title": title, "content": content, "rt": ref_type, "rid": ref_id, "p": priority})
+        except Exception as e:
+            logger.warning(f"通知推送失败 user_id={user_id} title={title}: {e}")
+
+    async def _notify_approvers_of_level(self, change_id: int, level: int, *, title_prefix: str = "待您审批"):
+        """通知某个级别的审批人。动态节点取 approvers.user_id；固定角色节点查库。"""
+        rec = await self.get_price_change(change_id)
+        if not rec:
+            return
+        snap = rec.get("approval_snapshot") or []
+        node = next((n for n in snap if n.get("seq") == level), None)
+        if not node:
+            return
+
+        # 解析目标 user_id 列表
+        target_uids: list[int] = []
+        approvers = node.get("approvers")
+        if isinstance(approvers, list):
+            target_uids = [int(a["user_id"]) for a in approvers if a.get("user_id")]
+        else:
+            role = node.get("role")
+            if role and role != "__dept_manager__":
+                rows = await self.db.execute(text("""
+                    SELECT u.id FROM sys_user u
+                    JOIN sys_role r ON u.role_id = r.id
+                    WHERE r.role_code = :rc AND u.is_active = TRUE
+                """), {"rc": role})
+                target_uids = [r[0] for r in rows if r[0]]
+
+        if not target_uids:
+            return
+
+        no = rec.get("change_no", "")
+        supplier = rec.get("supplier_name", "")
+        applicant = rec.get("applicant", "")
+        label = node.get("label", f"L{level}")
+        title = f"[调价单] {title_prefix} - {label}"
+        content = f"调价单 {no}（供应商：{supplier}，申请人：{applicant}）需要您{label}。"
+        for uid in target_uids:
+            await self._notify_user(uid, title, content, ref_id=change_id, priority="high")
+
+    async def _notify_applicant(self, change_id: int, title: str, content: str):
+        """通知申请人"""
+        rec = await self.get_price_change(change_id)
+        if not rec:
+            return
+        applicant = rec.get("applicant")
+        if not applicant:
+            return
+        # applicant 可能是 user_id 或 username，查库拿 id
+        row = await self.db.execute(text("SELECT id FROM sys_user WHERE id::text = :a OR username = :a LIMIT 1"), {"a": str(applicant)})
+        r = row.fetchone()
+        if r:
+            await self._notify_user(r[0], title, content, ref_id=change_id, priority="high")
+
+    # ==================== 我已审批 ====================
+
+    async def my_approved(self, approver: str, *, approver_role: str = "", page: int = 1, page_size: int = 20):
+        """我已审批列表：approval_log 里 approver=当前用户的单子。
+        approver 在日志里存的是 username（get_current_user_payload 已转换）。
+        """
+        # 先用子查询找到当前用户审过的所有 change_id（去重），按最新操作时间倒序
+        offset = (page - 1) * page_size
+        # 同时支持 username 和 user_id 匹配（兼容历史数据）
+        like_match = f"%{approver}%"
+        count_sql = text("""
+            SELECT COUNT(DISTINCT change_id) FROM purchase_price_change_approval_log
+            WHERE approver = :a OR approver = :a_id
+        """)
+        # 尝试把 approver 转成 id（如果它是 username）
+        id_row = await self.db.execute(text("SELECT id FROM sys_user WHERE username = :a LIMIT 1"), {"a": approver})
+        approver_id = id_row.scalar()
+
+        params = {"a": approver, "a_id": str(approver_id) if approver_id else "__none__"}
+        total = (await self.db.execute(count_sql, params)).scalar() or 0
+
+        rows = await self.db.execute(text("""
+            SELECT pc.*,
+                   (SELECT action FROM purchase_price_change_approval_log
+                    WHERE change_id = pc.id AND (approver = :a OR approver = :a_id)
+                    ORDER BY operated_at DESC LIMIT 1) AS my_last_action,
+                   (SELECT operated_at FROM purchase_price_change_approval_log
+                    WHERE change_id = pc.id AND (approver = :a OR approver = :a_id)
+                    ORDER BY operated_at DESC LIMIT 1) AS my_last_action_at
+            FROM purchase_price_change pc
+            WHERE pc.id IN (
+                SELECT DISTINCT change_id FROM purchase_price_change_approval_log
+                WHERE approver = :a OR approver = :a_id
+            )
+            ORDER BY my_last_action_at DESC NULLS LAST
+            LIMIT :lim OFFSET :off
+        """), {**params, "lim": page_size, "off": offset})
+
+        items = []
+        for r in rows:
+            d = dict(r._mapping)
+            if isinstance(d.get("change_date"), date):
+                d["change_date"] = d["change_date"].isoformat()
+            for k in ("created_at", "submitted_at", "approved_at", "my_last_action_at"):
+                if isinstance(d.get(k), datetime):
+                    d[k] = d[k].isoformat()
+            items.append(d)
+        return items, total
+
+    # ==================== 反审核（撤回审批）====================
+
+    async def revoke_approval(self, change_id: int, revoker: str, *, revoker_role: str = "") -> dict:
+        """撤回自己的审批（反审核）。
+        规则（大厂标准）：
+        1. 单子状态必须是 pending（已归档/驳回的不能撤）
+        2. 当前用户必须是最后一条 approve/auto_skip log 的 approver
+        3. 撤回后，approval_level 回退一级，最后那条 log 改为 revoked
+        4. 如果最后一条是 auto_skip（同人跳过），连跳过一起撤回，回退到真正的手动审
+        """
+        rec = await self.get_price_change(change_id)
+        if not rec:
+            return {"success": False, "message": "调价单不存在"}
+        if rec.get("approval_status") != "pending":
+            return {"success": False, "message": "仅审批中状态可撤回审批"}
+
+        current_level = rec.get("approval_level", 1)
+        if current_level <= 1:
+            return {"success": False, "message": "当前在第1级，没有可撤回的审批"}
+
+        # 查最后一条 approve/auto_skip 日志（即把单子推到当前级别的那次操作）
+        log_row = await self.db.execute(text("""
+            SELECT id, approval_level, approver, action FROM purchase_price_change_approval_log
+            WHERE change_id = :cid AND action IN ('approve', 'auto_skip')
+            ORDER BY operated_at DESC LIMIT 1
+        """), {"cid": change_id})
+        last_log = log_row.fetchone()
+        if not last_log:
+            return {"success": False, "message": "没有可撤回的审批记录"}
+
+        log_id, log_level, log_approver, log_action = last_log
+        # admin 可撤回任何人的；非 admin 只能撤回自己的
+        if revoker_role != "admin" and log_approver != revoker:
+            return {"success": False, "message": "只能撤回自己刚做出的审批"}
+
+        # 校验：必须撤回的是"导致当前级别"的那次操作
+        # approve L(N-1) → 推进到 L(N)，所以 last_log.approval_level 应该是 current_level - 1
+        # 但 auto_skip 的 level 可能就是当前级别本身（被跳到的级别）
+        # 简单规则：last_log 的 level 必须 >= current_level - 1
+        if log_level < current_level - 1:
+            return {"success": False, "message": "审批已被后续操作覆盖，无法撤回"}
+
+        # 把这条 log 标记为 revoked
+        await self.db.execute(text("""
+            UPDATE purchase_price_change_approval_log
+            SET action = 'revoked', comment = CONCAT(COALESCE(comment, ''), ' | 已被撤回')
+            WHERE id = :lid
+        """), {"lid": log_id})
+
+        # 找到撤回后应该回到的级别：连续把所有 auto_skip 也一起撤
+        # 简化：回退到 log_level（即这次操作的源级别）
+        rollback_level = log_level if log_action == "approve" else log_level
+        # 如果 log_level 是 0（提交），回退到 1
+        if rollback_level < 1:
+            rollback_level = 1
+
+        result = await self.db.execute(text("""
+            UPDATE purchase_price_change
+            SET approval_level = :lv, version = version + 1
+            WHERE id = :cid AND approval_status = 'pending'
+        """), {"lv": rollback_level, "cid": change_id})
+        if result.rowcount == 0:
+            return {"success": False, "message": "状态已变化，请刷新后重试"}
+
+        logger.info(f"反审核 change_id={change_id} revoker={revoker} level {current_level} → {rollback_level}")
+
+        # 通知申请人 + 新的当前级别审批人
+        await self._notify_applicant(
+            change_id,
+            "[调价单] 审批被撤回",
+            f"您的调价单 {rec.get('change_no', '')} 被 {revoker} 撤回了审批，已回退到第{rollback_level}级重新审批。"
+        )
+        await self._notify_approvers_of_level(change_id, rollback_level, title_prefix="重新待您审批")
+
+        return {"success": True, "rollback_level": rollback_level}

@@ -88,21 +88,32 @@ class UpphCalculationService:
     ) -> Tuple[Optional[float], List[ProductProcessCapacity]]:
         total_upph = 0.0
         used_capacities: List[ProductProcessCapacity] = []
-        seen_lean_main_ids: set[str] = set()
+
+        lean_gjje_total = 0.0
+        lean_hour_price: Optional[float] = None
+        lean_used: List[ProductProcessCapacity] = []
 
         for capacity in capacities:
             metadata = parse_capacity_metadata(capacity.remark)
             if not metadata.get("is_schedulable", True):
                 continue
+
             if metadata.get("oa_workshop_name") == LEAN_WORKSHOP_NAME:
-                lean_main_id = metadata.get("oa_main_id")
-                if lean_main_id:
-                    if lean_main_id in seen_lean_main_ids:
-                        continue
-                    seen_lean_main_ids.add(lean_main_id)
-            if capacity.upph and float(capacity.upph) > 0:
-                total_upph += float(capacity.upph)
-                used_capacities.append(capacity)
+                gjje_value = metadata.get("gjje")
+                if gjje_value and float(gjje_value) > 0:
+                    lean_gjje_total += float(gjje_value)
+                    lean_used.append(capacity)
+                hour_price = metadata.get("hour_price")
+                if hour_price and lean_hour_price is None:
+                    lean_hour_price = float(hour_price)
+            else:
+                if capacity.upph and float(capacity.upph) > 0:
+                    total_upph += float(capacity.upph)
+                    used_capacities.append(capacity)
+
+        if lean_gjje_total > 0 and lean_hour_price and lean_hour_price > 0:
+            total_upph += round(lean_hour_price / lean_gjje_total, 2)
+            used_capacities.extend(lean_used)
 
         return (total_upph if total_upph > 0 else None, used_capacities)
 

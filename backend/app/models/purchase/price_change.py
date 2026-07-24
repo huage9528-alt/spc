@@ -35,6 +35,7 @@ class PurchasePriceChange(Base):
     change_date = Column(Date)
 
     attachments = Column(JSON, default=list)
+    erp_price_snapshot = Column(JSON, default=list)
 
     remark = Column(Text)
     signature_opinion = Column(Text)

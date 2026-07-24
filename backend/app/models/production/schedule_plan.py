@@ -23,6 +23,7 @@ class ProductionSchedulePlan(Base):
     priority = Column(String(32), nullable=False, default="normal")
     status = Column(String(32), nullable=False, default="planned", index=True)
     upph = Column(Numeric(15, 2), nullable=True, default=0, comment="排产时使用的UPPH")
+    manpower = Column(Integer, nullable=True, comment="排产时班组人数(每人每小时的产能 × 人数 × 工时 = 日产能)")
     daily_work_hours = Column(Numeric(5, 2), nullable=True, default=8, comment="每日工作小时数")
     plan_version = Column(Integer, nullable=False, default=1, comment="排产版本号")
     is_active = Column(Boolean, nullable=False, default=True, index=True, comment="当前生效版本")

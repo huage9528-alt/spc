@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,17 +28,21 @@ class ProductProcessCapacitySyncService:
         self.db = db
         self.erp_service = ERPSyncService(db)
 
-    async def sync_from_oa(self) -> dict[str, Any]:
+    async def sync_from_oa(self, *, incremental_since: Optional[datetime] = None) -> dict[str, Any]:
         sync_batch_no = f"OAUPPH{datetime.now():%Y%m%d%H%M%S}"
         sync_time = datetime.now()
+        is_incremental = incremental_since is not None
         stats = {
             "sync_batch_no": sync_batch_no,
+            "sync_mode": "incremental" if is_incremental else "full",
+            "incremental_since": incremental_since.isoformat() if incremental_since else None,
             "fetched": 0,
             "created": 0,
             "updated": 0,
             "reactivated": 0,
             "deactivated": 0,
             "skipped": 0,
+            "snapshots_refreshed": 0,
             "affected_schedule_plans_marked": 0,  # 新增：标记为待重排的计划数
         }
 
@@ -50,17 +54,48 @@ class ProductProcessCapacitySyncService:
             detail_columns = await self._load_table_columns("formtable_main_51_dt1")
             main_columns = await self._load_table_columns("formtable_main_51")
             department_columns = await self._load_table_columns(self.OA_DEPARTMENT_TABLE)
-            sql_text = self._build_sync_sql(detail_columns, main_columns, department_columns)
-            rows = await self.erp_service._execute_erp_sql(sql_text, {})
+            sql_text = self._build_sync_sql(
+                detail_columns, main_columns, department_columns,
+                incremental_since=incremental_since,
+            )
+            sql_params: dict[str, Any] = {}
+            if is_incremental:
+                sql_params["incremental_since"] = incremental_since.strftime("%Y-%m-%d %H:%M:%S")
+            rows = await self.erp_service._execute_erp_sql(sql_text, sql_params)
             stats["fetched"] = len(rows)
 
-            existing_result = await self.db.execute(select(ProductProcessCapacity))
-            existing_records = existing_result.scalars().all()
-            existing_by_oa_detail_id = {
-                record.oa_detail_id: record
-                for record in existing_records
-                if record.oa_detail_id
-            }
+            if is_incremental:
+                # 增量模式: 只查本次涉及到的工单对应的现有记录, 不能全表扫
+                touched_main_ids = {
+                    str(r.get("oa_main_id") or "").strip()
+                    for r in rows
+                    if self._normalize_text(r.get("oa_main_id"))
+                }
+                if touched_main_ids:
+                    existing_result = await self.db.execute(
+                        select(ProductProcessCapacity).where(
+                            ProductProcessCapacity.oa_detail_id.isnot(None)
+                        )
+                    )
+                    existing_records = [
+                        rec for rec in existing_result.scalars().all()
+                        if str(parse_capacity_metadata(rec.remark).get("oa_main_id") or "").strip() in touched_main_ids
+                    ]
+                else:
+                    existing_records = []
+                existing_by_oa_detail_id = {
+                    record.oa_detail_id: record
+                    for record in existing_records
+                    if record.oa_detail_id
+                }
+            else:
+                existing_result = await self.db.execute(select(ProductProcessCapacity))
+                existing_records = existing_result.scalars().all()
+                existing_by_oa_detail_id = {
+                    record.oa_detail_id: record
+                    for record in existing_records
+                    if record.oa_detail_id
+                }
 
             seen_oa_detail_ids: set[str] = set()
             # 记录有 UPPH 发生变化的产品编码和 BOM 编码
@@ -176,6 +211,12 @@ class ProductProcessCapacitySyncService:
                         record.remark = remark
                         self.db.add(record)
                         stats["updated"] += 1
+                        # 任何内容变更（含 upph、gjje、bom_code 等）都应该
+                        # 触发相关订单行快照刷新，统一在这里加入 changed 集合。
+                        if product_code:
+                            changed_product_codes.add(product_code)
+                        if bom_code:
+                            changed_bom_codes.add(bom_code)
                         if was_inactive:
                             stats["reactivated"] += 1
                     else:
@@ -186,25 +227,28 @@ class ProductProcessCapacitySyncService:
                 if oa_detail_id:
                     existing_by_oa_detail_id[oa_detail_id] = record
 
-            for record in existing_records:
-                if record.source != self.OA_SOURCE or not record.is_active:
-                    continue
-
-                if record.oa_detail_id:
-                    if record.oa_detail_id in seen_oa_detail_ids:
+            # 失效处理只在全量模式跑。增量模式没有拉全量数据，
+            # 不能根据"本次没拉到"就判定失效，否则会误删未变更的记录。
+            if not is_incremental:
+                for record in existing_records:
+                    if record.source != self.OA_SOURCE or not record.is_active:
                         continue
 
-                # 失效 UPPH 也视为有变化
-                if record.product_code:
-                    changed_product_codes.add(record.product_code)
-                if record.bom_code:
-                    changed_bom_codes.add(record.bom_code)
+                    if record.oa_detail_id:
+                        if record.oa_detail_id in seen_oa_detail_ids:
+                            continue
 
-                record.is_active = False
-                record.sync_batch_no = sync_batch_no
-                record.last_sync_time = sync_time
-                self.db.add(record)
-                stats["deactivated"] += 1
+                    # 失效 UPPH 也视为有变化
+                    if record.product_code:
+                        changed_product_codes.add(record.product_code)
+                    if record.bom_code:
+                        changed_bom_codes.add(record.bom_code)
+
+                    record.is_active = False
+                    record.sync_batch_no = sync_batch_no
+                    record.last_sync_time = sync_time
+                    self.db.add(record)
+                    stats["deactivated"] += 1
 
             # 标记相关的排产计划为待重排
             if changed_product_codes or changed_bom_codes:
@@ -214,6 +258,21 @@ class ProductProcessCapacitySyncService:
                 )
 
             await self.db.commit()
+
+            # 级联刷新受影响订单行的排产快照（填缺口2）：
+            # 同步把 product_process_capacity 改了之后，待办池的
+            # ProductionOrderScheduleSnapshot 不会自动更新，需要主动刷新
+            # 涉及的订单行才会反映最新 UPPH。
+            if changed_bom_codes or changed_product_codes:
+                try:
+                    stats["snapshots_refreshed"] = await self._refresh_affected_order_snapshots(
+                        changed_bom_codes,
+                    )
+                except Exception as refresh_err:
+                    # 快照刷新失败不影响同步结果（同步数据已 commit）
+                    stats["snapshots_refreshed"] = -1
+                    stats["snapshots_refresh_error"] = str(refresh_err)
+
             return stats
         except ERPConnectionError:
             await self.db.rollback()
@@ -251,6 +310,44 @@ class ProductProcessCapacitySyncService:
             affected += 1
         return affected
 
+    async def _refresh_affected_order_snapshots(self, bom_codes: set[str]) -> int:
+        """刷新 BOM 涉及的订单行的排产快照。
+
+        延迟导入 schedule_plans 里的快照刷新函数，避免循环依赖。
+        只要 UPPH 数据有变更（BOM 级），就重新拉取该 BOM 对应的待排订单行
+        并重建其快照，保证待办池/排产台账立刻反映最新 UPPH。
+        """
+        if not bom_codes:
+            return 0
+        # 去掉空串
+        bom_list = [b for b in bom_codes if b and b.strip()]
+        if not bom_list:
+            return 0
+
+        from app.models.order.sale_order import SaleOrderLine, SaleOrder
+        from app.api.v1.production.schedule_plans import (
+            _query_snapshot_source_rows_by_keys,
+            _refresh_order_schedule_snapshots,
+        )
+
+        # 找出这些 BOM 对应的未关闭订单行（用最新一行去重 order_no+line_no）
+        keys_result = await self.db.execute(
+            select(SaleOrderLine.order_no, SaleOrderLine.line_no)
+            .where(
+                SaleOrderLine.bom_no.in_(bom_list),
+                SaleOrderLine.status != "closed",
+            )
+        )
+        keys = {(r[0], r[1]) for r in keys_result.all() if r[0] and r[1]}
+        if not keys:
+            return 0
+
+        source_rows = await _query_snapshot_source_rows_by_keys(self.db, keys)
+        if not source_rows:
+            return 0
+        snap_map = await _refresh_order_schedule_snapshots(self.db, source_rows, force_refresh=True)
+        return len(snap_map)
+
     async def _load_table_columns(self, table_name: str) -> set[str]:
         sql_text = f"SELECT TOP 0 * FROM FWsv.ecology.dbo.{table_name}"
         loop = asyncio.get_event_loop()
@@ -269,6 +366,8 @@ class ProductProcessCapacitySyncService:
         detail_columns: set[str],
         main_columns: set[str],
         department_columns: set[str],
+        *,
+        incremental_since: Optional[datetime] = None,
     ) -> str:
         detail_id_expr = "CAST(b.id AS VARCHAR(64))" if "id" in detail_columns else "NULL"
         if "wldm" in main_columns:
@@ -288,8 +387,8 @@ class ProductProcessCapacitySyncService:
             raise ERPConnectionError("OA 主表缺少是否有效字段 sfyx")
         if "cj" not in main_columns:
             raise ERPConnectionError("OA 主表缺少车间字段 cj")
-        if "gjje" not in main_columns:
-            raise ERPConnectionError("OA 主表缺少工价金额字段 gjje")
+        if "dj" not in detail_columns:
+            raise ERPConnectionError("OA 明细表缺少单价字段 dj")
         if "id" not in department_columns:
             raise ERPConnectionError("OA 部门表缺少主键字段 id")
         if "departmentname" not in department_columns:
@@ -311,7 +410,8 @@ class ProductProcessCapacitySyncService:
 
         workshop_id_expr = "LTRIM(RTRIM(CAST(a.cj AS VARCHAR(64))))"
         workshop_name_expr = "LTRIM(RTRIM(CAST(d.departmentname AS NVARCHAR(255))))"
-        gjje_expr = "CAST(ISNULL(a.gjje, 0) AS DECIMAL(15, 2))"
+        gjje_expr = "CAST(ISNULL(b.dj, 0) AS DECIMAL(15, 4))"
+        incremental_filter = self._build_incremental_filter(main_columns, incremental_since)
 
         return f"""
         SELECT
@@ -341,7 +441,41 @@ class ProductProcessCapacitySyncService:
         WHERE a.sfyx = 0
           {request_filter}
           AND b.mainid IS NOT NULL
+          {incremental_filter}
         """
+
+    @staticmethod
+    def _build_incremental_filter(
+        main_columns: set[str],
+        incremental_since: Optional[datetime],
+    ) -> str:
+        """构造增量同步过滤条件。
+
+        OA 主表 modedatamodifydatetime 数据并不完整（约 64% 工单有值），
+        所以增量模式时用 OR 兜底：
+          - 有 modify 时间且在 since 之后，或
+          - modify 时间为空但创建时间在 since 之后（新单尚未触发过 modify）
+        全量模式（incremental_since=None）返回空串。
+        """
+        if incremental_since is None:
+            return ""
+        has_modify = "modedatamodifydatetime" in main_columns
+        has_create = "modedatacreatedate" in main_columns and "modedatacreatetime" in main_columns
+        conditions = []
+        if has_modify:
+            conditions.append(
+                "LTRIM(RTRIM(a.modedatamodifydatetime)) <> '' "
+                "AND a.modedatamodifydatetime >= :incremental_since"
+            )
+        if has_create:
+            # modedatacreatedate 是日期，modedatacreatetime 是时间，拼起来比较
+            conditions.append(
+                "(LTRIM(RTRIM(a.modedatacreatedate)) <> '' "
+                "AND CAST(a.modedatacreatedate + ' ' + ISNULL(a.modedatacreatetime, '00:00:00') AS DATETIME) >= :incremental_since)"
+            )
+        if not conditions:
+            return ""
+        return "AND (" + " OR ".join(conditions) + ")"
 
     def _normalize_row(self, row: dict[str, Any]) -> dict[str, Any] | None:
         process_type = self._normalize_text(row.get("process_type"))

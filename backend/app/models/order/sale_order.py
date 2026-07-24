@@ -83,6 +83,7 @@ class SaleOrderLine(Base):
     order_qty = Column(Numeric(15, 2))
     order_amount = Column(Numeric(15, 2), comment="金额")
     promised_date = Column(Date)
+    shipping_plan = Column(Date, comment="出货计划(冗余自 sale_order, 排产以此为准)")
     planned_start_date = Column(Date)
     batch_no = Column(String(128))
     bom_no = Column(String(64), comment="BOM编号")

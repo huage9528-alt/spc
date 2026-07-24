@@ -61,14 +61,14 @@ def calculate_formula_upph(
     hour_price: Any,
 ) -> float | None:
     gjje_value = _normalize_float(gjje)
-    manpower_value = _normalize_float(manpower)
     hour_price_value = _normalize_float(hour_price)
     if gjje_value is None or gjje_value <= 0:
         return None
-    if manpower_value is None or manpower_value <= 0:
-        return None
     if hour_price_value is None or hour_price_value <= 0:
         return None
+    manpower_value = _normalize_float(manpower)
+    if manpower_value is None or manpower_value <= 0:
+        manpower_value = 1.0
     return round((manpower_value * hour_price_value) / gjje_value, 2)
 
 

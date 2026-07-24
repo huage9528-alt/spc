@@ -152,6 +152,7 @@ class DatabaseInitializer:
                 "order_qty": "NUMERIC(15,2)",
                 "order_amount": "NUMERIC(15,2)",
                 "promised_date": "DATE",
+                "shipping_plan": "DATE",
                 "planned_start_date": "DATE",
                 "batch_no": "VARCHAR(128)",
                 "status": "VARCHAR(32) NOT NULL DEFAULT 'open'",
@@ -255,12 +256,16 @@ class DatabaseInitializer:
                 "frozen_locked_by": "VARCHAR(64)",
                 "frozen_locked_at": "TIMESTAMP",
                 "planned_qty": "NUMERIC(15,2)",
+                "manpower": "INTEGER",
             },
             "production_schedule_operation_log": {
                 "is_frozen_break": "BOOLEAN NOT NULL DEFAULT FALSE",
             },
             "approval_config": {
                 "biz_name": "VARCHAR(128)",
+            }
+            "purchase_price_change": {
+                "erp_price_snapshot": "JSONB",
             },
             "mrp_plan_order": {
                 "stock_qty": "NUMERIC(15,2)",

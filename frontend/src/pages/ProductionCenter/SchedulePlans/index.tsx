@@ -1287,20 +1287,6 @@ export default function SchedulePlans() {
     }
   }
 
-  const handleReschedule = async (id: number) => {
-    setLoading(true)
-    try {
-      await productionApi.reschedulePlan(id)
-      message.success('重排成功')
-      invalidatePageCaches()
-      await refreshAllViews()
-    } catch (e: any) {
-      message.error(e.message || '重排失败')
-    } finally {
-      setLoading(false)
-    }
-  }
-
   const getPlanRescheduleActionMeta = (row: any) => {
     const bucket = String(row?.schedule_bucket || '')
     if (bucket === 'assembly' || bucket === 'packaging') {
@@ -1514,7 +1500,7 @@ export default function SchedulePlans() {
     { title: 'BOM编码', dataIndex: 'bom_no', width: 160, ellipsis: true, render: (v: string) => renderCopyableText(v, 'BOM编码') },
     { title: '产品编码', dataIndex: 'product_code', width: 220, render: (v: string) => renderCopyableText(v, '产品编码') },
     { title: '数量', dataIndex: 'order_qty', width: 90, render: (v: number) => v ?? '-' },
-    { title: '交期', dataIndex: 'promised_date', width: 110, render: (v: string) => formatDate(v) },
+    { title: '出货计划', dataIndex: 'promised_date', width: 110, render: (v: string) => formatDate(v) },
     {
       title: '排产段',
       width: 110,
@@ -1586,7 +1572,7 @@ export default function SchedulePlans() {
     { title: '产品编码', dataIndex: 'product_code', width: 220, render: (v: string) => renderCopyableText(v, '产品编码') },
     { title: 'BOM编码', dataIndex: 'bom_no', width: 160, ellipsis: true, render: (v: string) => renderCopyableText(v, 'BOM编码') },
     { title: '数量', width: 90, render: (_: any, row: any) => row.order_qty ?? row.quantity ?? '-' },
-    { title: '交期', width: 110, render: (_: any, row: any) => formatDate(row.promised_date || row.source_promised_date) },
+    { title: '出货计划', width: 110, render: (_: any, row: any) => formatDate(row.promised_date || row.source_promised_date) },
     {
       title: '排产段',
       width: 110,
@@ -1669,6 +1655,23 @@ export default function SchedulePlans() {
       render: (_: any, row: any) => renderBucketTag(row),
     },
     { title: 'UPPH', dataIndex: 'upph', width: 90, render: (v: number) => v ? Number(v).toFixed(2) : '-' },
+    { title: '人数', dataIndex: 'manpower', width: 70, render: (v: number) => v ?? '-' },
+    {
+      title: '实际工时',
+      width: 90,
+      tooltip: '按 UPPH × 人数 算出的全员合计工时(不是日工时上限)',
+      render: (_: any, row: any) => {
+        const qty = Number(row.quantity || 0)
+        const upph = Number(row.upph || 0)
+        const mp = Number(row.manpower || 10)
+        if (qty > 0 && upph > 0 && mp > 0) {
+          const h = qty / (upph * mp)
+          const color = h < 8.5 ? '#52c41a' : (h <= 12 ? '#fa8c16' : '#ff4d4f')
+          return <Tag color={h < 8.5 ? 'green' : (h <= 12 ? 'orange' : 'red')}>{h.toFixed(2)}h</Tag>
+        }
+        return '-'
+      },
+    },
     {
       title: 'UPPH差异',
       width: 110,
@@ -1679,7 +1682,7 @@ export default function SchedulePlans() {
       width: 170,
       render: (_: any, row: any) => renderWorkhourSuggestionCell(row),
     },
-    { title: '客户交期', dataIndex: 'customer_due_date', width: 110, render: (v: string, row: any) => formatDate(v || row.source_promised_date) },
+    { title: '客户出货计划', dataIndex: 'customer_due_date', width: 110, render: (v: string, row: any) => formatDate(v || row.source_promised_date) },
     { title: '备货目标日', dataIndex: 'target_ready_date', width: 120, render: (v: string, row: any) => formatDate(v || getTargetReadyDateValue(row)) },
     { title: '开始日期', dataIndex: 'start_date', width: 110, render: (v: string) => <Tag color="blue">{formatDate(v)}</Tag> },
     { title: '预计备货完成', dataIndex: 'end_date', width: 120, render: (v: string, row: any) => <Tag color={row.delivery_status === 'delayed' ? 'red' : 'green'}>{formatDate(v)}</Tag> },
@@ -1732,11 +1735,9 @@ export default function SchedulePlans() {
               {rescheduleAction.label}
             </Button>
           ) : (
-            <Popconfirm title={rescheduleAction.title} onConfirm={() => handleReschedule(row.id)}>
-              <Button size="small" type="default" icon={<ThunderboltOutlined />}>
-                {rescheduleAction.label}
-              </Button>
-            </Popconfirm>
+            <Button size="small" type="default" icon={<ThunderboltOutlined />} onClick={() => openReschedulePreview(row)}>
+              {rescheduleAction.label}
+            </Button>
           )}
         </Space>
         )
@@ -1764,16 +1765,14 @@ export default function SchedulePlans() {
         </Space>
       ),
     },
-    { title: '交期', dataIndex: 'customer_due_date', width: 110, render: (v: string, row: any) => formatDate(v || row.source_promised_date) },
+    { title: '出货计划', dataIndex: 'customer_due_date', width: 110, render: (v: string, row: any) => formatDate(v || row.source_promised_date) },
     { title: '结束日期', dataIndex: 'end_date', width: 110, render: (v: string) => formatDate(v) },
     {
       title: '操作',
       width: 120,
       fixed: 'right' as const,
       render: (_: any, row: any) => (
-        <Popconfirm title="确认重排这条计划？" onConfirm={() => handleReschedule(row.id)}>
-          <Button size="small" type="primary" icon={<ThunderboltOutlined />}>立即重排</Button>
-        </Popconfirm>
+        <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={() => openReschedulePreview(row)}>立即重排</Button>
       ),
     },
   ]
@@ -1798,7 +1797,7 @@ export default function SchedulePlans() {
       title: '操作',
       width: 90,
       render: (_: any, row: any) => (
-        <Button size="small" type="link" onClick={() => handleReschedule(row.id)}>
+        <Button size="small" type="link" onClick={() => openReschedulePreview(row)}>
           立即重排
         </Button>
       ),
@@ -1831,7 +1830,7 @@ export default function SchedulePlans() {
     },
     { title: '原预计天数', dataIndex: 'planned_days_needed', width: 110, render: (v: number) => v ?? '-' },
     { title: '现预计天数', dataIndex: 'current_days_needed', width: 110, render: (v: number) => v ?? '-' },
-    { title: '交期', dataIndex: 'source_promised_date', width: 110, render: (v: string) => formatDate(v) },
+    { title: '出货计划', dataIndex: 'source_promised_date', width: 110, render: (v: string) => formatDate(v) },
     { title: '说明', dataIndex: 'impact_reason', width: 280, ellipsis: true, render: (v: string) => v || '-' },
   ]
 
@@ -2183,11 +2182,7 @@ export default function SchedulePlans() {
                       icon={<ThunderboltOutlined />}
                       onClick={async () => {
                         closeDetailDrawer()
-                        if (detailRow?.needs_reschedule) {
-                          openReschedulePreview(detailRow)
-                          return
-                        }
-                        await handleReschedule(detailRow.id)
+                        openReschedulePreview(detailRow)
                       }}
                     >
                       {detailRow?.needs_reschedule ? '立即重排' : '重新排'}

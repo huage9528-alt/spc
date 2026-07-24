@@ -413,6 +413,33 @@ class PlanDeleteAndBackfillService:
             self.db.add(old_plan)
             await self.db.flush()
 
+            # 释放旧计划占用的产能槽, 给新计划占新槽
+            try:
+                from app.services.production.capacity_slot_service import (
+                    release_slots_for_plan, recompute_plan_slots,
+                )
+                await release_slots_for_plan(self.db, old_plan.id)
+                qty = float(new_record.quantity or 0)
+                upph = float(new_record.upph or 0)
+                mp = int(new_record.manpower or 10)
+                bucket = str(new_record.source_process_type or "").strip()
+                if bucket and qty > 0 and upph > 0 and mp > 0 and new_record.end_date:
+                    total_hours = qty / (upph * mp)
+                    await recompute_plan_slots(
+                        self.db,
+                        plan_id=new_record.id,
+                        department=str(new_record.department or ""),
+                        schedule_bucket=bucket,
+                        order_no=new_record.order_no,
+                        line_no=new_record.line_no,
+                        total_hours=total_hours,
+                        target_end_date=new_record.end_date,
+                        # 固定用车间最大上限 12h, 防止跨订单累加超载
+                        daily_capacity=12.0,
+                    )
+            except Exception:
+                pass
+
             results.append({
                 "old_plan_id": old_plan.id,
                 "new_plan_id": new_record.id,

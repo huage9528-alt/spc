@@ -11,9 +11,23 @@ import { useAuthStore } from '../../../store/auth'
 const STATUS_TAG: Record<string, { label: string; color: string }> = {
   draft: { label: '草稿', color: 'default' },
   pending: { label: '审批中', color: 'processing' },
-  approved: { label: '已通过', color: 'success' },
+  approved: { label: '已归档', color: 'success' },
   rejected: { label: '已驳回', color: 'error' },
   recalled: { label: '已撤回', color: 'warning' },
+}
+
+function canApproveNode(user: any, node: any): boolean {
+  if (!user || !node) return false
+  if ('role_code' in user && user.role_code === 'admin') return true
+  const approvers = node.approvers
+  if (Array.isArray(approvers)) {
+    return approvers.some((a: any) => a.username === user.username || String(a.user_id) === String(user.id))
+  }
+  const role = node.role
+  if (role && role !== '__dept_manager__') {
+    return 'role_code' in user && user.role_code === role
+  }
+  return false
 }
 
 export default function PriceChangeDetail() {
@@ -48,9 +62,10 @@ export default function PriceChangeDetail() {
     try {
       const cid = parseInt(id)
       if (action === 'submit') await purchaseApi.submit(cid)
-      else if (action === 'approve') await purchaseApi.approve(cid, comment)
-      else if (action === 'reject') await purchaseApi.reject(cid, comment)
+      else if (action === 'approve') await purchaseApi.approve(cid, comment, r?.version)
+      else if (action === 'reject') await purchaseApi.reject(cid, comment, r?.version)
       else if (action === 'recall') await purchaseApi.recall(cid)
+      else if (action === 'revoke') await purchaseApi.revokeApproval(cid)
       message.success('操作成功')
       setComment('')
       load()
@@ -118,7 +133,8 @@ export default function PriceChangeDetail() {
   const s = r?.approval_status
   const snap = r?.approval_snapshot || []
   const currentLevel = r?.approval_level || 1
-  const currentStep = snap[currentLevel - 1]
+  // 用 seq 匹配当前级别，避免数组索引与 seq 不一致（条件过滤/跳过导致）
+  const currentStep = snap.find((n: any) => n.seq === currentLevel) || snap[currentLevel - 1]
 
   let attachments: any[] = []
   try {
@@ -179,7 +195,7 @@ export default function PriceChangeDetail() {
               <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#334155' }}>{r.change_no || '-'}</span>
               <Tag color={(STATUS_TAG[s] || {}).color}>{(STATUS_TAG[s] || {}).label}</Tag>
               <Tag color="blue">{currentStep?.label || `第${currentLevel}级审批`}</Tag>
-              <span style={{ fontSize: 12, color: '#64748b' }}>申请人 {r.applicant || '-'}</span>
+              <span style={{ fontSize: 12, color: '#64748b' }}>申请人 {r.applicant_display || r.applicant || '-'}</span>
             </div>
           </div>
           <Space>
@@ -191,6 +207,19 @@ export default function PriceChangeDetail() {
               </>
             )}
             {s === 'pending' && <Button icon={<RollbackOutlined />} onClick={() => act('recall')} loading={submitting}>撤回</Button>}
+            {s === 'pending' && (() => {
+              // 判断当前用户能否反审核：最后一条 approve/auto_skip log 是当前用户审的（admin 也可）
+              const currentUser = useAuthStore.getState().currentUser
+              const isAdmin = !!(currentUser && 'role_code' in currentUser && currentUser.role_code === 'admin')
+              const myName = (currentUser && 'username' in currentUser) ? currentUser.username : ''
+              const approveLogs = logs.filter((l: any) => l.action === 'approve' || l.action === 'auto_skip')
+              const lastApproveLog = approveLogs[approveLogs.length - 1]
+              const canRevoke = lastApproveLog && (isAdmin || lastApproveLog.approver === myName)
+              if (!canRevoke) return null
+              return (
+                <Button icon={<RollbackOutlined />} onClick={() => act('revoke')} loading={submitting}>撤回审批</Button>
+              )
+            })()}
           </Space>
         </div>
       </div>
@@ -201,7 +230,7 @@ export default function PriceChangeDetail() {
             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: '#0f172a' }}>表单信息</div>
             <Descriptions {...descProps}>
               <Descriptions.Item label="标题">{r.title || '-'}</Descriptions.Item>
-              <Descriptions.Item label="申请人">{r.applicant || '-'}</Descriptions.Item>
+              <Descriptions.Item label="申请人">{r.applicant_display || r.applicant || '-'}</Descriptions.Item>
               <Descriptions.Item label="调价日期">{r.change_date || '-'}</Descriptions.Item>
               <Descriptions.Item label="供应商名称">{r.supplier_name || '-'}</Descriptions.Item>
               <Descriptions.Item label="供应商代码">{r.supplier_code || '-'}</Descriptions.Item>
@@ -271,6 +300,31 @@ export default function PriceChangeDetail() {
               <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12 }}>暂无附件</div>
             )}
 
+            {(() => {
+              let eps: any[] = []
+              try { eps = typeof r.erp_price_snapshot === 'string' ? JSON.parse(r.erp_price_snapshot || '[]') : (r.erp_price_snapshot || []) } catch { eps = [] }
+              if (eps.length === 0) return null
+              return (
+                <Collapse
+                  ghost
+                  style={{ marginBottom: 12 }}
+                  items={[{
+                    key: 'erp',
+                    label: <span style={{ fontSize: 13, fontWeight: 600 }}>ERP供应商比价（{eps.length}条，点击展开）</span>,
+                    children: (
+                      <Table size="small" dataSource={eps} pagination={false} rowKey="supplier_code"
+                        columns={[
+                          { title: '供应商', dataIndex: 'supplier_name', width: 150 },
+                          { title: '单价', dataIndex: 'price', width: 80 },
+                          { title: '起订量', dataIndex: 'qty_min', width: 70 },
+                          { title: '报价日期', dataIndex: 'start_date', width: 100 },
+                        ]} />
+                    ),
+                  }]}
+                />
+              )
+            })()}
+
             <Collapse
               ghost
               items={[
@@ -311,9 +365,15 @@ export default function PriceChangeDetail() {
                 items={snap.map((st: any, i: number) => {
                   const rej = logs.find((l: any) => l.approval_level === i + 1 && l.action === 'reject')
                   const app = logs.find((l: any) => l.approval_level === i + 1 && l.action === 'approve')
+                  const approvers = Array.isArray(st.approvers) ? st.approvers : null
+                  const desc = approvers
+                    ? (approvers.length > 0
+                        ? `审批人：${approvers.map((a: any) => a.username || a).join('、')}`
+                        : '⚠️ 部门经理解析失败')
+                    : (st.role === '__dept_manager__' ? '申请人部门经理' : st.role)
                   return {
                     title: st.label,
-                    description: st.role,
+                    description: desc,
                     status: rej ? 'error' : app ? 'finish' : i < currentLevel - 1 ? 'finish' : i === currentLevel - 1 ? 'process' : 'wait',
                     icon: rej ? <CloseCircleOutlined /> : app ? <CheckCircleOutlined /> : <ClockCircleOutlined />,
                   }
@@ -324,14 +384,29 @@ export default function PriceChangeDetail() {
             )}
 
             {s === 'pending' && (
-              <div style={{ marginTop: 16, borderTop: '1px solid #e5e7eb', paddingTop: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>审批操作</div>
-                <Input.TextArea value={comment} onChange={e => setComment(e.target.value)} placeholder="审批意见（可选）" rows={3} style={{ marginBottom: 12 }} />
-                <Space>
-                  <Button type="primary" icon={<CheckOutlined />} loading={submitting} onClick={() => act('approve')}>通过</Button>
-                  <Button danger icon={<CloseOutlined />} loading={submitting} onClick={() => act('reject')}>驳回</Button>
-                </Space>
-              </div>
+              (() => {
+                const currentUser = useAuthStore.getState().currentUser
+                const canAct = canApproveNode(currentUser, currentStep)
+                if (!canAct) {
+                  return (
+                    <div style={{ marginTop: 16, borderTop: '1px solid #e5e7eb', paddingTop: 16 }}>
+                      <div style={{ fontSize: 13, color: '#94a3b8' }}>
+                        当前级别需 {currentStep?.approvers?.map((a: any) => a.username).join('、') || `角色 ${currentStep?.role}` || '他人'} 审批，您无权操作
+                      </div>
+                    </div>
+                  )
+                }
+                return (
+                  <div style={{ marginTop: 16, borderTop: '1px solid #e5e7eb', paddingTop: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>审批操作</div>
+                    <Input.TextArea value={comment} onChange={e => setComment(e.target.value)} placeholder="审批意见（可选）" rows={3} style={{ marginBottom: 12 }} />
+                    <Space>
+                      <Button type="primary" icon={<CheckOutlined />} loading={submitting} onClick={() => act('approve')}>通过</Button>
+                      <Button danger icon={<CloseOutlined />} loading={submitting} onClick={() => act('reject')}>驳回</Button>
+                    </Space>
+                  </div>
+                )
+              })()
             )}
           </div>
 
@@ -345,12 +420,12 @@ export default function PriceChangeDetail() {
                     <div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <span style={{ fontSize: 14, fontWeight: 600 }}>{log.approver}</span>
-                        <Tag color={log.action === 'reject' ? 'red' : log.action === 'approve' ? 'green' : 'blue'}>
-                          {log.action === 'submit' ? '提交审批' : log.action === 'approve' ? '已通过' : log.action === 'recall' ? '已撤回' : '已驳回'}
+                        <Tag color={log.action === 'reject' ? 'red' : log.action === 'approve' ? 'green' : log.action === 'auto_skip' ? 'purple' : log.action === 'revoked' ? 'orange' : 'blue'}>
+                          {log.action === 'submit' ? '提交审批' : log.action === 'approve' ? '已通过' : log.action === 'auto_skip' ? '自动通过(同人)' : log.action === 'revoked' ? '已撤回' : log.action === 'recall' ? '已撤回' : '已驳回'}
                         </Tag>
                         <span style={{ fontSize: 12, color: '#94a3b8' }}>{log.operated_at ? dayjs(log.operated_at).format('YYYY-MM-DD HH:mm') : ''}</span>
                       </div>
-                      {log.comment && <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>意见：{log.comment}</div>}
+                      {log.comment && <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>{log.comment}</div>}
                     </div>
                   ),
                 }))}

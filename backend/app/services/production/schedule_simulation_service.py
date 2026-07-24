@@ -87,13 +87,18 @@ class ScheduleSimulationService:
         quantity: float,
         upph: float,
         promised_date: Optional[date],
+        manpower: int = 10,
     ) -> dict:
         if not promised_date or not quantity or quantity <= 0 or not upph or upph <= 0:
             return {}
 
+        effective_manpower = max(int(manpower or 0), 1)
         today = date.today()
         target_ready_date = cls.calculate_target_ready_date(promised_date)
-        total_hours = round(float(quantity) / float(upph), 2)
+        # UPPH 是每人每小时的产能, 总工时需要除以人数 (全员合计小时数)
+        # 最小工时下限 1 小时, 避免极小订单算出 0.01h 这种没意义的值
+        raw_total_hours = float(quantity) / (float(upph) * effective_manpower)
+        total_hours = round(max(raw_total_hours, 1.0), 2)
         end_without_sunday = cls.get_previous_production_day(target_ready_date, False)
         end_with_sunday = cls.get_previous_production_day(target_ready_date, True)
         actual_today_without_sunday = cls.get_next_production_day(today, False)
@@ -134,12 +139,21 @@ class ScheduleSimulationService:
                 candidate_end_date,
                 include_sunday=include_sunday,
             )
+            # 业务口径: 优先排满 max_daily_hours (8.5 标准 / 12 加班)
+            # 多天排产时, 最后一天可能不满, 但其他天都排满
+            # 所以"建议每日工时" = min(标准工时, 总工时)
+            #   - 总工时 < 8.5: 单天就够, 工时=总工时(如 5h)
+            #   - 总工时 > 8.5: 多天, 每天排满 max_daily_hours
+            if total_hours <= max_daily_hours:
+                required_hours = round(total_hours, 2)
+            else:
+                required_hours = float(max_daily_hours)
             return {
                 "days_needed": candidate_days_needed,
                 "start_date": candidate_start_date,
                 "end_date": candidate_end_date,
                 "available_days": candidate_available_days,
-                "required_daily_hours": round(total_hours / candidate_days_needed, 2),
+                "required_daily_hours": required_hours,
                 "feasible": candidate_start_date >= candidate_today,
             }
 
@@ -296,11 +310,13 @@ class ScheduleSimulationService:
         upph: float,
         promised_date: Optional[date],
         schedule_bucket: Optional[str] = None,
+        manpower: int = 10,
     ) -> dict:
         plan = cls.build_lean_workhour_plan(
             quantity=quantity,
             upph=upph,
             promised_date=promised_date,
+            manpower=manpower,
         )
         if plan:
             plan["schedule_bucket"] = schedule_bucket
@@ -337,8 +353,12 @@ class ScheduleSimulationService:
         promised_date: date,
         schedule_bucket: Optional[str] = None,
         lean_workhour_plan: Optional[dict] = None,
+        manpower: int = 10,
     ) -> dict:
-        total_hours = float(quantity) / float(upph)
+        effective_manpower = max(int(manpower or 0), 1)
+        # 最小工时下限 1 小时, 避免极小订单算出 0.01h/天 这种没意义的值
+        raw_total_hours = float(quantity) / (float(upph) * effective_manpower)
+        total_hours = max(raw_total_hours, 1.0)
         recommended_daily_hours = round(float(daily_hours), 2)
         days_needed = max(1, math.ceil(total_hours / float(daily_hours)))
 

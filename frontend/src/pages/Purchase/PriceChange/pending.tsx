@@ -1,20 +1,24 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Button, Space, Table, Tag, message } from 'antd'
+import { Button, Space, Table, Tabs, Tag, message } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { purchaseApi } from '../../../services/purchase'
 import dayjs from 'dayjs'
 
 export default function PriceChangePending() {
   const navigate = useNavigate()
+  const [tab, setTab] = useState<'pending' | 'approved'>('pending')
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
 
   const load = async () => {
     setLoading(true)
     try {
-      const res: any = await purchaseApi.pending()
-      setData(res.data || [])
+      const res: any = tab === 'pending'
+        ? await purchaseApi.pending()
+        : await purchaseApi.myApproved({ page: 1, page_size: 50 })
+      const payload = res.data
+      setData(Array.isArray(payload) ? payload : (payload?.items || []))
     } catch (e: any) {
       message.error(e.message || '加载失败')
     } finally {
@@ -22,7 +26,7 @@ export default function PriceChangePending() {
     }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [tab])
 
   const pendingCount = data.length
   const highRiskCount = data.filter((row) => row.ai_summary?.ai_risk_level === 'high').length
@@ -77,6 +81,10 @@ export default function PriceChangePending() {
         </div>
       </div>
       <div className="card-modern" style={{ padding: '0 0 4px' }}>
+        <Tabs activeKey={tab} onChange={(k) => setTab(k as 'pending' | 'approved')} style={{ paddingLeft: 16 }} items={[
+          { key: 'pending', label: `待我审批 (${pendingCount})` },
+          { key: 'approved', label: '我已审批' },
+        ]} />
         <Table
           rowKey="id"
           dataSource={data}
@@ -114,7 +122,9 @@ export default function PriceChangePending() {
                 )
               },
             },
-            { title: '申请人', dataIndex: 'applicant', width: 100 },
+            { title: '申请人', dataIndex: 'applicant_display', width: 100,
+              render: (_: any, row: any) => row.applicant_display || row.applicant || '-',
+            },
             {
               title: '提交时间',
               width: 160,
@@ -143,7 +153,7 @@ export default function PriceChangePending() {
               render: (_: any, row: any) => (
                 <Space>
                   <Button size="small" onClick={() => navigate(`/purchase/price-change/${row.id}`)}>查看</Button>
-                  <Button size="small" type="primary" onClick={() => navigate(`/purchase/price-change/${row.id}`)}>审批</Button>
+                  {tab === 'pending' && <Button size="small" type="primary" onClick={() => navigate(`/purchase/price-change/${row.id}`)}>审批</Button>}
                 </Space>
               ),
             },
@@ -159,7 +169,7 @@ export default function PriceChangePending() {
                     <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>审批提示</div>
                     <div style={{ fontSize: 13, color: '#334155', lineHeight: 1.7 }}>
                       当前单据由 <strong>{currentNode?.label || `第${row.approval_level || 1}级`}</strong> 处理，
-                      提交人 <strong>{row.applicant || '-'}</strong>。
+                      提交人 <strong>{row.applicant_display || row.applicant || '-'}</strong>。
                     </div>
                   </div>
                   <div style={{ minWidth: 320 }}>

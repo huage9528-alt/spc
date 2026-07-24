@@ -132,8 +132,11 @@ export default function ApprovalConfigCenter() {
                       }>
                       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                         <Input size="small" placeholder="节点名称" value={n.label} onChange={e => upNode(idx, 'label', e.target.value)} style={{ width: 160 }} />
-                        <Select size="small" placeholder="角色" value={n.role || undefined} onChange={v => upNode(idx, 'role', v)} style={{ width: 180 }} showSearch
-                          options={roles.map(r => ({ value: r.role_code, label: `${r.role_name} (${r.role_code})` }))} />
+                        <Select size="small" placeholder="角色" value={n.role || undefined} onChange={v => upNode(idx, 'role', v)} style={{ width: 220 }} showSearch
+                          options={[
+                            { value: '__dept_manager__', label: '👥 动态：申请人部门经理（按直接上级解析）' },
+                            ...roles.map(r => ({ value: r.role_code, label: `${r.role_name} (${r.role_code})` })),
+                          ]} />
                         <Select size="small" mode="multiple" placeholder="类型条件（可选）" value={n.condition?.value || undefined}
                           onChange={v => upNode(idx, 'condition', v?.length ? { field: 'price_direction', op: 'in', value: v } : undefined)}
                           style={{ width: 200 }} options={DIR_VALUES.map(v => ({ value: v, label: v }))} allowClear />

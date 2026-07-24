@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message, AutoComplete, Upload } from 'antd'
-import { PlusOutlined, DeleteOutlined, SaveOutlined, SendOutlined, ArrowLeftOutlined, SearchOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, SaveOutlined, SendOutlined, ArrowLeftOutlined, SearchOutlined, CloseOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { purchaseApi } from '../../../services/purchase'
 import { fileApi } from '../../../services/api'
@@ -111,6 +111,11 @@ export default function PriceChangeNew() {
     try { const r: any = await purchaseApi.searchSuppliers(kw || '', page); setSupList(r.data?.items||[]); setSupTotal(r.data?.total||0); setSupKw(kw); setSupPage(page) } catch {}
   }
 
+  const clearSupplier = () => {
+    setSupName('')
+    form.setFieldsValue({ supplier_code: '', contact_person: '', phone: '', fax: '', address: '' })
+  }
+
   const fillSupplier = (s: any) => {
     form.setFieldsValue({
       supplier_code: s.supplier_code || '',
@@ -126,7 +131,17 @@ export default function PriceChangeNew() {
   const rmItem = (k: number) => setItems(prev => prev.filter(i => i.key !== k))
   const upItem = (k: number, f: string, v: any) => setItems(prev => prev.map(i => i.key === k ? { ...i, [f]: v } : i))
   const lookPrice = async (key: number, mc: string) => {
-    try { const r: any = await purchaseApi.lastPrice(mc, form.getFieldValue('supplier_code')||''); if (r.data?.old_price) { upItem(key,'old_price',r.data.old_price); upItem(key,'old_price_date',r.data.old_price_date||'') } } catch {}
+    try {
+      const h: any = await purchaseApi.materialPriceHistory(mc)
+      const prices = h.data?.prices || []
+      upItem(key, '_otherPrices', prices)
+      const sc = form.getFieldValue('supplier_code') || ''
+      const cur = prices.find((p: any) => p.supplier_code === sc)
+      if (cur) {
+        upItem(key, 'old_price', cur.price)
+        upItem(key, 'old_price_date', cur.start_date || '')
+      }
+    } catch {}
   }
   const selectMat = (key: number, val: string, option: any) => {
     const m = option?.data
@@ -135,6 +150,10 @@ export default function PriceChangeNew() {
     upItem(key, 'material_name', m.material_name || '')
     upItem(key, 'spec', m.spec || '')
     upItem(key, 'unit', m.unit || '个')
+    // ERP报价直接填入原价
+    if (m.purchase_price) {
+      upItem(key, 'old_price', m.purchase_price)
+    }
     lookPrice(key, m.material_code)
     setMatOptsMap((prev) => ({ ...prev, [key]: [] }))
   }
@@ -149,7 +168,11 @@ export default function PriceChangeNew() {
     matTimer.current = setTimeout(async () => {
       try {
         const r: any = await purchaseApi.searchMaterials(val, 1, 6)
-        const list = (r.data?.items || []).map((m: any) => ({ value: m.material_code, label: `${m.material_code}  ${m.material_name}`, data: m }))
+        const list = (r.data?.items || []).map((m: any) => ({
+          value: m.material_code,
+          label: `${m.material_code}  ${m.material_name}${m.purchase_price ? '  ¥' + m.purchase_price : ''}`,
+          data: m,
+        }))
         setMatOptsMap((prev) => ({ ...prev, [key]: list }))
       } catch {
         setMatOptsMap((prev) => ({ ...prev, [key]: [] }))
@@ -194,6 +217,7 @@ export default function PriceChangeNew() {
         ...v, supplier_name: supName || v.supplier_name, remark, title,
         change_date: v.change_date ? dayjs(v.change_date).format('YYYY-MM-DD') : null,
         attachments: allAttachments,
+        erp_price_snapshot: items.flatMap(i => i._otherPrices || []).filter((p: any, idx: number, arr: any[]) => arr.findIndex((x: any) => x.supplier_code === p.supplier_code && x.price === p.price) === idx),
         submit,
         items: items.map(i => ({
           material_code: i.material_code, material_name: i.material_name, spec: i.spec, unit: i.unit,
@@ -235,21 +259,42 @@ export default function PriceChangeNew() {
         onSelect={(val, opt) => selectMat(r.key, val, opt)}
         popupMatchSelectWidth={false} dropdownStyle={{ minWidth: 360 }}>
         <Input size="small" bordered={false} placeholder="输入搜索"
-          suffix={<span style={{cursor:'pointer',color:'#3b82f6',fontSize:14,fontWeight:700}} onClick={(e)=>{e.stopPropagation();setCurMatRow(r.key);openMatModal()}}>...</span>}
+            suffix={<Space size={0}>
+              {r.material_code && <Button size="small" type="text" icon={<CloseOutlined />} style={{ color: '#94a3b8', fontSize: 12, opacity: 0.5 }}
+                onMouseEnter={e => (e.currentTarget as HTMLElement).style.opacity = '1'}
+                onMouseLeave={e => (e.currentTarget as HTMLElement).style.opacity = '0.5'}
+                onClick={(e) => { e.stopPropagation(); upItem(r.key, 'material_code', ''); upItem(r.key, 'material_name', ''); upItem(r.key, 'spec', ''); upItem(r.key, 'unit', '个'); upItem(r.key, 'old_price', undefined); upItem(r.key, 'old_price_date', ''); upItem(r.key, '_otherPrices', []) }} />}
+            <span style={{cursor:'pointer',color:'#3b82f6',fontSize:14,fontWeight:700}} onClick={(e)=>{e.stopPropagation();setCurMatRow(r.key);openMatModal()}}>...</span>
+          </Space>}
           style={{background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} />
       </AutoComplete>
     },
     { title:'物料名称',width:120,render:(_:any,r:any)=><span style={{fontSize:12,color:r.material_name?'#334155':'#cbd5e1'}}>{r.material_name||'-'}</span> },
     { title:'规格',width:90,render:(_:any,r:any)=><span style={{fontSize:12,color:r.spec?'#334155':'#cbd5e1'}}>{r.spec||'-'}</span> },
-    { title:'单位',width:50,render:(_:any,r:any)=><Input size="small" value={r.unit} style={{width:50,background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={e=>upItem(r.key,'unit',e.target.value)} /> },
+    { title:'单位',width:50,render:(_:any,r:any)=><Input size="small" value={r.unit} readOnly style={{width:50,background:'#f5f5f5',border:'1px solid #d9d9d9',borderRadius:4}} /> },
     { title:'订货量',width:80,render:(_:any,r:any)=><InputNumber size="small" value={r.order_qty} min={0} precision={4} style={{width:'100%',background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={v=>upItem(r.key,'order_qty',v)} /> },
     { title:'到货量',width:80,render:(_:any,r:any)=><InputNumber size="small" value={r.delivery_qty} min={0} precision={4} style={{width:'100%',background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={v=>upItem(r.key,'delivery_qty',v)} /> },
-    { title:'原价',width:85,render:(_:any,r:any)=><InputNumber size="small" value={r.old_price} min={0} precision={4} style={{width:'100%',background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={v=>upItem(r.key,'old_price',v)} /> },
+    { title:'原价',width:85,render:(_:any,r:any)=><InputNumber size="small" value={r.old_price} min={0} precision={4} readOnly style={{width:'100%',background:'#f5f5f5',border:'1px solid #d9d9d9',borderRadius:4}} /> },
     { title:'现价',width:85,render:(_:any,r:any)=><InputNumber size="small" value={r.new_price} min={0} precision={4} style={{width:'100%',background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={v=>upItem(r.key,'new_price',v)} /> },
     { title:'涨幅',width:75,render:(_:any,r:any)=>{const o=parseFloat(r.old_price),n=parseFloat(r.new_price);if(!o||!n||o===0)return<span style={{color:'#cbd5e1'}}>--</span>;const p=((n/o)-1)*100;return<span style={{color:p>=0?'#dc2626':'#16a34a',fontWeight:600}}>{p>=0?'+':''}{p.toFixed(1)}%</span>}},
     { title:'备注',width:90,render:(_:any,r:any)=><Input size="small" value={r.remark} style={{background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={e=>upItem(r.key,'remark',e.target.value)} /> },
     { title:'',width:40,render:(_:any,r:any)=><Button size="small" type="text" danger icon={<DeleteOutlined/>} onClick={()=>rmItem(r.key)} /> },
   ]
+
+  // 自动检测调价类型
+  useEffect(() => {
+    const filled = items.filter(i => i.old_price && parseFloat(i.old_price) > 0)
+    if (filled.length === 0) {
+      form.setFieldsValue({ price_direction: '新报价' })
+      return
+    }
+    const withNew = filled.filter(i => i.new_price && parseFloat(i.new_price) > 0)
+    if (withNew.length === 0) return
+    const hasUp = withNew.some(i => parseFloat(i.new_price) > parseFloat(i.old_price))
+    const hasDown = withNew.some(i => parseFloat(i.new_price) < parseFloat(i.old_price))
+    if (hasUp) form.setFieldsValue({ price_direction: '涨价' })
+    else if (hasDown) form.setFieldsValue({ price_direction: '降价' })
+  }, [items])
 
   const sectionStyle = {
     background: '#fff',
@@ -303,8 +348,14 @@ export default function PriceChangeNew() {
               >
                 <Input
                   placeholder="输入供应商名称搜索"
-                  suffix={<Button size="small" type="link" icon={<SearchOutlined />} style={{ color: '#3b82f6' }}
-                    onClick={(e) => { e.stopPropagation(); loadSupTable('', 1); setSupModal(true) }} />}
+                  suffix={<Space size={0}>
+                    {supName && <Button size="small" type="text" icon={<CloseOutlined />} style={{ color: '#94a3b8', opacity: 0.5 }}
+                      onMouseEnter={e => (e.currentTarget as HTMLElement).style.opacity = '1'}
+                      onMouseLeave={e => (e.currentTarget as HTMLElement).style.opacity = '0.5'}
+                      onClick={(e) => { e.stopPropagation(); clearSupplier() }} />}
+                    <Button size="small" type="link" icon={<SearchOutlined />} style={{ color: '#3b82f6' }}
+                      onClick={(e) => { e.stopPropagation(); loadSupTable('', 1); setSupModal(true) }} />
+                  </Space>}
                 />
               </AutoComplete>
             </Form.Item>
@@ -351,7 +402,33 @@ export default function PriceChangeNew() {
           <Button size="small" type="primary" icon={<PlusOutlined />} onClick={addItem}>添加行</Button>
         </div>
         <Table rowKey="key" dataSource={items} columns={itemCols} pagination={false} size="small" scroll={{ x: 1200 }}
-          locale={{ emptyText: '点击「添加行」添加调价物料' }} />
+          locale={{ emptyText: '点击「添加行」添加调价物料' }}
+          expandable={{
+            expandedRowRender: (r: any) => {
+              const prices = r._otherPrices
+              if (!prices || prices.length === 0) return <span style={{ color: '#cbd5e1', fontSize: 12 }}>暂无其他供应商报价</span>
+              return (
+                <div style={{ padding: '4px 0' }}>
+                  <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 4 }}>ERP供应商报价（{prices.length}条）：</div>
+                  <Table size="small" dataSource={prices} pagination={false} rowKey="supplier_code"
+                    columns={[
+                      { title: '供应商', dataIndex: 'supplier_name', width: 150 },
+                      { title: '单价', dataIndex: 'price', width: 80 },
+                      { title: '起订量', dataIndex: 'qty_min', width: 70 },
+                      { title: '上限量', dataIndex: 'qty_max', width: 70 },
+                      { title: '报价日期', dataIndex: 'start_date', width: 100 },
+                      { title: '失效日期', dataIndex: 'end_date', width: 100 },
+                    ]} />
+                </div>
+              )
+            },
+            expandIcon: ({ expanded, onExpand, record }: any) => (
+              <Button size="small" type="link" style={{ fontSize: 12, color: '#3b82f6' }}
+                onClick={(e: any) => onExpand(record, e)}>
+                {expanded ? '收起' : '比价'}
+              </Button>
+            ),
+          }} />
       </div>
 
       {/* 附件 + 备注（和详情页风格一致） */}

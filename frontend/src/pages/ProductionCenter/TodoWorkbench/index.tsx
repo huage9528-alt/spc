@@ -128,7 +128,7 @@ export default function TodoWorkbench() {
     { title: '产品编码', dataIndex: 'product_code', width: 220, render: (v: string) => renderCopyableText(v, '产品编码') },
     { title: 'BOM编码', dataIndex: 'bom_no', width: 160, ellipsis: true, render: (v: string) => renderCopyableText(v, 'BOM编码') },
     { title: '数量', width: 90, render: (_: any, row: TodoRow) => row.order_qty ?? row.quantity ?? '-' },
-    { title: '交期', width: 110, render: (_: any, row: TodoRow) => formatDate(row.promised_date || row.source_promised_date) },
+    { title: '出货计划', width: 110, render: (_: any, row: TodoRow) => formatDate(row.promised_date || row.source_promised_date) },
     { title: '排产段', width: 110, render: (_: any, row: TodoRow) => renderBucketTag(row) },
     {
       title: '状态',

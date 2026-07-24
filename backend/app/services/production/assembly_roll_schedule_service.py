@@ -249,7 +249,7 @@ class AssemblyRollScheduleService:
             matched_buckets: list[str] = []
             for bucket, process_type in (("assembly", "组装"), ("packaging", "包装")):
                 price_total = float(stage_price_totals.get(bucket) or 0)
-                manpower, hour_price = await self.formula_service.resolve_formula_inputs(
+                _, hour_price = await self.formula_service.resolve_formula_inputs(
                     ASSEMBLY_WORKSHOP_NAME,
                     process_type,
                     config_map,
@@ -258,7 +258,6 @@ class AssemblyRollScheduleService:
                     workshop_name=ASSEMBLY_WORKSHOP_NAME,
                     process_type=process_type,
                     gjje=price_total,
-                    manpower=manpower,
                     hour_price=hour_price,
                 )
                 effective_upph = float(upph_payload.get("effective_upph") or 0)
@@ -267,7 +266,6 @@ class AssemblyRollScheduleService:
                 stage_rules[bucket] = {
                     "price_total": round(price_total, 4),
                     "upph": round(effective_upph, 2),
-                    "manpower": manpower,
                     "hour_price": hour_price,
                     "process_type": process_type,
                 }
@@ -464,9 +462,11 @@ class AssemblyRollScheduleService:
         ready_offset_days: int,
         assembly_workhour_plan: Optional[dict[str, Any]] = None,
         packaging_workhour_plan: Optional[dict[str, Any]] = None,
+        assembly_manpower: int = 10,
+        packaging_manpower: int = 10,
     ) -> dict[str, Any]:
-        assembly_daily_capacity_qty = round(assembly_upph * assembly_daily_hours, 4)
-        packaging_daily_capacity_qty = round(packaging_upph * packaging_daily_hours, 4)
+        assembly_daily_capacity_qty = round(assembly_upph * assembly_manpower * assembly_daily_hours, 4)
+        packaging_daily_capacity_qty = round(packaging_upph * packaging_manpower * packaging_daily_hours, 4)
         if assembly_daily_capacity_qty <= 0 or packaging_daily_capacity_qty <= 0:
             raise ValueError("组装或包装日产能无效，无法滚动排产")
 
@@ -573,8 +573,8 @@ class AssemblyRollScheduleService:
                     f"预计包装完成日为 {actual_simulation['packaging_end_date']}，晚于备货目标日({target_ready_date})，客户交期({promised_date})！"
                 )
 
-        total_assembly_hours = round(quantity / assembly_upph, 2)
-        total_packaging_hours = round(quantity / packaging_upph, 2)
+        total_assembly_hours = round(quantity / (assembly_upph * assembly_manpower), 2)
+        total_packaging_hours = round(quantity / (packaging_upph * packaging_manpower), 2)
         assembly_plan = RollingStagePlan(
             schedule_bucket="assembly",
             schedule_bucket_label="装配-组装",

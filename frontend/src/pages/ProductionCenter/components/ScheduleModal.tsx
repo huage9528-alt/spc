@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Alert, Button, Col, DatePicker, Form, Input, InputNumber, Modal, Row, Select, message } from 'antd'
+import { useEffect, useMemo, useState } from 'react'
+import { Alert, Button, Col, DatePicker, Form, Input, InputNumber, Modal, Progress, Row, Select, Tag, message } from 'antd'
 import dayjs from 'dayjs'
 import { productionApi } from '../../../services/production'
 import { DEPARTMENTS } from '../SchedulePlans/constants'
@@ -34,6 +34,11 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
   const [readyOffsetDays, setReadyOffsetDays] = useState(2)
   const [leanStandardHours, setLeanStandardHours] = useState(8.5)
   const [leanMaxHours, setLeanMaxHours] = useState(12)
+  // 产能预览
+  const [capacityUsage, setCapacityUsage] = useState<Array<{
+    date: string; capacity: number; booked: number; available: number; utilization: number
+  }> | null>(null)
+  const [capacityLoading, setCapacityLoading] = useState(false)
 
   // 加载工作时间配置
   useEffect(() => {
@@ -70,6 +75,7 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
         department: '生产',
         plan_date: null,
         upph: (orderData.upph && orderData.upph > 0) ? orderData.upph : undefined,
+        manpower: 10,
         daily_work_hours: orderData.schedule_bucket === 'lean'
           ? orderData.recommended_daily_hours
           : getRecommendedDailyWorkHours(orderData.schedule_bucket),
@@ -82,6 +88,57 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
     return workHours
   }
 
+  // 监听人数/工时/数量/交期变化, 拉产能预览
+  const formData = Form.useWatch([], form)
+  useEffect(() => {
+    if (!open || !orderData) return
+    const bucket = orderData.schedule_bucket
+    if (!bucket || !orderData.promised_date) {
+      setCapacityUsage(null)
+      return
+    }
+    const manpower = formData?.manpower || 10
+    const dailyHours = formData?.daily_work_hours || getRecommendedDailyWorkHours(bucket)
+    const endDate = dayjs(orderData.promised_date).subtract(readyOffsetDays, 'day')
+    const startDate = endDate.subtract(30, 'day')
+    let cancelled = false
+    const fetchCapacity = async () => {
+      setCapacityLoading(true)
+      try {
+        const res: any = await productionApi.getCapacityUsage({
+          department: formData?.department || '生产',
+          schedule_bucket: bucket === 'mixed' ? 'assembly' : bucket,
+          start_date: startDate.format('YYYY-MM-DD'),
+          end_date: endDate.format('YYYY-MM-DD'),
+          daily_capacity: dailyHours,
+        })
+        if (!cancelled) setCapacityUsage(res.data || [])
+      } catch {
+        if (!cancelled) setCapacityUsage(null)
+      } finally {
+        if (!cancelled) setCapacityLoading(false)
+      }
+    }
+    fetchCapacity()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, orderData, formData?.department, formData?.manpower, formData?.daily_work_hours, readyOffsetDays])
+
+  // 计算订单总工时和预计占槽
+  const schedulePreview = useMemo(() => {
+    if (!orderData || !formData) return null
+    const qty = Number(formData.quantity || orderData.order_qty || 0)
+    const upph = Number(formData.upph || orderData.upph || 0)
+    const mp = Number(formData.manpower || 10)
+    const dailyHours = Number(formData?.daily_work_hours || getRecommendedDailyWorkHours(orderData.schedule_bucket) || 8.5)
+    if (qty <= 0 || upph <= 0 || mp <= 0) return null
+    const totalHours = qty / (upph * mp)
+    const daysNeeded = Math.max(1, Math.ceil(totalHours / dailyHours))
+    const dailyCapacity = upph * mp * dailyHours
+    return { qty, upph, mp, dailyHours, totalHours, daysNeeded, dailyCapacity }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formData?.quantity, formData?.upph, formData?.manpower, formData?.daily_work_hours, orderData])
+
   const handleAutoSchedule = async (confirmRisky: boolean = false) => {
     try {
       const values = await form.validateFields()
@@ -92,6 +149,7 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
         department: values.department,
         plan_date: planDate,
         upph: orderData?.schedule_bucket === 'lean' ? values.upph : undefined,
+        manpower: values.manpower || undefined,
         daily_work_hours: values.daily_work_hours ?? undefined,
         owner: values.owner,
         confirm_risky: confirmRisky,
@@ -175,7 +233,7 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
           <Col span={12}><Form.Item name="product_code" label="产品编码"><Input disabled /></Form.Item></Col>
           <Col span={12}><Form.Item name="model_code" label="型号"><Input disabled /></Form.Item></Col>
           <Col span={12}><Form.Item name="quantity" label="数量"><InputNumber disabled style={{ width: '100%' }} /></Form.Item></Col>
-          <Col span={12}><Form.Item name="promised_date" label="交期"><DatePicker disabled style={{ width: '100%' }} /></Form.Item></Col>
+          <Col span={12}><Form.Item name="promised_date" label="出货计划"><DatePicker disabled style={{ width: '100%' }} /></Form.Item></Col>
           <Col span={12}>
             <Form.Item name="department" label="部门" rules={[{ required: true }]}>
               <Select options={DEPARTMENTS.map((item) => ({ value: item, label: item }))} />
@@ -186,22 +244,83 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
               <DatePicker style={{ width: '100%' }} placeholder="不填则系统自动倒排" />
             </Form.Item>
           </Col>
-          <Col span={12}>
+          <Col span={8}>
             <Form.Item
               name="upph"
-              label="UPPH"
+              label="UPPH(每人每小时)"
               rules={orderData.schedule_bucket === 'lean' ? [{ required: true, type: 'number', min: 0.001 }] : []}
             >
               <InputNumber min={0.001} disabled={orderData.schedule_bucket !== 'lean'} style={{ width: '100%' }} placeholder={orderData.schedule_bucket === 'lean' ? '' : '装配由系统自动计算'} />
             </Form.Item>
           </Col>
-          <Col span={12}>
-            <Form.Item name="daily_work_hours" label="每日工时（可留空自动）">
+          <Col span={8}>
+            <Form.Item
+              name="manpower"
+              label="班组人数"
+              tooltip="默认 10 人, 改后日产能 = UPPH × 人数 × 当日工时"
+              rules={[{ required: true, type: 'number', min: 1, message: '人数必须 ≥ 1' }]}
+            >
+              <InputNumber min={1} max={200} style={{ width: '100%' }} />
+            </Form.Item>
+          </Col>
+          <Col span={8}>
+            <Form.Item name="daily_work_hours" label="每日工时">
               <InputNumber min={1} max={24} style={{ width: '100%' }} />
             </Form.Item>
           </Col>
           <Col span={24}><Form.Item name="owner" label="负责人"><Input /></Form.Item></Col>
         </Row>
+
+        {/* 产能预览 */}
+        {schedulePreview && (
+          <div style={{ marginTop: 12, padding: 12, background: '#fafafa', borderRadius: 6 }}>
+            <div style={{ fontWeight: 600, marginBottom: 8, color: '#1677ff' }}>
+              📊 产能预览(改参数实时更新)
+            </div>
+            <div style={{ fontSize: 13, color: '#595959', marginBottom: 8 }}>
+              订单 <b>{schedulePreview.qty}</b> 件, UPPH <b>{schedulePreview.upph.toFixed(2)}</b> 件/人·小时,{' '}
+              <b>{schedulePreview.mp}</b> 人
+              <span style={{ marginLeft: 12 }}>
+                → 总工时 <b style={{ color: schedulePreview.totalHours <= 8.5 ? '#52c41a' : '#fa541c' }}>{schedulePreview.totalHours.toFixed(2)}h</b>,
+                需要 <b style={{ color: '#fa541c' }}>{schedulePreview.daysNeeded}</b> 天
+                {schedulePreview.totalHours <= 8.5 && schedulePreview.daysNeeded === 1 && (
+                  <span style={{ color: '#52c41a', marginLeft: 8 }}>
+                    (单天 {schedulePreview.totalHours.toFixed(2)}h 即可, 剩 {(schedulePreview.dailyHours - schedulePreview.totalHours).toFixed(2)}h 空余)
+                  </span>
+                )}
+              </span>
+            </div>
+
+            {/* 该工段最近 15 天的占用情况 */}
+            {capacityLoading && <div style={{ color: '#888', fontSize: 12 }}>加载产能日历...</div>}
+            {!capacityLoading && capacityUsage && capacityUsage.length > 0 && (
+              <div>
+                <div style={{ fontSize: 12, color: '#888', marginBottom: 4 }}>
+                  {orderData.schedule_bucket === 'mixed' ? '组装段' : ''}最近 15 天产能占用(点击可放大):
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', fontSize: 11 }}>
+                  {capacityUsage.slice(-15).map((u) => {
+                    const pct = Math.round(u.utilization * 100)
+                    const color = pct >= 100 ? '#ff4d4f' : pct >= 80 ? '#fa8c16' : pct > 0 ? '#52c41a' : '#d9d9d9'
+                    return (
+                      <Tag
+                        key={u.date}
+                        style={{ marginBottom: 4, fontSize: 11, padding: '2px 6px' }}
+                        color={pct === 0 ? 'default' : (pct >= 100 ? 'red' : pct >= 80 ? 'orange' : 'green')}
+                        title={`${u.date}: 已占 ${u.booked}h / ${u.capacity}h, 剩 ${u.available}h`}
+                      >
+                        {u.date.slice(5)} · {u.booked.toFixed(1)}/{u.capacity}h
+                      </Tag>
+                    )
+                  })}
+                </div>
+                <div style={{ marginTop: 6, color: '#888', fontSize: 11 }}>
+                  绿=有空位 · 橙=紧张 · 红=已满. 本订单会自动占用空位.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </Form>
     </Modal>
   )

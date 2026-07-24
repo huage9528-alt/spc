@@ -67,6 +67,7 @@ from app.services.production.plan_delete_backfill_service import PlanDeleteAndBa
 from app.services.production.production_change_service import ProductionChangeService
 from app.services.production.schedule_simulation_service import ScheduleSimulationService
 from app.services.production.upph_calculation_service import UpphCalculationService
+from app.services.production.upph_formula_config_service import UpphFormulaConfigService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -936,6 +937,83 @@ def _get_order_line_bom_code(order_line) -> Optional[str]:
     return getattr(order_line, "bom_no", None) or getattr(order_line, "bom_code", None)
 
 
+def _get_effective_due_date(order_line) -> Optional[date]:
+    """获取订单行的"有效排产日期".
+
+    业务口径: 优先用订单头的 shipping_plan (出货计划),
+    客户改交期都是改 shipping_plan, 不会动 promised_date.
+    如果没有 shipping_plan, fallback 到 promised_date.
+
+    SaleOrderLine 已经冗余存了 shipping_plan 字段(同步层写入),
+    所以直接读明细行即可, 不需要 join.
+    """
+    shipping_plan = getattr(order_line, "shipping_plan", None)
+    if shipping_plan:
+        return shipping_plan
+    return getattr(order_line, "promised_date", None)
+
+
+async def _get_effective_order_qty(
+    db: AsyncSession,
+    order_no: str,
+    line_no: str,
+    order_qty: float,
+    bom_no: Optional[str] = None,
+) -> tuple[float, float, str]:
+    """获取排产有效数量(P 样自动合并到大货).
+
+    规则:
+    - 不是 P 开头的 BOM → 找同订单匹配的 P 样, 数量加到最大数量的大货行
+    - 返回: (有效数量, P样累加数量, P样行号列表)
+
+    同订单同 BOM 有多个大货行时, P 样只加到数量最大的那个.
+    """
+    if bom_no:
+        big_bom = str(bom_no).strip()
+    else:
+        row = (await db.execute(
+            select(SaleOrderLine.bom_no)
+            .where(SaleOrderLine.order_no == order_no, SaleOrderLine.line_no == line_no)
+        )).first()
+        if not row:
+            return order_qty, 0.0, ""
+        big_bom = str(row[0] or "").strip()
+
+    if not big_bom or big_bom.upper().startswith("P-"):
+        return order_qty, 0.0, ""
+
+    # 查同订单同 BOM 的所有大货行, 找到数量最大的
+    big_rows = (await db.execute(
+        select(SaleOrderLine.line_no, SaleOrderLine.order_qty)
+        .where(
+            SaleOrderLine.order_no == order_no,
+            SaleOrderLine.bom_no == big_bom,
+            SaleOrderLine.status != "closed",
+        )
+    )).all()
+    if not big_rows:
+        return order_qty, 0.0, ""
+
+    max_line = max(big_rows, key=lambda r: float(r[1] or 0))
+    if str(max_line[0]) != str(line_no):
+        return order_qty, 0.0, ""
+
+    # 查匹配的 P- 样
+    p_bom = f"P-{big_bom}"
+    p_rows = (await db.execute(
+        select(SaleOrderLine.line_no, SaleOrderLine.order_qty)
+        .where(
+            SaleOrderLine.order_no == order_no,
+            SaleOrderLine.bom_no == p_bom,
+            SaleOrderLine.status != "closed",
+        )
+    )).all()
+
+    p_qty = sum(float(r[1] or 0) for r in p_rows)
+    p_lines = ", ".join(str(r[0]) for r in p_rows)
+    return order_qty + p_qty, p_qty, p_lines
+
+
 def _build_delete_preview_response(
     *,
     record: ProductionSchedulePlan,
@@ -989,8 +1067,8 @@ async def _build_order_scheduling_items(
         last_day = date(target_year, target_month + 1, 1) - timedelta(days=1)
 
     conditions = [
-        SaleOrderLine.promised_date >= first_day,
-        SaleOrderLine.promised_date <= last_day,
+        func.coalesce(SaleOrderLine.shipping_plan, SaleOrderLine.promised_date) >= first_day,
+        func.coalesce(SaleOrderLine.shipping_plan, SaleOrderLine.promised_date) <= last_day,
         SaleOrderLine.status != "closed",
     ]
 
@@ -1025,7 +1103,7 @@ async def _build_order_scheduling_items(
             )
         )
         .outerjoin(SaleOrder, SaleOrderLine.sale_order_id == SaleOrder.id)
-        .order_by(SaleOrderLine.promised_date.asc(), SaleOrderLine.order_no.asc(), SaleOrderLine.line_no.asc())
+        .order_by(func.coalesce(SaleOrderLine.shipping_plan, SaleOrderLine.promised_date).asc(), SaleOrderLine.order_no.asc(), SaleOrderLine.line_no.asc())
     )
     rows = result.all()
     split_rules_map = await _build_split_rules_map(
@@ -1089,7 +1167,7 @@ async def _build_order_scheduling_items(
             lean_workhour_plan = simulation_service.build_bucket_workhour_plan(
                 quantity=float(order_line.order_qty or 0),
                 upph=current_bucket_upph,
-                promised_date=order_line.promised_date,
+                promised_date=_get_effective_due_date(order_line),
                 schedule_bucket=current_schedule_bucket,
             )
         scheduling_state = _resolve_order_scheduling_state(
@@ -1125,7 +1203,7 @@ async def _build_order_scheduling_items(
             product_code=order_line.product_code,
             product_model=order_line.product_model,
             order_qty=float(order_line.order_qty or 0),
-            promised_date=order_line.promised_date,
+            promised_date=_get_effective_due_date(order_line),
             risk_level=current_risk_level,
             status=order_line.status,
             upph=float(schedule_context.get("total_upph") or 0),
@@ -1361,6 +1439,17 @@ def _resolve_order_display_state(
             "reason": short_reason,
             "details": details,
             "is_missing_upph": False,
+        }
+
+    # 未命中产能、桶未分类等 → 显示"缺产能"而不是"待排产"
+    if reason_code in {"no_capacity_match", "bucket_unclassified", "missing_upph", "lean_missing_upph"}:
+        return {
+            "status": "excluded",
+            "status_label": ORDER_POOL_DISPLAY_STATUS_LABELS.get("excluded", "缺产能"),
+            "reason_code": reason_code,
+            "reason": short_reason,
+            "details": details,
+            "is_missing_upph": is_missing_upph,
         }
 
     return {
@@ -1613,7 +1702,7 @@ async def _refresh_order_schedule_snapshots(
             lean_workhour_plan = simulation_service.build_bucket_workhour_plan(
                 quantity=float(order_line.order_qty or 0),
                 upph=current_bucket_upph,
-                promised_date=order_line.promised_date,
+                promised_date=_get_effective_due_date(order_line),
                 schedule_bucket=current_schedule_bucket,
             )
         scheduling_state = _resolve_order_scheduling_state(
@@ -1637,7 +1726,7 @@ async def _refresh_order_schedule_snapshots(
             "product_code": order_line.product_code,
             "product_model": order_line.product_model,
             "order_qty": float(order_line.order_qty or 0),
-            "promised_date": order_line.promised_date,
+            "promised_date": _get_effective_due_date(order_line),
             "upph_snapshot": float(schedule_context.get("total_upph") or 0),
             "schedule_bucket_snapshot": current_schedule_bucket,
             "schedule_bucket_label": SCHEDULE_BUCKET_LABELS.get(current_schedule_bucket),
@@ -1702,9 +1791,22 @@ async def _query_todo_snapshot_source_rows(
         last_day = date(target_year, target_month + 1, 1) - timedelta(days=1)
 
     pool_conditions = [
-        SaleOrderLine.promised_date >= first_day,
-        SaleOrderLine.promised_date <= last_day,
+        # 必须有 shipping_plan 才能进待排池(没出货计划的不参与排产)
+        SaleOrderLine.shipping_plan.is_not(None),
+        # 按 shipping_plan 月份归集
+        SaleOrderLine.shipping_plan >= first_day,
+        SaleOrderLine.shipping_plan <= last_day,
         SaleOrderLine.status != "closed",
+        # Y 开头的 BOM 不参与排产(业务规则)
+        or_(
+            SaleOrderLine.bom_no.is_(None),
+            ~func.ltrim(SaleOrderLine.bom_no).ilike("Y%"),
+        ),
+        # P- 开头的大货样不独立显示, 数量自动合并到同订单同 BOM 的大货行
+        or_(
+            SaleOrderLine.bom_no.is_(None),
+            ~func.ltrim(SaleOrderLine.bom_no).ilike("P-%"),
+        ),
     ]
     if keyword:
         like = f"%{keyword}%"
@@ -1755,7 +1857,7 @@ async def _query_todo_snapshot_source_rows(
             )
         )
         .where(active_plan_subq.c.order_no.is_(None))
-        .order_by(SaleOrderLine.promised_date.asc(), SaleOrderLine.order_no.asc(), SaleOrderLine.line_no.asc())
+        .order_by(func.coalesce(SaleOrderLine.shipping_plan, SaleOrderLine.promised_date).asc(), SaleOrderLine.order_no.asc(), SaleOrderLine.line_no.asc())
         .limit(limit)
     )
     if risk_level:
@@ -2966,7 +3068,7 @@ def _build_schedule_response_calculation(
         "days_needed": calculation_result.get("days_needed"),
         "upph": float(resolved_upph),
         "daily_work_hours": float(resolved_daily_hours),
-        "customer_due_date": order_line.promised_date,
+        "customer_due_date": _get_effective_due_date(order_line),
         "target_ready_date": calculation_result.get("target_ready_date"),
         "ready_offset_days": calculation_result.get("ready_offset_days", READY_OFFSET_DAYS),
         "schedule_bucket": schedule_bucket,
@@ -3025,6 +3127,8 @@ async def _save_schedule_plan_record(
     calculation_result: dict,
     existing_plan: Optional[ProductionSchedulePlan],
     operation_remark: Optional[str],
+    manpower: Optional[int] = None,
+    effective_order_qty: Optional[float] = None,
 ) -> ProductionSchedulePlan:
     priority = _resolve_priority_by_risk(risk_level)
     plan_version = 1
@@ -3034,7 +3138,15 @@ async def _save_schedule_plan_record(
         previous_plan_id = existing_plan.id
         existing_plan.is_active = False
         db.add(existing_plan)
+        # 释放旧计划占用的产能槽(新计划会在末尾重新占)
+        try:
+            from app.services.production.capacity_slot_service import release_slots_for_plan
+            await release_slots_for_plan(db, existing_plan.id)
+        except Exception:
+            pass
 
+    # 排产使用有效数量(含自动合并的大货样)
+    used_qty = effective_order_qty if effective_order_qty and effective_order_qty > 0 else effective_order_qty
     schedule_data = ProductionSchedulePlanCreate(
         department=department,
         plan_date=calculation_result["plan_date"],
@@ -3042,20 +3154,21 @@ async def _save_schedule_plan_record(
         line_no=order_line.line_no,
         product_code=order_line.product_code,
         model_code=order_line.product_model,
-        quantity=float(order_line.order_qty),
-        planned_qty=float(order_line.order_qty),  # v2 Q8：本段计划负责数量（mixed 两段都处理全量）
+        quantity=used_qty,
+        planned_qty=used_qty,
         start_date=calculation_result["start_date"],
         end_date=calculation_result["end_date"],
         priority=priority,
         status="planned",
         upph=resolved_upph,
+        manpower=manpower,
         daily_work_hours=resolved_daily_hours,
         owner=owner,
         remark=calculation_result.get("warning") or None,
         plan_version=plan_version,
         is_active=True,
-        source_promised_date=order_line.promised_date,
-        source_order_qty=float(order_line.order_qty),
+        source_promised_date=_get_effective_due_date(order_line),
+        source_order_qty=used_qty,
         source_product_code=order_line.product_code,
         source_product_model=order_line.product_model,
         source_upph=resolved_upph,
@@ -3077,7 +3190,62 @@ async def _save_schedule_plan_record(
         previous_version_id=previous_plan_id,
         remark=operation_remark or calculation_result.get("warning") or "自动排产创建",
     )
+
+    # 占用产能时间槽(支持多订单共享同一天工时)
+    await _book_capacity_slots_for_plan(db, record)
+
     return record
+
+
+async def _book_capacity_slots_for_plan(db: AsyncSession, plan: ProductionSchedulePlan) -> None:
+    """根据计划的总工时和完成日, 占用产能时间槽.
+
+    - 总工时 = 数量 / (UPPH × 人数)
+    - 目标完成日 = plan.end_date
+    - 每天产能上限 = 12h(车间最大工时, 跟订单的 daily_work_hours 解耦)
+    - 占槽后, 用实际占槽结果回写 start_date / end_date
+      (解决排产模拟器算的日期跟实际占槽不一致的问题)
+    """
+    try:
+        from app.services.production.capacity_slot_service import (
+            recompute_plan_slots, MAX_DAILY_HOURS,
+        )
+        qty = float(plan.quantity or 0)
+        upph = float(plan.upph or 0)
+        mp = int(plan.manpower or 10)
+        bucket = str(plan.source_process_type or "").strip()
+        if not bucket or qty <= 0 or upph <= 0 or mp <= 0 or not plan.end_date:
+            return
+        total_hours = qty / (upph * mp)
+        bookings = await recompute_plan_slots(
+            db,
+            plan_id=plan.id,
+            department=str(plan.department or ""),
+            schedule_bucket=bucket,
+            order_no=plan.order_no,
+            line_no=plan.line_no,
+            total_hours=total_hours,
+            target_end_date=plan.end_date,
+            daily_capacity=MAX_DAILY_HOURS,
+        )
+
+        # 用实际占槽结果回写 start_date / end_date
+        # (排产模拟器算的日期可能跟实际占槽不一致, 以占槽为准)
+        if bookings:
+            actual_start = min(b["date"] for b in bookings)
+            actual_end = max(b["date"] for b in bookings)
+            plan.start_date = actual_start
+            plan.end_date = actual_end
+            plan.plan_date = actual_start
+            # 回写实际占用工时
+            if len(bookings) == 1:
+                plan.daily_work_hours = round(float(bookings[0]["hours"]), 2)
+            else:
+                # 多天: 取最大那天的工时(排满的天)
+                plan.daily_work_hours = round(max(float(b["hours"]) for b in bookings), 2)
+            db.add(plan)
+    except Exception as e:
+        logger.warning(f"[capacity_slot] 占用失败 plan_id={plan.id}: {e}", exc_info=True)
 
 
 async def _preview_schedule_risk(
@@ -3100,7 +3268,7 @@ async def _preview_schedule_risk(
     if not row:
         return {"needs_confirm": False, "warning": "", "calculation_result": None}
     order_line = row.SaleOrderLine
-    if not order_line.promised_date or not order_line.order_qty:
+    if not _get_effective_due_date(order_line) or not order_line.order_qty:
         return {"needs_confirm": False, "warning": "", "calculation_result": None}
 
     try:
@@ -3119,9 +3287,9 @@ async def _preview_schedule_risk(
             return {"needs_confirm": False, "warning": "", "calculation_result": None}
 
         lean_workhour_plan = simulation_service.build_lean_workhour_plan(
-            quantity=float(order_line.order_qty),
+            quantity=effective_order_qty,
             upph=float(upph_value),
-            promised_date=order_line.promised_date,
+            promised_date=_get_effective_due_date(order_line),
         )
         if not lean_workhour_plan:
             return {"needs_confirm": False, "warning": "", "calculation_result": None}
@@ -3144,6 +3312,24 @@ async def _preview_schedule_risk(
     except Exception:
         # 试算失败不阻塞，让原有流程处理（落库或报错）
         return {"needs_confirm": False, "warning": "", "calculation_result": None}
+ 
+
+def _resolve_workshop_name_by_bucket(schedule_bucket: Optional[str]) -> Optional[str]:
+    """排产段 → 车间名映射, 用于查 UPPH 配置默认人数."""
+    if schedule_bucket == "lean":
+        return "精益车间"
+    if schedule_bucket in ("assembly", "packaging", "mixed"):
+        return "装配车间"
+    return None
+
+
+def _resolve_process_type_by_bucket(schedule_bucket: Optional[str]) -> str:
+    """排产段 → 工序类型(用于查 UPPH 配置默认值)."""
+    if schedule_bucket == "assembly":
+        return "组装"
+    if schedule_bucket == "packaging":
+        return "包装"
+    return "*"
 
 
 async def _create_schedule_plan_from_request(
@@ -3159,6 +3345,8 @@ async def _create_schedule_plan_from_request(
     operator: str,
     fail_if_scheduled: bool = False,
     operation_remark: Optional[str] = None,
+    skip_conflict_resolution: bool = False,
+    manpower: Optional[int] = None,
 ) -> tuple[list[ProductionSchedulePlan], dict, str]:
     simulation_service = ScheduleSimulationService(db)
     row = await _get_latest_sale_order_line(db, order_no, line_no)
@@ -3168,13 +3356,22 @@ async def _create_schedule_plan_from_request(
     order_line = row.SaleOrderLine
     risk_level = row.risk_level
 
-    if not order_line.promised_date:
+    if not _get_effective_due_date(order_line):
         raise HTTPException(status_code=400, detail="订单行没有交期")
 
-    if not order_line.order_qty or order_line.order_qty <= 0:
+    bom_code = _get_order_line_bom_code(order_line)
+
+    # 取有效排产数量(P 样自动合并到同订单同 BOM 的最大大货行)
+    effective_order_qty, merged_p_qty, merged_p_lines = await _get_effective_order_qty(
+        db,
+        order_no=order_line.order_no,
+        line_no=order_line.line_no,
+        order_qty=float(order_line.order_qty or 0),
+        bom_no=bom_code,
+    )
+    if effective_order_qty <= 0:
         raise HTTPException(status_code=400, detail="订单行数量无效")
 
-    bom_code = _get_order_line_bom_code(order_line)
     schedule_bucket = None
     lean_workhour_plan = {}
     upph_service = UpphCalculationService(db)
@@ -3187,6 +3384,20 @@ async def _create_schedule_plan_from_request(
         )
         schedule_bucket = schedule_context.get("schedule_bucket")
 
+    # 班组人数: API 参数 > 配置默认 > 10
+    # 按"车间+工序段"分别取配置默认(精益/装配车间可能不同)
+    effective_manpower = int(manpower or 0) if manpower and manpower > 0 else None
+    if effective_manpower is None and schedule_bucket:
+        config_manpower, _ = await UpphFormulaConfigService(db).resolve_formula_inputs(
+            _resolve_workshop_name_by_bucket(schedule_bucket),
+            _resolve_process_type_by_bucket(schedule_bucket),
+        )
+        # config_manpower 已废弃统一用 10 (因为之前我们改成不乘人头),
+        # 这里保留兜底, 默认 10
+        effective_manpower = int(config_manpower or 10)
+    if effective_manpower is None or effective_manpower <= 0:
+        effective_manpower = 10
+
     if schedule_bucket == "lean":
         resolved_upph = upph
         if resolved_upph is None and (order_line.product_code or bom_code):
@@ -3198,10 +3409,11 @@ async def _create_schedule_plan_from_request(
             raise HTTPException(status_code=400, detail="缺少UPPH数据，请在订单或产品中配置，或手动指定")
 
         lean_workhour_plan = simulation_service.build_bucket_workhour_plan(
-            quantity=float(order_line.order_qty),
+            quantity=effective_order_qty,
             upph=float(resolved_upph),
-            promised_date=order_line.promised_date,
+            promised_date=_get_effective_due_date(order_line),
             schedule_bucket=schedule_bucket,
+            manpower=effective_manpower,
         )
         resolved_daily_hours = await simulation_service.resolve_daily_work_hours(
             schedule_bucket=schedule_bucket,
@@ -3219,22 +3431,24 @@ async def _create_schedule_plan_from_request(
         if existing_plan and fail_if_scheduled:
             raise HTTPException(status_code=400, detail="该订单已存在有效排产计划，请先刷新列表")
         calculation_result = simulation_service.calculate_schedule_result(
-            quantity=float(order_line.order_qty),
+            quantity=effective_order_qty,
             upph=float(resolved_upph),
             daily_hours=float(resolved_daily_hours),
-            promised_date=order_line.promised_date,
+            promised_date=_get_effective_due_date(order_line),
             schedule_bucket=schedule_bucket,
             lean_workhour_plan=lean_workhour_plan,
+            manpower=effective_manpower,
         )
-        calculation_result, lean_workhour_plan = await _resolve_conflict_aware_lean_plan(
-            db,
-            department=department,
-            calculation_result=calculation_result,
-            lean_workhour_plan=lean_workhour_plan,
-            exclude_plan_ids=[existing_plan.id] if existing_plan else None,
-        )
-        if calculation_result.get("recommended_daily_hours"):
-            resolved_daily_hours = float(calculation_result["recommended_daily_hours"])
+        if not skip_conflict_resolution:
+            calculation_result, lean_workhour_plan = await _resolve_conflict_aware_lean_plan(
+                db,
+                department=department,
+                calculation_result=calculation_result,
+                lean_workhour_plan=lean_workhour_plan,
+                exclude_plan_ids=[existing_plan.id] if existing_plan else None,
+            )
+            if calculation_result.get("recommended_daily_hours"):
+                resolved_daily_hours = float(calculation_result["recommended_daily_hours"])
         calculation_result["plan_date"] = plan_date or calculation_result["start_date"]
         record = await _save_schedule_plan_record(
             db,
@@ -3249,6 +3463,8 @@ async def _create_schedule_plan_from_request(
             calculation_result=calculation_result,
             existing_plan=existing_plan,
             operation_remark=operation_remark,
+            manpower=effective_manpower,
+            effective_order_qty=effective_order_qty,
         )
         return [record], _build_schedule_response_calculation(
             schedule_bucket="lean",
@@ -3267,16 +3483,18 @@ async def _create_schedule_plan_from_request(
             raise HTTPException(status_code=400, detail="装配拆分后的组装/包装 UPPH 无效，请先检查明细单价或公式配置")
 
         assembly_workhour_plan = simulation_service.build_bucket_workhour_plan(
-            quantity=float(order_line.order_qty),
+            quantity=effective_order_qty,
             upph=float(assembly_upph),
-            promised_date=order_line.promised_date,
+            promised_date=_get_effective_due_date(order_line),
             schedule_bucket="assembly",
+            manpower=effective_manpower,
         )
         packaging_workhour_plan = simulation_service.build_bucket_workhour_plan(
-            quantity=float(order_line.order_qty),
+            quantity=effective_order_qty,
             upph=float(packaging_upph),
-            promised_date=order_line.promised_date,
+            promised_date=_get_effective_due_date(order_line),
             schedule_bucket="packaging",
+            manpower=effective_manpower,
         )
         assembly_daily_hours = float(
             await simulation_service.resolve_daily_work_hours(
@@ -3310,10 +3528,10 @@ async def _create_schedule_plan_from_request(
         if fail_if_scheduled and (assembly_existing_plan or packaging_existing_plan):
             raise HTTPException(status_code=400, detail="该订单已存在组装或包装有效排产计划，请先刷新列表")
 
-        target_ready_date = simulation_service.calculate_target_ready_date(order_line.promised_date)
+        target_ready_date = simulation_service.calculate_target_ready_date(_get_effective_due_date(order_line))
         mixed_result = split_service.build_mixed_stage_plans(
-            quantity=float(order_line.order_qty),
-            promised_date=order_line.promised_date,
+            quantity=effective_order_qty,
+            promised_date=_get_effective_due_date(order_line),
             assembly_upph=assembly_upph,
             packaging_upph=packaging_upph,
             assembly_daily_hours=assembly_daily_hours,
@@ -3322,6 +3540,8 @@ async def _create_schedule_plan_from_request(
             ready_offset_days=READY_OFFSET_DAYS,
             assembly_workhour_plan=assembly_workhour_plan,
             packaging_workhour_plan=packaging_workhour_plan,
+            assembly_manpower=effective_manpower,
+            packaging_manpower=effective_manpower,
         )
         candidate_order = ["normal", "overtime", "sunday_production"]
         assembly_candidates = assembly_workhour_plan.get("candidate_plans") or {}
@@ -3338,64 +3558,67 @@ async def _create_schedule_plan_from_request(
                 candidate_pairs.append((assembly_index, packaging_index, assembly_key, packaging_key))
         candidate_pairs.sort(key=lambda item: (max(item[0], item[1]), item[0] + item[1], item[0], item[1]))
 
-        evaluated_mixed_candidates: list[tuple[tuple[int, int], dict, dict]] = []
-        exclude_plan_ids = [
-            item.id for item in [assembly_existing_plan, packaging_existing_plan] if item and item.id
-        ] or None
-        for assembly_index, packaging_index, assembly_key, packaging_key in candidate_pairs:
-            selected_assembly_candidate = assembly_candidates[assembly_key]
-            selected_packaging_candidate = packaging_candidates[packaging_key]
-            candidate_mixed_result = split_service.build_mixed_stage_plans(
-                quantity=float(order_line.order_qty),
-                promised_date=order_line.promised_date,
-                assembly_upph=assembly_upph,
-                packaging_upph=packaging_upph,
-                assembly_daily_hours=float(selected_assembly_candidate.get("recommended_daily_hours") or assembly_daily_hours),
-                packaging_daily_hours=float(selected_packaging_candidate.get("recommended_daily_hours") or packaging_daily_hours),
-                target_ready_date=target_ready_date,
-                ready_offset_days=READY_OFFSET_DAYS,
-                assembly_workhour_plan={**assembly_workhour_plan, **selected_assembly_candidate},
-                packaging_workhour_plan={**packaging_workhour_plan, **selected_packaging_candidate},
-            )
-            adjusted_candidate_result = await _resolve_conflict_aware_mixed_plan(
-                db,
-                department=department,
-                mixed_result=candidate_mixed_result,
-                exclude_plan_ids=exclude_plan_ids,
-            )
-            evaluated_mixed_candidates.append(
-                (
-                    (assembly_index, packaging_index),
-                    candidate_mixed_result,
-                    adjusted_candidate_result,
+        if not skip_conflict_resolution:
+            evaluated_mixed_candidates: list[tuple[tuple[int, int], dict, dict]] = []
+            exclude_plan_ids = [
+                item.id for item in [assembly_existing_plan, packaging_existing_plan] if item and item.id
+            ] or None
+            for assembly_index, packaging_index, assembly_key, packaging_key in candidate_pairs:
+                selected_assembly_candidate = assembly_candidates[assembly_key]
+                selected_packaging_candidate = packaging_candidates[packaging_key]
+                candidate_mixed_result = split_service.build_mixed_stage_plans(
+                    quantity=effective_order_qty,
+                    promised_date=_get_effective_due_date(order_line),
+                    assembly_upph=assembly_upph,
+                    packaging_upph=packaging_upph,
+                    assembly_daily_hours=float(selected_assembly_candidate.get("recommended_daily_hours") or assembly_daily_hours),
+                    packaging_daily_hours=float(selected_packaging_candidate.get("recommended_daily_hours") or packaging_daily_hours),
+                    target_ready_date=target_ready_date,
+                    ready_offset_days=READY_OFFSET_DAYS,
+                    assembly_workhour_plan={**assembly_workhour_plan, **selected_assembly_candidate},
+                    packaging_workhour_plan={**packaging_workhour_plan, **selected_packaging_candidate},
+                    assembly_manpower=effective_manpower,
+                    packaging_manpower=effective_manpower,
                 )
-            )
-            if (
-                adjusted_candidate_result["assembly_plan"].start_date == candidate_mixed_result["assembly_plan"].start_date
-                and adjusted_candidate_result["assembly_plan"].end_date == candidate_mixed_result["assembly_plan"].end_date
-                and adjusted_candidate_result["packaging_plan"].start_date == candidate_mixed_result["packaging_plan"].start_date
-                and adjusted_candidate_result["packaging_plan"].end_date == candidate_mixed_result["packaging_plan"].end_date
-            ):
-                mixed_result = adjusted_candidate_result
-                break
-        else:
-            if evaluated_mixed_candidates:
-                _, _, mixed_result = max(
-                    evaluated_mixed_candidates,
-                    key=lambda item: (
-                        (item[2]["packaging_plan"].end_date or date.min).toordinal(),
-                        (item[2]["packaging_plan"].start_date or date.min).toordinal(),
-                        -max(item[0]),
-                        -(item[0][0] + item[0][1]),
-                    ),
-                )
-            else:
-                mixed_result = await _resolve_conflict_aware_mixed_plan(
+                adjusted_candidate_result = await _resolve_conflict_aware_mixed_plan(
                     db,
                     department=department,
-                    mixed_result=mixed_result,
+                    mixed_result=candidate_mixed_result,
                     exclude_plan_ids=exclude_plan_ids,
                 )
+                evaluated_mixed_candidates.append(
+                    (
+                        (assembly_index, packaging_index),
+                        candidate_mixed_result,
+                        adjusted_candidate_result,
+                    )
+                )
+                if (
+                    adjusted_candidate_result["assembly_plan"].start_date == candidate_mixed_result["assembly_plan"].start_date
+                    and adjusted_candidate_result["assembly_plan"].end_date == candidate_mixed_result["assembly_plan"].end_date
+                    and adjusted_candidate_result["packaging_plan"].start_date == candidate_mixed_result["packaging_plan"].start_date
+                    and adjusted_candidate_result["packaging_plan"].end_date == candidate_mixed_result["packaging_plan"].end_date
+                ):
+                    mixed_result = adjusted_candidate_result
+                    break
+            else:
+                if evaluated_mixed_candidates:
+                    _, _, mixed_result = max(
+                        evaluated_mixed_candidates,
+                        key=lambda item: (
+                            (item[2]["packaging_plan"].end_date or date.min).toordinal(),
+                            (item[2]["packaging_plan"].start_date or date.min).toordinal(),
+                            -max(item[0]),
+                            -(item[0][0] + item[0][1]),
+                        ),
+                    )
+                else:
+                    mixed_result = await _resolve_conflict_aware_mixed_plan(
+                        db,
+                        department=department,
+                        mixed_result=mixed_result,
+                        exclude_plan_ids=exclude_plan_ids,
+                    )
         assembly_plan = mixed_result["assembly_plan"]
         packaging_plan = mixed_result["packaging_plan"]
         assembly_calculation = {
@@ -3469,7 +3692,7 @@ async def _create_schedule_plan_from_request(
                             "order_no": order_line.order_no,
                             "line_no": order_line.line_no,
                             "quantity": float(order_line.order_qty or 0),
-                            "promised_date": str(order_line.promised_date),
+                            "promised_date": str(_get_effective_due_date(order_line)),
                             "assembly": {
                                 "upph": assembly_plan.upph,
                                 "daily_work_hours": assembly_plan.daily_work_hours,
@@ -3513,6 +3736,8 @@ async def _create_schedule_plan_from_request(
             calculation_result=assembly_calculation,
             existing_plan=assembly_existing_plan,
             operation_remark=operation_remark or "两段排产创建-组装",
+            manpower=effective_manpower,
+            effective_order_qty=effective_order_qty,
         )
         packaging_record = await _save_schedule_plan_record(
             db,
@@ -3527,6 +3752,8 @@ async def _create_schedule_plan_from_request(
             calculation_result=packaging_calculation,
             existing_plan=packaging_existing_plan,
             operation_remark=operation_remark or "两段排产创建-包装",
+            manpower=effective_manpower,
+            effective_order_qty=effective_order_qty,
         )
         return [assembly_record, packaging_record], {
             "schedule_bucket": "mixed",
@@ -3577,9 +3804,9 @@ async def _create_schedule_plan_from_request(
 
     if schedule_bucket in {"assembly", "packaging"}:
         lean_workhour_plan = simulation_service.build_bucket_workhour_plan(
-            quantity=float(order_line.order_qty),
+            quantity=effective_order_qty,
             upph=float(resolved_upph),
-            promised_date=order_line.promised_date,
+            promised_date=_get_effective_due_date(order_line),
             schedule_bucket=schedule_bucket,
         )
 
@@ -3601,32 +3828,33 @@ async def _create_schedule_plan_from_request(
         raise HTTPException(status_code=400, detail="该订单已存在有效排产计划，请先刷新列表")
 
     calculation_result = simulation_service.calculate_schedule_result(
-        quantity=float(order_line.order_qty),
+        quantity=effective_order_qty,
         upph=float(resolved_upph),
         daily_hours=float(resolved_daily_hours),
-        promised_date=order_line.promised_date,
+        promised_date=_get_effective_due_date(order_line),
         schedule_bucket=schedule_bucket,
         lean_workhour_plan=lean_workhour_plan,
     )
-    if schedule_bucket == "lean":
-        calculation_result, lean_workhour_plan = await _resolve_conflict_aware_lean_plan(
-            db,
-            department=department,
-            calculation_result=calculation_result,
-            lean_workhour_plan=lean_workhour_plan,
-            exclude_plan_ids=[existing_plan.id] if existing_plan and existing_plan.id else None,
-        )
-        if calculation_result.get("recommended_daily_hours"):
-            resolved_daily_hours = float(calculation_result["recommended_daily_hours"])
-    else:
-        calculation_result = await _resolve_conflict_aware_nonlean_plan(
-            db,
-            department=department,
-            schedule_bucket=str(schedule_bucket or "pending"),
-            calculation_result=calculation_result,
-            include_sunday=bool(lean_workhour_plan and lean_workhour_plan.get("needs_sunday_work")),
-            exclude_plan_ids=[existing_plan.id] if existing_plan and existing_plan.id else None,
-        )
+    if not skip_conflict_resolution:
+        if schedule_bucket == "lean":
+            calculation_result, lean_workhour_plan = await _resolve_conflict_aware_lean_plan(
+                db,
+                department=department,
+                calculation_result=calculation_result,
+                lean_workhour_plan=lean_workhour_plan,
+                exclude_plan_ids=[existing_plan.id] if existing_plan and existing_plan.id else None,
+            )
+            if calculation_result.get("recommended_daily_hours"):
+                resolved_daily_hours = float(calculation_result["recommended_daily_hours"])
+        else:
+            calculation_result = await _resolve_conflict_aware_nonlean_plan(
+                db,
+                department=department,
+                schedule_bucket=str(schedule_bucket or "pending"),
+                calculation_result=calculation_result,
+                include_sunday=bool(lean_workhour_plan and lean_workhour_plan.get("needs_sunday_work")),
+                exclude_plan_ids=[existing_plan.id] if existing_plan and existing_plan.id else None,
+            )
     calculation_result["plan_date"] = plan_date or calculation_result["start_date"]
     record = await _save_schedule_plan_record(
         db,
@@ -3641,6 +3869,7 @@ async def _create_schedule_plan_from_request(
         calculation_result=calculation_result,
         existing_plan=existing_plan,
         operation_remark=operation_remark,
+        effective_order_qty=effective_order_qty,
     )
     return [record], _build_schedule_response_calculation(
         schedule_bucket=schedule_bucket,
@@ -3655,6 +3884,7 @@ async def _reschedule_plan_version(
     db: AsyncSession,
     plan_id: int,
     operator: str,
+    plan_date: Optional[date] = None,
 ) -> ProductionSchedulePlan:
     old_plan_result = await db.execute(
         select(ProductionSchedulePlan).where(ProductionSchedulePlan.id == plan_id)
@@ -3668,20 +3898,125 @@ async def _reschedule_plan_version(
         order_no=str(old_plan.order_no or ""),
         line_no=str(old_plan.line_no or ""),
         department=str(old_plan.department or ""),
-        plan_date=None,
+        plan_date=plan_date,
         upph=None,
         daily_work_hours=_to_float(old_plan.daily_work_hours),
         owner=old_plan.owner,
         operator=operator,
         fail_if_scheduled=False,
         operation_remark=f"手动重排，原计划ID:{old_plan.id}",
+        skip_conflict_resolution=plan_date is not None,
     )
 
     preferred_bucket = str(old_plan.source_process_type or "")
+    new_plan = None
     for record in records:
         if str(record.source_process_type or "") == preferred_bucket:
-            return record
-    return records[0]
+            new_plan = record
+            break
+    if new_plan is None:
+        new_plan = records[0]
+
+    if plan_date is not None:
+        old_start = new_plan.start_date
+        old_end = new_plan.end_date
+        if old_start and old_end:
+            duration_days = max((old_end - old_start).days, 0)
+        else:
+            duration_days = 0
+        new_plan.start_date = plan_date
+        new_plan.end_date = plan_date + timedelta(days=duration_days)
+        new_plan.plan_date = plan_date
+        new_plan.remark = f"指定日期重排到{plan_date}"
+
+        await _push_plans_forward(db, old_plan, new_plan, plan_date, operator)
+
+    return new_plan
+
+
+async def _push_plans_forward(
+    db: AsyncSession,
+    old_plan: ProductionSchedulePlan,
+    new_plan: ProductionSchedulePlan,
+    target_date: date,
+    operator: str,
+) -> None:
+    """将指定日期之后同部门同排产段的活跃计划往后推."""
+    new_start = new_plan.start_date or target_date
+    new_end = new_plan.end_date or new_start
+    shift_days = max((new_end - new_start).days + 1, 1)
+
+    department = str(old_plan.department or "")
+    bucket = str(old_plan.source_process_type or "")
+    exclude_ids = [old_plan.id]
+    if new_plan and new_plan.id:
+        exclude_ids.append(new_plan.id)
+
+    stmt = (
+        select(ProductionSchedulePlan)
+        .where(
+            ProductionSchedulePlan.is_active == True,
+            ProductionSchedulePlan.department == department,
+            ProductionSchedulePlan.source_process_type == bucket,
+            ProductionSchedulePlan.plan_date >= target_date,
+            ProductionSchedulePlan.id.notin_(exclude_ids),
+        )
+        .order_by(ProductionSchedulePlan.plan_date.asc(), ProductionSchedulePlan.id.asc())
+    )
+    result = await db.execute(stmt)
+    plans_to_push = list(result.scalars().all())
+
+    for plan_to_push in plans_to_push:
+        old_start = plan_to_push.start_date
+        old_end = plan_to_push.end_date
+
+        new_plan_date = (plan_to_push.plan_date + timedelta(days=shift_days)) if plan_to_push.plan_date else None
+        new_start_date = (old_start + timedelta(days=shift_days)) if old_start else None
+        new_end_date = (old_end + timedelta(days=shift_days)) if old_end else None
+
+        new_plan_version = int(plan_to_push.plan_version or 1) + 1
+
+        new_schedule_data = ProductionSchedulePlanCreate(
+            department=plan_to_push.department,
+            plan_date=new_plan_date,
+            order_no=plan_to_push.order_no,
+            line_no=plan_to_push.line_no,
+            product_code=plan_to_push.product_code,
+            model_code=plan_to_push.model_code,
+            quantity=float(plan_to_push.quantity or 0),
+            owner=plan_to_push.owner,
+            start_date=new_start_date,
+            end_date=new_end_date,
+            priority=plan_to_push.priority,
+            status=plan_to_push.status,
+            upph=float(plan_to_push.upph or 0) if plan_to_push.upph is not None else None,
+            daily_work_hours=float(plan_to_push.daily_work_hours or 0) if plan_to_push.daily_work_hours is not None else None,
+            remark=f"被{new_plan.order_no}/{new_plan.line_no}重排至{target_date}推后{shift_days}天",
+            plan_version=new_plan_version,
+            is_active=True,
+            source_promised_date=plan_to_push.source_promised_date,
+            source_order_qty=float(plan_to_push.source_order_qty or 0) if plan_to_push.source_order_qty is not None else None,
+            source_product_code=plan_to_push.source_product_code,
+            source_product_model=plan_to_push.source_product_model,
+            source_upph=float(plan_to_push.source_upph or 0) if plan_to_push.source_upph is not None else None,
+            source_process_type=plan_to_push.source_process_type,
+            previous_plan_id=plan_to_push.id,
+            needs_reschedule=False,
+            reschedule_reason=None,
+        )
+        new_record = ProductionSchedulePlan(**new_schedule_data.model_dump(), created_by=operator)
+        db.add(new_record)
+
+        plan_to_push.is_active = False
+        plan_to_push.reschedule_reason = f"被{new_plan.order_no}/{new_plan.line_no}重排至{target_date}推后{shift_days}天"
+        db.add(plan_to_push)
+
+        # 释放被推后计划占用的旧产能槽, 新计划在 _save_schedule_plan_record 里会重新占
+        try:
+            from app.services.production.capacity_slot_service import release_slots_for_plan
+            await release_slots_for_plan(db, plan_to_push.id)
+        except Exception:
+            pass
 
 
 async def _build_upph_impact_items(
@@ -3858,7 +4193,7 @@ async def _build_schedule_change_event_items(
         source_qty = _to_float(plan.source_order_qty, _to_float(plan.quantity, 0)) or 0
         current_qty = _to_float(order_line.order_qty, source_qty) if order_line else source_qty
         source_due = plan.source_promised_date
-        current_due = order_line.promised_date if order_line and order_line.promised_date else source_due
+        current_due = _get_effective_due_date(order_line) if order_line and _get_effective_due_date(order_line) else source_due
         source_upph = _to_float(plan.source_upph, _to_float(plan.upph))
         product_code = (order_line.product_code if order_line else None) or plan.product_code or plan.source_product_code
         bom_code = _get_order_line_bom_code(order_line) if order_line else None
@@ -4182,15 +4517,23 @@ async def list_schedule_plans(
             conditions.append(plan_window_start <= date_end)
     if keyword:
         like = f"%{keyword}%"
-        conditions.append(
-            or_(
-                ProductionSchedulePlan.order_no.ilike(like),
-                ProductionSchedulePlan.product_code.ilike(like),
-                ProductionSchedulePlan.model_code.ilike(like),
-                ProductionSchedulePlan.owner.ilike(like),
-                ProductionSchedulePlan.remark.ilike(like),
-            )
-        )
+        keyword_or = [
+            ProductionSchedulePlan.order_no.ilike(like),
+            ProductionSchedulePlan.line_no.ilike(like),
+            ProductionSchedulePlan.product_code.ilike(like),
+            ProductionSchedulePlan.model_code.ilike(like),
+            ProductionSchedulePlan.owner.ilike(like),
+        ]
+        if '-' in keyword:
+            parts = keyword.rsplit('-', 1)
+            if len(parts) == 2 and parts[1].strip().isdigit():
+                keyword_or.append(
+                    and_(
+                        ProductionSchedulePlan.order_no.ilike(f"%{parts[0].strip()}%"),
+                        ProductionSchedulePlan.line_no.ilike(f"%{parts[1].strip()}%"),
+                    )
+                )
+        conditions.append(or_(*keyword_or))
     if is_active is not None:
         conditions.append(ProductionSchedulePlan.is_active == is_active)
     if needs_reschedule is True:
@@ -4261,6 +4604,50 @@ async def list_schedule_plans(
             schedule_context=None,
         )
         items.append(item)
+
+    # 批量查 daily_breakdown(每天产量拆分)
+    try:
+        from app.models.production.capacity_slot import CapacitySlot
+        plan_ids = [item.id for item in items]
+        if plan_ids:
+            slot_rows = await db.execute(
+                select(
+                    CapacitySlot.plan_id,
+                    func.date(CapacitySlot.slot_date).label("dt"),
+                    CapacitySlot.hours,
+                )
+                .where(
+                    CapacitySlot.plan_id.in_(plan_ids),
+                    CapacitySlot.is_active == True,
+                )
+                .order_by(CapacitySlot.plan_id, func.date(CapacitySlot.slot_date))
+            )
+            # 按 plan_id 分组
+            slot_map: dict[int, list] = {}
+            for r in slot_rows.all():
+                pid = r[0]
+                dt = str(r[1])
+                hours = float(r[2])
+                slot_map.setdefault(pid, []).append({"date": dt, "hours": hours})
+
+            for item in items:
+                slots = slot_map.get(item.id, [])
+                if slots:
+                    upph = float(item.upph or 0)
+                    mp = int(item.manpower or 10)
+                    total_qty = float(item.quantity or 0)
+                    remaining = total_qty
+                    breakdown = []
+                    for s in slots:
+                        if upph > 0 and mp > 0:
+                            daily_qty = min(round(upph * mp * s["hours"]), int(remaining))
+                        else:
+                            daily_qty = 0
+                        remaining -= daily_qty
+                        breakdown.append({"date": s["date"], "hours": s["hours"], "qty": daily_qty})
+                    item.daily_breakdown = breakdown
+    except Exception:
+        pass
     timings_ms["serialize_items"] = round((perf_counter() - step_started_at) * 1000, 2)
     timings_ms["total"] = round((perf_counter() - request_started_at) * 1000, 2)
     logger.info(
@@ -4440,6 +4827,12 @@ async def confirm_delete_schedule_plan(
         affected_plan_ids=preview_result.get("affected_plan_ids"),
         is_frozen_break=in_frozen,
     )
+    # 释放产能时间槽(否则会留下悬空占用)
+    try:
+        from app.services.production.capacity_slot_service import release_slots_for_plan
+        await release_slots_for_plan(db, record.id)
+    except Exception:
+        pass
     await db.delete(record)
     delete_mark_ms = round((perf_counter() - step_started_at) * 1000, 2)
 
@@ -4690,14 +5083,105 @@ async def planned_qty_audit(
     })
 
 
+@router.post("/{plan_id}/reschedule-preview", response_model=ResponseModel[dict])
+async def reschedule_plan_preview(
+    plan_id: int,
+    target_date: date = Query(..., description="目标开工日期"),
+    manpower: Optional[int] = Query(None, description="新班组人数(可空, 不传则沿用原值)"),
+    daily_work_hours: Optional[float] = Query(None, description="新每日工时(可空, 不传则沿用原值)"),
+    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """重排预览: 不写库, 只返回如果挪到 target_date 后的连锁影响.
+
+    返回结构:
+      - target_new_start / target_new_end: 目标计划的新位置
+      - target_manpower / target_daily_work_hours: 目标计划重排后的人数/工时
+      - moves: 包含目标 + 所有受影响计划的挪动明细(预览 diff)
+      - conflicts_in_frozen_zone: 涉及冷冻区的 plan_id 列表
+      - has_warnings / summary: 是否有警告 / 摘要
+
+    如果传了 manpower 或 daily_work_hours, 会用新值重算工期天数
+    (公式: 天数 = ceil(数量 / (UPPH × 人数 × 每日工时)))
+    """
+    from app.services.production.schedule_plan_cascading_service import compute_reschedule_preview
+    try:
+        preview = await compute_reschedule_preview(
+            db,
+            plan_id=plan_id,
+            new_start=target_date,
+            manpower=manpower,
+            daily_work_hours=daily_work_hours,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ResponseModel(data=preview.to_dict())
+
+
 @router.post("/{plan_id}/reschedule", response_model=ResponseModel[ProductionSchedulePlanOut])
 async def reschedule_plan(
     plan_id: int,
+    target_date: Optional[date] = Query(None, description="指定排产日期，同部门的已有计划将自动往后推"),
+    break_frozen_reason: Optional[str] = Query(None, description="破冻理由(涉及冷冻区时必填)"),
+    manpower: Optional[int] = Query(None, description="新班组人数(可空, 不传则沿用原值)"),
+    daily_work_hours: Optional[float] = Query(None, description="新每日工时(可空, 不传则沿用原值)"),
     current_user: dict = Depends(PermissionChecker("production.schedule_plans", "update")),
     db: AsyncSession = Depends(get_db),
 ):
-    """重新排产一个已存在的计划"""
-    new_record = await _reschedule_plan_version(db, plan_id, current_user["username"])
+    """重新排产一个已存在的计划。
+
+    指定 target_date 后走级联重排算子:
+    - 目标计划挪到 target_date
+    - 跟新区间冲突的同段计划自动推后
+    - 目标挪走后空出的位置由后续计划前挪填补
+    - 涉及冷冻区时必须提供 break_frozen_reason
+    - 可通过 manpower/daily_work_hours 调整目标计划的产能, 系统会重算工期
+    """
+    from app.services.production.schedule_plan_cascading_service import (
+        compute_reschedule_preview, apply_reschedule,
+    )
+
+    if target_date is None:
+        # 没指定日期: 走原逻辑(交期倒推)
+        new_record = await _reschedule_plan_version(db, plan_id, current_user["username"], plan_date=None)
+    else:
+        # 指定日期: 走新的级联算子
+        try:
+            preview = await compute_reschedule_preview(
+                db,
+                plan_id=plan_id,
+                new_start=target_date,
+                manpower=manpower,
+                daily_work_hours=daily_work_hours,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        if preview.conflicts_in_frozen_zone and not (break_frozen_reason and break_frozen_reason.strip()):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"重排涉及冷冻区计划 {preview.conflicts_in_frozen_zone}, "
+                    "必须提供 break_frozen_reason"
+                ),
+            )
+
+        new_plans = await apply_reschedule(
+            db, preview, operator=current_user["username"], break_frozen_reason=break_frozen_reason,
+        )
+        # 返回目标计划的新版本
+        target_plan = next((p for p in new_plans if p.previous_plan_id == plan_id), None)
+        new_record = target_plan or (new_plans[0] if new_plans else None)
+        if not new_record:
+            # 没有变化也按成功返回(目标已在 target_date)
+            orig = (await db.execute(
+                select(ProductionSchedulePlan).where(ProductionSchedulePlan.id == plan_id)
+            )).scalar_one()
+            new_record = orig
+
+    remark_parts = ["单条手动重排"]
+    if target_date:
+        remark_parts.append(f"级联重排到 {target_date}(含冲突推后+空档前挪)")
     await _log_schedule_operation(
         db,
         "reschedule",
@@ -4707,7 +5191,7 @@ async def reschedule_plan(
         order_no=new_record.order_no,
         line_no=new_record.line_no,
         previous_version_id=plan_id,
-        remark="单条手动重排",
+        remark="，".join(remark_parts),
     )
     await db.commit()
     if new_record.order_no and new_record.line_no:
@@ -5294,7 +5778,7 @@ async def get_schedule_debug_trace(
             "product_model": order_line.product_model,
             "bom_no": bom_no,
             "order_qty": float(order_line.order_qty or 0),
-            "promised_date": order_line.promised_date.isoformat() if order_line.promised_date else None,
+            "promised_date": _get_effective_due_date(order_line).isoformat() if _get_effective_due_date(order_line) else None,
             "updated_at": order_line.updated_at.isoformat() if order_line.updated_at else None,
         },
         "snapshot": (
@@ -5868,6 +6352,45 @@ async def get_work_hours_config(
     })
 
 
+@router.get("/capacity-usage", response_model=ResponseModel[list])
+async def get_capacity_usage_api(
+    department: str = Query("生产"),
+    schedule_bucket: str = Query(..., pattern="^(lean|assembly|packaging)$"),
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    daily_capacity: Optional[float] = Query(None, description="可覆盖默认每日工时"),
+    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """查询某段日期的产能时间槽使用情况.
+
+    返回每天的: capacity(总工时) / booked(已占) / available(剩余) / utilization(利用率)
+    用于排产弹窗显示"该日剩余 X 小时可用".
+    """
+    from app.services.production.capacity_slot_service import (
+        get_capacity_usage, STANDARD_DAILY_HOURS,
+    )
+    cap = daily_capacity if daily_capacity and daily_capacity > 0 else STANDARD_DAILY_HOURS
+    usage = await get_capacity_usage(
+        db,
+        department=department,
+        schedule_bucket=schedule_bucket,
+        start_date=start_date,
+        end_date=end_date,
+        daily_capacity=cap,
+    )
+    return ResponseModel(data=[
+        {
+            "date": u["date"].isoformat() if hasattr(u["date"], "isoformat") else str(u["date"]),
+            "capacity": u["capacity"],
+            "booked": u["booked"],
+            "available": u["available"],
+            "utilization": u["utilization"],
+        }
+        for u in usage
+    ])
+
+
 @router.post("/simulate-lean", response_model=ResponseModel[ProductionSimulationResponse])
 async def simulate_lean_schedule(
     data: ProductionSimulationRequest,
@@ -5977,6 +6500,7 @@ async def auto_schedule(
         daily_work_hours=data.daily_work_hours,
         owner=data.owner,
         operator=current_user["username"],
+        manpower=data.manpower,
     )
     await db.commit()
     await _sync_snapshot_schedule_state_for_keys(
@@ -6037,6 +6561,7 @@ async def batch_auto_schedule(
                 operator=current_user["username"],
                 fail_if_scheduled=True,
                 operation_remark="批量排产创建",
+                manpower=item.manpower or data.manpower,
             )
             await db.commit()
             synced_keys.update({

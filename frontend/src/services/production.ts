@@ -19,7 +19,32 @@ export const productionApi = {
   executeDeleteBackfill: (data: { items: Array<{ plan_id: number; suggested_plan_date: string }>; remark?: string }) =>
     api.post('/production/schedule-plans/backfill/execute', data),
   // 重新排产
-  reschedulePlan: (planId: number) => api.post(`/production/schedule-plans/${planId}/reschedule`),
+  reschedulePreview: (
+    planId: number,
+    targetDate: string,
+    manpower?: number,
+    dailyWorkHours?: number,
+  ) =>
+    api.post(`/production/schedule-plans/${planId}/reschedule-preview`, null, {
+      params: { target_date: targetDate, manpower, daily_work_hours: dailyWorkHours },
+      timeout: 60000,
+    }),
+  reschedulePlan: (
+    planId: number,
+    targetDate?: string,
+    breakFrozenReason?: string,
+    manpower?: number,
+    dailyWorkHours?: number,
+  ) =>
+    api.post(`/production/schedule-plans/${planId}/reschedule`, null, {
+      params: {
+        target_date: targetDate,
+        break_frozen_reason: breakFrozenReason,
+        manpower,
+        daily_work_hours: dailyWorkHours,
+      },
+      timeout: 120000,
+    }),
   listSchedulePlanHistory: (params: { order_no: string; line_no: string }) =>
     api.get('/production/schedule-plans/history', { params }),
   // 订单池用于排产
@@ -28,10 +53,18 @@ export const productionApi = {
   refreshTodoSnapshots: (data: Record<string, any>) => api.post('/production/schedule-plans/todo-workbench/refresh-snapshots', data),
   // 获取工作时间配置
   getWorkHoursConfig: () => api.get('/production/schedule-plans/work-hours-config'),
+  // 查询产能时间槽使用情况
+  getCapacityUsage: (params: {
+    department: string
+    schedule_bucket: string
+    start_date: string
+    end_date: string
+    daily_capacity?: number
+  }) => api.get('/production/schedule-plans/capacity-usage', { params }),
   simulateLeanSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/simulate-lean', data),
   // 一键排产
-  autoSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/auto-schedule', data),
-  batchAutoSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/batch-auto-schedule', data),
+  autoSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/auto-schedule', data, { timeout: 120000 }),
+  batchAutoSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/batch-auto-schedule', data, { timeout: 300000 }),
   // 检测变更
   detectScheduleChanges: () => api.post('/production/schedule-plans/detect-changes'),
   // UPPH 变更影响

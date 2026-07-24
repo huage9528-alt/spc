@@ -11,7 +11,7 @@ import { useAuthStore } from '../../../store/auth'
 
 const STATUS_MAP: Record<string, { text: string; color: string }> = {
   draft: { text: '草稿', color: 'default' }, pending: { text: '审批中', color: 'processing' },
-  approved: { text: '已通过', color: 'success' }, rejected: { text: '已驳回', color: 'error' }, recalled: { text: '已撤回', color: 'warning' },
+  approved: { text: '已归档', color: 'success' }, rejected: { text: '已驳回', color: 'error' }, recalled: { text: '已撤回', color: 'warning' },
 }
 
 export default function PriceChangeList() {
@@ -30,8 +30,10 @@ export default function PriceChangeList() {
       render: (_: any, r: any) => r.change_date || '-' },
     { title: '状态', dataIndex: 'approval_status', width: 100,
       render: (_, r) => { const s = STATUS_MAP[r.approval_status] || STATUS_MAP.draft; return <Tag color={s.color}>{s.text}</Tag> },
-      valueType: 'select', valueEnum: { draft: '草稿', pending: '审批中', approved: '已通过', rejected: '已驳回', recalled: '已撤回' } },
-    { title: '申请人', dataIndex: 'applicant', width: 100 },
+      valueType: 'select', valueEnum: { draft: '草稿', pending: '审批中', approved: '已归档', rejected: '已驳回', recalled: '已撤回' } },
+    { title: '申请人', dataIndex: 'applicant_display', width: 100,
+      render: (_: any, r: any) => r.applicant_display || r.applicant || '-',
+    },
     { title: '创建时间', dataIndex: 'created_at', width: 150, search: false,
       render: (_, r) => r.created_at ? dayjs(r.created_at).format('YYYY-MM-DD HH:mm') : '-' },
     { title: '操作', width: 120, fixed: 'right', search: false,

@@ -57,10 +57,14 @@ class ProductionChangeService:
 
             changes = []
 
-            # 3. 比较交期变化
-            if plan.source_promised_date != current_sale_order_line.promised_date:
+            # 3. 比较交期变化(基于出货计划, fallback promised_date)
+            current_effective_due = (
+                getattr(current_sale_order_line, "shipping_plan", None)
+                or current_sale_order_line.promised_date
+            )
+            if plan.source_promised_date != current_effective_due:
                 changes.append(
-                    f"交期从 {plan.source_promised_date} 变为 {current_sale_order_line.promised_date}"
+                    f"出货计划从 {plan.source_promised_date} 变为 {current_effective_due}"
                 )
             
             # 4. 比较数量变化
@@ -119,7 +123,10 @@ class ProductionChangeService:
                         "product_model": plan.source_product_model,
                     }),
                     new_value=str({ # Store snapshot of new values
-                        "promised_date": str(current_sale_order_line.promised_date),
+                        "shipping_plan": str(
+                            getattr(current_sale_order_line, "shipping_plan", None)
+                            or current_sale_order_line.promised_date
+                        ),
                         "order_qty": float(current_sale_order_line.order_qty) if current_sale_order_line.order_qty else None,
                         "product_code": current_sale_order_line.product_code,
                         "product_model": current_sale_order_line.product_model,

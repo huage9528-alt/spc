@@ -43,5 +43,28 @@ backend/perf_test.py
 backend/migrate_frozen.py
 backend/seed_process_test_data.py
 backend/test_delete_preview.py
+backend/fix_name*.py
+backend/perf_*.py
+backend/quick_test.py
+backend/test_*.py
 
+# 根目录调试脚本(不提交)
+/*.py
+# 但保留 init_database 等必要脚本(在 backend/ 下)
+
+# 日志文件
+*.log
+*.err.log
+*.err2.log
+uvicorn.*
+
+# 文档(本机笔记，不提交)
+docs/
+*.md
+!AGENTS.md
+!CODE_WIKI.md
+!README.md
+!backend/ERP_INTEGRATION.md
+
+# 临时压缩包
 *.tar
