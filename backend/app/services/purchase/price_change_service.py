@@ -84,6 +84,10 @@ class PriceChangeService:
             record["attachments"] = json.loads(record["attachments"] or "[]")
         if isinstance(record.get("approval_snapshot"), str):
             record["approval_snapshot"] = json.loads(record["approval_snapshot"] or "[]")
+        if isinstance(record.get("self_check_result"), str):
+            record["self_check_result"] = json.loads(record["self_check_result"] or "{}")
+        if isinstance(record.get("self_check_evidence"), str):
+            record["self_check_evidence"] = json.loads(record["self_check_evidence"] or "[]")
         # 子表
         items_row = await self.db.execute(text("SELECT * FROM purchase_price_change_item WHERE change_id = :cid ORDER BY seq"), {"cid": change_id})
         record["items"] = [dict(r._mapping) for r in items_row]
@@ -103,7 +107,7 @@ class PriceChangeService:
             record["ai_analysis"] = None
         return record
 
-    async def create_price_change(self, data: dict, items_data: list, *, submit=False, applicant=""):
+    async def create_price_change(self, data: dict, items_data: list, *, submit=False, applicant="", self_check_evidence: list | None = None):
         change_no = await self._gen_change_no()
         current = datetime.now()
         await self.db.execute(
@@ -140,6 +144,23 @@ class PriceChangeService:
             )
 
         if submit:
+            # 1. 运行自检
+            check_result = await self.self_check_record(cid)
+            required, reason = self._check_self_check_required(check_result)
+            if required and (not self_check_evidence or len(self_check_evidence) == 0):
+                record = await self.get_price_change(cid)
+                record["_self_check_required"] = True
+                record["_self_check_result"] = check_result
+                record["_message"] = reason
+                return record
+
+            # 2. 存储凭证
+            if self_check_evidence:
+                await self.db.execute(
+                    text("UPDATE purchase_price_change SET self_check_evidence=:ev WHERE id=:cid"),
+                    {"ev": json.dumps(self_check_evidence), "cid": cid},
+                )
+
             await self._add_approval_log(cid, None, "submit", applicant, "提交审批")
             await self._init_approval_snapshot(cid)
             await self._run_ai_analysis(cid)
@@ -184,11 +205,41 @@ class PriceChangeService:
 
         return await self.get_price_change(change_id)
 
-    async def submit_for_approval(self, change_id: int, applicant=""):
+    async def submit_for_approval(self, change_id: int, applicant="", *, self_check_evidence: list | None = None):
         record = await self.get_price_change(change_id)
         if not record or record.get("approval_status") not in ("draft", "rejected", "recalled"):
             return None
 
+        # 1. 如果没有 self_check_result，自动运行自检
+        check_result = record.get("self_check_result")
+        if isinstance(check_result, str):
+            try:
+                check_result = json.loads(check_result)
+            except Exception:
+                check_result = None
+        if not check_result:
+            check_result = await self.self_check_record(change_id)
+        elif record.get("self_check_status") in (None, "pending"):
+            check_result = await self.self_check_record(change_id)
+
+        # 2. 校验自检结果 — 高风险必须提供凭证
+        required, reason = self._check_self_check_required(check_result)
+        if required and (not self_check_evidence or len(self_check_evidence) == 0):
+            # 返回自检结果和需要凭证的提示，不阻断创建但标记为 draft
+            return {
+                "_self_check_required": True,
+                "_self_check_result": check_result,
+                "_message": reason,
+            }
+
+        # 3. 存储凭证
+        if self_check_evidence:
+            await self.db.execute(
+                text("UPDATE purchase_price_change SET self_check_evidence=:ev WHERE id=:cid"),
+                {"ev": json.dumps(self_check_evidence), "cid": change_id},
+            )
+
+        # 4. 正常的提交流程
         await self.db.execute(text("DELETE FROM purchase_price_change_approval_log WHERE change_id = :cid"), {"cid": change_id})
         await self.db.execute(
             text("UPDATE purchase_price_change SET approval_status='pending', approval_level=1, submitted_at=:now WHERE id=:cid"),
@@ -196,8 +247,7 @@ class PriceChangeService:
         )
         await self._add_approval_log(change_id, None, "submit", applicant, "提交审批")
         await self._init_approval_snapshot(change_id)
-        await self._run_ai_analysis(change_id)  # 异步触发 AI 分析
-        # 通知 L1 审批人
+        await self._run_ai_analysis(change_id)
         await self._notify_approvers_of_level(change_id, 1)
         return await self.get_price_change(change_id)
 
@@ -421,6 +471,16 @@ class PriceChangeService:
                     pass
             elif d.get("approval_snapshot") is None:
                 d["approval_snapshot"] = []
+            if isinstance(d.get("self_check_result"), str):
+                try:
+                    d["self_check_result"] = json.loads(d["self_check_result"])
+                except Exception:
+                    pass
+            if isinstance(d.get("self_check_evidence"), str):
+                try:
+                    d["self_check_evidence"] = json.loads(d["self_check_evidence"])
+                except Exception:
+                    pass
 
             # 权限过滤：非 admin 只返回当前级别归自己审的单子
             if approver_role != "admin":
@@ -462,6 +522,285 @@ class PriceChangeService:
     async def get_approval_logs(self, change_id: int):
         rows = await self.db.execute(text("SELECT * FROM purchase_price_change_approval_log WHERE change_id=:cid ORDER BY operated_at"), {"cid": change_id})
         return [dict(r._mapping) for r in rows]
+
+    # ==================== 自检引擎 ====================
+
+    async def self_check_preview(self, items_data: list, supplier_code: str = "") -> dict:
+        """对提交的物料明细做自检（不依赖 DB 已有记录），返回结构化结果。
+        用于前端在提交前预览自检结果。
+        """
+        checks = []
+        max_risk = "low"
+
+        for item in items_data:
+            mc = item.get("material_code", "")
+            mn = item.get("material_name", "")
+            old_price = float(item.get("old_price") or 0)
+            new_price = float(item.get("new_price") or 0)
+
+            check = {
+                "seq": item.get("seq", 0),
+                "material_code": mc,
+                "material_name": mn,
+                "old_price": old_price,
+                "new_price": new_price,
+                "risks": [],
+                "risk_level": "low",
+            }
+
+            if not mc or old_price <= 0 or new_price <= 0:
+                checks.append(check)
+                continue
+
+            # 1. 历史比价引擎
+            hist_rows = await self.db.execute(text("""
+                SELECT pci.old_price, pci.new_price, pc.change_date, pc.supplier_name
+                FROM purchase_price_change_item pci
+                JOIN purchase_price_change pc ON pc.id = pci.change_id
+                WHERE pci.material_code = :mc
+                  AND pc.approval_status = 'approved'
+                  AND pc.id != COALESCE(:exclude, -1)
+                ORDER BY pc.change_date DESC LIMIT 3
+            """), {"mc": mc, "exclude": -1})
+            history = [dict(r._mapping) for r in hist_rows]
+
+            if history:
+                hist_prices = []
+                for h in history:
+                    np = float(h.get("new_price") or 0)
+                    if np > 0:
+                        hist_prices.append(np)
+                if hist_prices:
+                    hist_avg = sum(hist_prices) / len(hist_prices)
+                    hist_max = max(hist_prices)
+                    hist_min = min(hist_prices)
+
+                    # 规则：新价超过历史最高价
+                    if new_price > hist_max * 1.1:
+                        over_pct = round((new_price / hist_max - 1) * 100, 1)
+                        check["risks"].append({
+                            "type": "历史比价",
+                            "rule": "新价超过历史最高价10%以上",
+                            "detail": f"历史最高价 {hist_max}，新价 {new_price}，超出 {over_pct}%",
+                            "severity": "high",
+                            "data": {"hist_avg": round(hist_avg, 4), "hist_max": round(hist_max, 4), "hist_min": round(hist_min, 4)},
+                        })
+                    elif new_price > hist_max:
+                        over_pct = round((new_price / hist_max - 1) * 100, 1)
+                        check["risks"].append({
+                            "type": "历史比价",
+                            "rule": "新价超过历史最高价",
+                            "detail": f"历史最高价 {hist_max}，新价 {new_price}，超出 {over_pct}%",
+                            "severity": "medium",
+                            "data": {"hist_avg": round(hist_avg, 4), "hist_max": round(hist_max, 4), "hist_min": round(hist_min, 4)},
+                        })
+                    elif new_price > hist_avg * 1.05:
+                        over_pct = round((new_price / hist_avg - 1) * 100, 1)
+                        check["risks"].append({
+                            "type": "历史比价",
+                            "rule": "新价超过历史均价5%以上",
+                            "detail": f"历史均价 {round(hist_avg, 2)}，新价 {new_price}，高出 {over_pct}%",
+                            "severity": "medium",
+                            "data": {"hist_avg": round(hist_avg, 4), "hist_max": round(hist_max, 4), "hist_min": round(hist_min, 4)},
+                        })
+                    elif new_price <= hist_avg:
+                        check["risks"].append({
+                            "type": "历史比价",
+                            "rule": "新价不高于历史均价",
+                            "detail": f"历史均价 {round(hist_avg, 2)}，新价 {new_price}，处于合理范围",
+                            "severity": "low",
+                            "data": {"hist_avg": round(hist_avg, 4), "hist_max": round(hist_max, 4), "hist_min": round(hist_min, 4)},
+                        })
+                else:
+                    check["risks"].append({
+                        "type": "历史比价",
+                        "rule": "无有效历史价格数据",
+                        "detail": "该物料有历史记录但无有效价格",
+                        "severity": "low",
+                        "data": {},
+                    })
+            else:
+                check["risks"].append({
+                    "type": "历史比价",
+                    "rule": "无历史记录",
+                    "detail": "该物料无历史调价记录，无法通过历史比价",
+                    "severity": "low",
+                    "data": {},
+                })
+
+            # 2. 涨幅分析引擎
+            cur_pct = round((new_price / old_price - 1) * 100, 2) if old_price > 0 else 0
+            if cur_pct > 0:
+                # 查历史同物料的平均涨幅
+                hist_pct_rows = await self.db.execute(text("""
+                    SELECT pci.price_change_pct
+                    FROM purchase_price_change_item pci
+                    JOIN purchase_price_change pc ON pc.id = pci.change_id
+                    WHERE pci.material_code = :mc
+                      AND pc.approval_status = 'approved'
+                      AND pci.price_change_pct IS NOT NULL
+                      AND pci.price_change_pct > 0
+                      AND pc.id != COALESCE(:exclude, -1)
+                    ORDER BY pc.change_date DESC LIMIT 5
+                """), {"mc": mc, "exclude": -1})
+                hist_pcts = [float(r[0]) for r in hist_pct_rows if r[0] is not None]
+
+                if hist_pcts:
+                    hist_avg_pct = sum(hist_pcts) / len(hist_pcts)
+                    # 涨幅远超历史平均水平
+                    if cur_pct > hist_avg_pct * 2 and hist_avg_pct > 0:
+                        check["risks"].append({
+                            "type": "涨幅分析",
+                            "rule": "涨幅远超历史平均水平",
+                            "detail": f"历史平均涨幅 {round(hist_avg_pct, 1)}%，本次涨幅 {cur_pct}%，超过2倍",
+                            "severity": "high",
+                            "data": {"hist_avg_pct": round(hist_avg_pct, 2), "cur_pct": cur_pct},
+                        })
+                    elif cur_pct > hist_avg_pct * 1.5:
+                        check["risks"].append({
+                            "type": "涨幅分析",
+                            "rule": "涨幅明显高于历史平均水平",
+                            "detail": f"历史平均涨幅 {round(hist_avg_pct, 1)}%，本次涨幅 {cur_pct}%",
+                            "severity": "medium",
+                            "data": {"hist_avg_pct": round(hist_avg_pct, 2), "cur_pct": cur_pct},
+                        })
+                    else:
+                        check["risks"].append({
+                            "type": "涨幅分析",
+                            "rule": "涨幅在历史范围内",
+                            "detail": f"历史平均涨幅 {round(hist_avg_pct, 1)}%，本次涨幅 {cur_pct}%",
+                            "severity": "low",
+                            "data": {"hist_avg_pct": round(hist_avg_pct, 2), "cur_pct": cur_pct},
+                        })
+                else:
+                    # 无历史涨幅数据，总体用绝对涨幅判断
+                    if cur_pct >= 20:
+                        check["risks"].append({
+                            "type": "涨幅分析",
+                            "rule": "涨幅超过20%，需说明原因",
+                            "detail": f"本次涨幅 {cur_pct}%，无历史参考数据",
+                            "severity": "high",
+                            "data": {"hist_avg_pct": None, "cur_pct": cur_pct},
+                        })
+                    elif cur_pct >= 10:
+                        check["risks"].append({
+                            "type": "涨幅分析",
+                            "rule": "涨幅超过10%，建议说明",
+                            "detail": f"本次涨幅 {cur_pct}%，无历史参考数据",
+                            "severity": "medium",
+                            "data": {"hist_avg_pct": None, "cur_pct": cur_pct},
+                        })
+                    else:
+                        check["risks"].append({
+                            "type": "涨幅分析",
+                            "rule": "涨幅在合理范围内",
+                            "detail": f"本次涨幅 {cur_pct}%",
+                            "severity": "low",
+                            "data": {"hist_avg_pct": None, "cur_pct": cur_pct},
+                        })
+            elif cur_pct < 0:
+                check["risks"].append({
+                    "type": "涨幅分析",
+                    "rule": "降价",
+                    "detail": f"本次降价 {abs(cur_pct)}%",
+                    "severity": "low",
+                    "data": {"hist_avg_pct": None, "cur_pct": cur_pct},
+                })
+            else:
+                check["risks"].append({
+                    "type": "涨幅分析",
+                    "rule": "价格持平",
+                    "detail": "新旧价格无变化",
+                    "severity": "low",
+                    "data": {"hist_avg_pct": None, "cur_pct": cur_pct},
+                })
+
+            # 单项最高风险等级
+            risk_levels = [r["severity"] for r in check["risks"]]
+            if "high" in risk_levels:
+                check["risk_level"] = "high"
+            elif "medium" in risk_levels:
+                check["risk_level"] = "medium"
+            else:
+                check["risk_level"] = "low"
+
+            if check["risk_level"] == "high":
+                max_risk = "high"
+            elif max_risk != "high" and check["risk_level"] == "medium":
+                max_risk = "medium"
+
+            checks.append(check)
+
+        return {
+            "checks": checks,
+            "overall_status": max_risk,
+            "summary": self._summarize_self_check(checks),
+        }
+
+    async def self_check_record(self, change_id: int) -> dict:
+        """对已有记录做自检，并存储结果到数据库。"""
+        record = await self.get_price_change(change_id)
+        if not record:
+            return {"error": "调价单不存在"}
+        items = record.get("items") or []
+        result = await self.self_check_preview(items, record.get("supplier_code", ""))
+        await self.db.execute(
+            text("UPDATE purchase_price_change SET self_check_status=:st, self_check_result=:res WHERE id=:cid"),
+            {"st": result["overall_status"], "res": json.dumps(result), "cid": change_id},
+        )
+        return result
+
+    def _summarize_self_check(self, checks: list) -> str:
+        """生成自检的一句话摘要。"""
+        total = len(checks)
+        high = sum(1 for c in checks if c["risk_level"] == "high")
+        medium = sum(1 for c in checks if c["risk_level"] == "medium")
+        parts = [f"共 {total} 项物料"]
+        if high:
+            parts.append(f"高风险 {high} 项")
+        if medium:
+            parts.append(f"中风险 {medium} 项")
+        low = total - high - medium
+        if low:
+            parts.append(f"正常 {low} 项")
+        if high > 0:
+            return f"⚠️ {'，'.join(parts)}，需上传支撑凭证"
+        elif medium > 0:
+            return f"⚡ {'，'.join(parts)}，建议上传凭证说明"
+        return f"✅ {'，'.join(parts)}，自检通过"
+
+    def _check_self_check_required(self, self_check_result: dict | None) -> tuple[bool, str]:
+        """判断是否需要强制上传凭证。返回 (required, reason)。"""
+        if not self_check_result:
+            return False, ""
+        overall = self_check_result.get("overall_status", "low")
+        if overall == "high":
+            return True, "存在高风险项，必须上传支撑凭证才能提交审批"
+        if overall == "medium":
+            return True, "存在中风险项，建议上传凭证说明（可选跳过）"
+        return False, ""
+
+    async def _validate_and_store_evidence(self, change_id: int, evidence: list | None):
+        """校验并存储凭证。evidence: [{item_seq, file_id, file_name, file_url, explanation}]"""
+        record = await self.get_price_change(change_id)
+        if not record:
+            return {"success": False, "message": "调价单不存在"}
+        check_result = record.get("self_check_result")
+        if not check_result:
+            return {"success": False, "message": "请先运行自检"}
+        if isinstance(check_result, str):
+            try:
+                check_result = json.loads(check_result)
+            except Exception:
+                check_result = None
+        required, reason = self._check_self_check_required(check_result)
+        if required and (not evidence or len(evidence) == 0):
+            return {"success": False, "message": reason}
+        await self.db.execute(
+            text("UPDATE purchase_price_change SET self_check_evidence=:ev WHERE id=:cid"),
+            {"ev": json.dumps(evidence or []), "cid": change_id},
+        )
+        return {"success": True}
 
     async def _gen_change_no(self):
         today = datetime.now().strftime("%Y%m%d")

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import assistant, basicdata, common, dashboard, exception, external, masterdata, material, meeting, npi, order, production, purchase, rules
+from app.api.v1 import assistant, basicdata, common, dashboard, exception, masterdata, material, meeting, npi, order, production, purchase, rules
 
 api_router = APIRouter()
 
@@ -12,9 +12,6 @@ api_router.include_router(order.order_router, prefix="/orders", tags=["订单交
 api_router.include_router(order.eta_router, prefix="/orders/eta", tags=["ETA管理"])
 api_router.include_router(order.run_order_router, prefix="/run-orders", tags=["跑单管理"])
 
-# Purchase center
-api_router.include_router(purchase.price_change_router, prefix="/purchase/price-change", tags=["采购调价中心"])
-
 # Material center
 api_router.include_router(material.purchase_plan_router, prefix="/materials/purchase-plan", tags=["物料齐套中心-采购到料计划"])
 api_router.include_router(material.purchase_plan_analysis_router, prefix="/materials/purchase-plan/analysis", tags=["物料齐套中心-采购到料计划分析"])
@@ -25,7 +22,6 @@ api_router.include_router(material.supplier_risk_router, prefix="/materials/supp
 api_router.include_router(material.supplier_payment_router, prefix="/materials/supplier-payment", tags=["物料齐套中心-供应商付款排程"])
 api_router.include_router(material.supplier_message_router, prefix="/materials/supplier-messages", tags=["物料齐套中心-供应商即时沟通"])
 api_router.include_router(material.po_router, prefix="/materials", tags=["物料齐套中心-ERP采购订单"])
-api_router.include_router(material.inventory_check_router, prefix="/materials", tags=["物料齐套中心-订单物料盘点"])
 
 # Production center
 api_router.include_router(production.router, prefix="/production", tags=["生产协同中心"])
@@ -71,9 +67,9 @@ api_router.include_router(basicdata.permissions_router, prefix="/permissions", t
 # 数据供给
 api_router.include_router(basicdata.data_supply_router, prefix="/basicdata/data-supply", tags=["数据供给"])
 
-# 对外接口（供外部系统调用，复用数据供给的 API Key 体系）
-api_router.include_router(external.external_router, prefix="/external", tags=["对外接口"])
-
 # Common files and assistant
 api_router.include_router(common.files_router, prefix="/files", tags=["文件"])
 api_router.include_router(assistant.assistant_router, prefix="/assistant", tags=["智能助手"])
+
+# Purchase center
+api_router.include_router(purchase.price_change_router, prefix="/purchase/price-change", tags=["采购中心-调价单"])

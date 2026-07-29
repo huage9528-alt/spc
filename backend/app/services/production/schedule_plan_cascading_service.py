@@ -426,6 +426,7 @@ async def apply_reschedule(
     *,
     operator: str,
     break_frozen_reason: Optional[str] = None,
+    include_sunday: Optional[bool] = None,
 ) -> list[ProductionSchedulePlan]:
     """把预览结果落库.
 
@@ -524,10 +525,19 @@ async def apply_reschedule(
         # 为新计划占用产能时间槽
         try:
             from app.services.production.capacity_slot_service import recompute_plan_slots
+            from app.services.production.config_service import ProductionScheduleConfigService
             qty = float(new_plan.quantity or 0)
             upph = float(new_plan.upph or 0)
             mp = int(new_plan.manpower or 10)
             bucket = str(new_plan.source_process_type or "").strip()
+            # 周日排产: 显式传入 > 基础条件(按 bucket) > False
+            resolved_sunday = include_sunday
+            if resolved_sunday is None and bucket:
+                try:
+                    base = await ProductionScheduleConfigService(db).get_base_condition(bucket)
+                    resolved_sunday = base.get("include_sunday", False)
+                except Exception:
+                    resolved_sunday = False
             if bucket and qty > 0 and upph > 0 and mp > 0 and new_plan.end_date:
                 total_hours = qty / (upph * mp)
                 await recompute_plan_slots(
@@ -541,6 +551,7 @@ async def apply_reschedule(
                     target_end_date=new_plan.end_date,
                     # 固定用车间最大上限 12h, 防止跨订单累加超载
                     daily_capacity=12.0,
+                    include_sunday=bool(resolved_sunday),
                 )
         except Exception:
             pass

@@ -15,7 +15,7 @@ from sqlalchemy import case, func, or_, select, and_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import log_audit
-from app.core.database import AsyncSessionLocal, get_db
+from app.core.database import AsyncSessionLocal, get_db, get_read_only_db
 from app.core.security import PermissionChecker, decode_access_token, oauth2_scheme
 from app.core.token_blacklist import TOKEN_BLACKLIST_PREFIX, get_redis_client
 from app.models.basicdata.user import SysRole, SysUser
@@ -41,6 +41,7 @@ from app.schemas.production.schemas import (
     BatchAutoScheduleRequest,
     BatchAutoScheduleResponse,
     BatchAutoScheduleItemOut,
+    BaseConditionSaveRequest,
     SaleOrderLineChangeLogOut,
     UpphImpactPlanOut,
     ScheduleChangeEventOut,
@@ -381,11 +382,16 @@ _effective_reschedule_map_cache: dict[tuple, tuple[datetime, dict[int, dict[str,
 _todo_workbench_cache: dict[tuple, tuple[datetime, PageResult]] = {}
 _schedule_plan_list_cache: dict[tuple, tuple[datetime, PageResult]] = {}
 
-# 变更事件缓存（逐条检测太重，30 秒内复用）
+# 变更事件缓存（逐条检测太重，缓存复用）
+# 主缓存 TTL：5 分钟（数据滞后可接受，UPPH/订单变更触发端点会主动失效）
+# force 兜底 TTL：30 秒（即使前端强制刷新，30 秒内也不重算，避免操作后卡 10 秒）
+CHANGE_EVENTS_CACHE_TTL_SECONDS = 300
+CHANGE_EVENTS_FORCE_FLOOR_SECONDS = 30
 _change_events_cache: list = []
 _change_events_ts: float = 0
 _delete_preview_cache: dict[int, tuple[datetime, dict]] = {}
 _order_snapshot_table_ready = False
+_operation_log_table_ready = False
 
 CHANGE_EVENT_TYPE_LABELS = {
     "upph_change": "UPPH变化",
@@ -633,16 +639,24 @@ def _build_schedule_debug_report(
 
 
 async def _ensure_operation_log_table(db: AsyncSession) -> bool:
-    """确保排产操作日志表存在，避免缺表导致日志链路失效。"""
+    """确保排产操作日志表存在，避免缺表导致日志链路失效。
+
+    首次调用建表（CREATE TABLE IF NOT EXISTS，DDL 在远程 DB 上 0.5-1 秒），
+    成功后置进程内 flag，后续直接返回，避免每次都跑 DDL。
+    """
+    global _operation_log_table_ready
+    if _operation_log_table_ready:
+        return True
     bind = db.bind
     if bind is None:
         return False
     try:
         async with bind.begin() as conn:
             await conn.run_sync(ProductionScheduleOperationLog.__table__.create, checkfirst=True)
-        return True
     except Exception:
         return False
+    _operation_log_table_ready = True
+    return True
 
 
 async def _ensure_order_snapshot_table(db: AsyncSession) -> bool:
@@ -3019,11 +3033,44 @@ async def _get_default_daily_work_hours(db: AsyncSession, schedule_bucket: Optio
     return float(work_hours_config["default_daily_work_hours"])
 
 
+# split_rules 单 BOM 进程内缓存（连 ERP 查 ~1 秒，5 分钟复用）
+# ERP 是小时级同步，5 分钟滞后可接受
+SPLIT_RULES_CACHE_TTL_SECONDS = 300
+_split_rules_cache: dict[str, tuple[float, dict]] = {}
+
+
 async def _build_split_rules_map(db: AsyncSession, bom_codes: list[Optional[str]]) -> dict[str, dict]:
+    """批量查 split rules，带单 BOM 进程内缓存（5 分钟）。
+
+    未命中缓存的 BOM 走批量 ERP 查询；命中的直接从缓存取。
+    """
+    import time as _time
     normalized_bom_codes = [str(item).strip() for item in bom_codes if item and str(item).strip()]
     if not normalized_bom_codes:
         return {}
-    return await AssemblyRollScheduleService(db).get_stage_rules_bulk(normalized_bom_codes)
+
+    now = _time.time()
+    result: dict[str, dict] = {}
+    missed: list[str] = []
+    for code in dict.fromkeys(normalized_bom_codes):
+        cached = _split_rules_cache.get(code)
+        if cached and (now - cached[0]) < SPLIT_RULES_CACHE_TTL_SECONDS:
+            if cached[1] is not None:
+                result[code] = cached[1]
+        else:
+            missed.append(code)
+
+    if missed:
+        fresh = await AssemblyRollScheduleService(db).get_stage_rules_bulk(missed)
+        for code, payload in fresh.items():
+            _split_rules_cache[code] = (now, payload)
+            result[code] = payload
+        # 标记本次查过但 ERP 没返回的，避免下次又把它们当未命中（空缓存）
+        for code in missed:
+            if code not in fresh:
+                _split_rules_cache[code] = (now, None)
+
+    return result
 
 
 async def _get_existing_active_plan(
@@ -3129,6 +3176,7 @@ async def _save_schedule_plan_record(
     operation_remark: Optional[str],
     manpower: Optional[int] = None,
     effective_order_qty: Optional[float] = None,
+    include_sunday: Optional[bool] = None,
 ) -> ProductionSchedulePlan:
     priority = _resolve_priority_by_risk(risk_level)
     plan_version = 1
@@ -3192,17 +3240,23 @@ async def _save_schedule_plan_record(
     )
 
     # 占用产能时间槽(支持多订单共享同一天工时)
-    await _book_capacity_slots_for_plan(db, record)
+    await _book_capacity_slots_for_plan(db, record, include_sunday=include_sunday)
 
     return record
 
 
-async def _book_capacity_slots_for_plan(db: AsyncSession, plan: ProductionSchedulePlan) -> None:
+async def _book_capacity_slots_for_plan(
+    db: AsyncSession,
+    plan: ProductionSchedulePlan,
+    *,
+    include_sunday: Optional[bool] = None,
+) -> None:
     """根据计划的总工时和完成日, 占用产能时间槽.
 
     - 总工时 = 数量 / (UPPH × 人数)
     - 目标完成日 = plan.end_date
     - 每天产能上限 = 12h(车间最大工时, 跟订单的 daily_work_hours 解耦)
+    - include_sunday: 显式传入时用传入值, 否则读基础条件(按 bucket), 都没有则 False
     - 占槽后, 用实际占槽结果回写 start_date / end_date
       (解决排产模拟器算的日期跟实际占槽不一致的问题)
     """
@@ -3210,6 +3264,18 @@ async def _book_capacity_slots_for_plan(db: AsyncSession, plan: ProductionSchedu
         from app.services.production.capacity_slot_service import (
             recompute_plan_slots, MAX_DAILY_HOURS,
         )
+        # 周日排产解析: 显式传入 > 基础条件 > False
+        resolved_include_sunday = include_sunday
+        if resolved_include_sunday is None:
+            try:
+                base = await ProductionScheduleConfigService(db).get_base_condition(
+                    str(plan.source_process_type or "")
+                )
+                resolved_include_sunday = base.get("include_sunday", False)
+            except Exception:
+                resolved_include_sunday = False
+        resolved_include_sunday = bool(resolved_include_sunday)
+
         qty = float(plan.quantity or 0)
         upph = float(plan.upph or 0)
         mp = int(plan.manpower or 10)
@@ -3217,6 +3283,16 @@ async def _book_capacity_slots_for_plan(db: AsyncSession, plan: ProductionSchedu
         if not bucket or qty <= 0 or upph <= 0 or mp <= 0 or not plan.end_date:
             return
         total_hours = qty / (upph * mp)
+        # 占槽的每日产能上限：从基础条件读取（按 bucket）
+        # 这样同一桶（如 lean）的所有订单共用同一个日上限（如 8.5h）
+        # 多条订单叠加时，总和不超过基础条件的工时
+        try:
+            base_cond = await ProductionScheduleConfigService(db).get_base_condition(bucket)
+            daily_capacity = float(base_cond.get("daily_work_hours") or 8.5)
+        except Exception:
+            daily_capacity = float(plan.daily_work_hours or 8.5)
+        # daily_capacity 不能超过 MAX_DAILY_HOURS=12（车间物理上限），最小 1
+        daily_capacity = max(1.0, min(daily_capacity, MAX_DAILY_HOURS))
         bookings = await recompute_plan_slots(
             db,
             plan_id=plan.id,
@@ -3226,23 +3302,21 @@ async def _book_capacity_slots_for_plan(db: AsyncSession, plan: ProductionSchedu
             line_no=plan.line_no,
             total_hours=total_hours,
             target_end_date=plan.end_date,
-            daily_capacity=MAX_DAILY_HOURS,
+            daily_capacity=daily_capacity,
+            include_sunday=resolved_include_sunday,
         )
 
         # 用实际占槽结果回写 start_date / end_date
         # (排产模拟器算的日期可能跟实际占槽不一致, 以占槽为准)
+        # 注意：plan.daily_work_hours 保持用户输入，不被占槽结果覆盖
         if bookings:
             actual_start = min(b["date"] for b in bookings)
             actual_end = max(b["date"] for b in bookings)
             plan.start_date = actual_start
             plan.end_date = actual_end
             plan.plan_date = actual_start
-            # 回写实际占用工时
-            if len(bookings) == 1:
-                plan.daily_work_hours = round(float(bookings[0]["hours"]), 2)
-            else:
-                # 多天: 取最大那天的工时(排满的天)
-                plan.daily_work_hours = round(max(float(b["hours"]) for b in bookings), 2)
+            # 不再用占槽结果覆盖 plan.daily_work_hours —— 保持用户输入的工时
+            # 如果用户填 8.5，占槽按 8.5 占，plan.daily_work_hours 也保持 8.5
             db.add(plan)
     except Exception as e:
         logger.warning(f"[capacity_slot] 占用失败 plan_id={plan.id}: {e}", exc_info=True)
@@ -3347,6 +3421,7 @@ async def _create_schedule_plan_from_request(
     operation_remark: Optional[str] = None,
     skip_conflict_resolution: bool = False,
     manpower: Optional[int] = None,
+    include_sunday: Optional[bool] = None,
 ) -> tuple[list[ProductionSchedulePlan], dict, str]:
     simulation_service = ScheduleSimulationService(db)
     row = await _get_latest_sale_order_line(db, order_no, line_no)
@@ -3384,19 +3459,29 @@ async def _create_schedule_plan_from_request(
         )
         schedule_bucket = schedule_context.get("schedule_bucket")
 
-    # 班组人数: API 参数 > 配置默认 > 10
-    # 按"车间+工序段"分别取配置默认(精益/装配车间可能不同)
+    # 班组人数: API 参数 > 基础条件 > UPPH 配置 > 10
+    # 周日排产: API 参数 > 基础条件 > None(交由精益自动试算兜底)
+    base_condition = {}
+    if schedule_bucket:
+        try:
+            base_condition = await ProductionScheduleConfigService(db).get_base_condition(schedule_bucket)
+        except Exception:
+            base_condition = {}
     effective_manpower = int(manpower or 0) if manpower and manpower > 0 else None
+    if effective_manpower is None and base_condition:
+        effective_manpower = int(base_condition.get("default_manpower") or 0) or None
     if effective_manpower is None and schedule_bucket:
         config_manpower, _ = await UpphFormulaConfigService(db).resolve_formula_inputs(
             _resolve_workshop_name_by_bucket(schedule_bucket),
             _resolve_process_type_by_bucket(schedule_bucket),
         )
-        # config_manpower 已废弃统一用 10 (因为之前我们改成不乘人头),
-        # 这里保留兜底, 默认 10
         effective_manpower = int(config_manpower or 10)
     if effective_manpower is None or effective_manpower <= 0:
         effective_manpower = 10
+    # 周日: 显式传入优先, 否则取基础条件(可能为 None 表示走自动试算)
+    resolved_include_sunday = include_sunday
+    if resolved_include_sunday is None and base_condition:
+        resolved_include_sunday = base_condition.get("include_sunday")
 
     if schedule_bucket == "lean":
         resolved_upph = upph
@@ -3465,6 +3550,7 @@ async def _create_schedule_plan_from_request(
             operation_remark=operation_remark,
             manpower=effective_manpower,
             effective_order_qty=effective_order_qty,
+            include_sunday=resolved_include_sunday,
         )
         return [record], _build_schedule_response_calculation(
             schedule_bucket="lean",
@@ -3482,33 +3568,51 @@ async def _create_schedule_plan_from_request(
         if assembly_upph <= 0 or packaging_upph <= 0:
             raise HTTPException(status_code=400, detail="装配拆分后的组装/包装 UPPH 无效，请先检查明细单价或公式配置")
 
+        # mixed 排产: 组装和包装分别走各自的基础条件 (用户传的 manpower/daily_work_hours 作为兜底)
+        # 这样 mixed 订单 = 一条 assembly 计划 (15人/8h) + 一条 packaging 计划 (8人/8h) 各自独立
+        config_service = ProductionScheduleConfigService(db)
+        assembly_base = await config_service.get_base_condition("assembly")
+        packaging_base = await config_service.get_base_condition("packaging")
+
+        # 组装 manpower: 用户传值 > assembly 基础条件 > 兜底(effective_manpower 来自上层)
+        assembly_manpower = manpower if manpower and manpower > 0 else (
+            int(assembly_base.get("default_manpower") or 0) if assembly_base.get("default_manpower") else effective_manpower
+        )
+        # 包装 manpower: 同上
+        packaging_manpower = manpower if manpower and manpower > 0 else (
+            int(packaging_base.get("default_manpower") or 0) if packaging_base.get("default_manpower") else effective_manpower
+        )
+
         assembly_workhour_plan = simulation_service.build_bucket_workhour_plan(
             quantity=effective_order_qty,
             upph=float(assembly_upph),
             promised_date=_get_effective_due_date(order_line),
             schedule_bucket="assembly",
-            manpower=effective_manpower,
+            manpower=assembly_manpower,
         )
         packaging_workhour_plan = simulation_service.build_bucket_workhour_plan(
             quantity=effective_order_qty,
             upph=float(packaging_upph),
             promised_date=_get_effective_due_date(order_line),
             schedule_bucket="packaging",
-            manpower=effective_manpower,
+            manpower=packaging_manpower,
         )
-        assembly_daily_hours = float(
-            await simulation_service.resolve_daily_work_hours(
-                schedule_bucket="assembly",
-                daily_work_hours=daily_work_hours,
-                lean_workhour_plan=assembly_workhour_plan,
-            )
+        # 组装和包装 daily_work_hours 各自走各自的基础条件 (用户传值优先)
+        # 优先级: 用户传值 > 该段基础条件 > lean_workhour_plan 自动试算
+        def _resolve_mixed_daily_hours(base_dh: Optional[float], workhour_plan: dict) -> float:
+            if base_dh:
+                return float(base_dh)
+            workhour_recommend = (workhour_plan or {}).get("recommended_daily_hours")
+            if workhour_recommend:
+                return float(workhour_recommend)
+            return 0.0
+        assembly_daily_hours = _resolve_mixed_daily_hours(
+            daily_work_hours if daily_work_hours else assembly_base.get("daily_work_hours"),
+            assembly_workhour_plan,
         )
-        packaging_daily_hours = float(
-            await simulation_service.resolve_daily_work_hours(
-                schedule_bucket="packaging",
-                daily_work_hours=daily_work_hours,
-                lean_workhour_plan=packaging_workhour_plan,
-            )
+        packaging_daily_hours = _resolve_mixed_daily_hours(
+            daily_work_hours if daily_work_hours else packaging_base.get("daily_work_hours"),
+            packaging_workhour_plan,
         )
         if assembly_daily_hours <= 0 or packaging_daily_hours <= 0:
             raise HTTPException(status_code=400, detail="组装或包装每日工时必须大于0")
@@ -3540,8 +3644,8 @@ async def _create_schedule_plan_from_request(
             ready_offset_days=READY_OFFSET_DAYS,
             assembly_workhour_plan=assembly_workhour_plan,
             packaging_workhour_plan=packaging_workhour_plan,
-            assembly_manpower=effective_manpower,
-            packaging_manpower=effective_manpower,
+            assembly_manpower=assembly_manpower,
+            packaging_manpower=packaging_manpower,
         )
         candidate_order = ["normal", "overtime", "sunday_production"]
         assembly_candidates = assembly_workhour_plan.get("candidate_plans") or {}
@@ -3571,14 +3675,15 @@ async def _create_schedule_plan_from_request(
                     promised_date=_get_effective_due_date(order_line),
                     assembly_upph=assembly_upph,
                     packaging_upph=packaging_upph,
-                    assembly_daily_hours=float(selected_assembly_candidate.get("recommended_daily_hours") or assembly_daily_hours),
-                    packaging_daily_hours=float(selected_packaging_candidate.get("recommended_daily_hours") or packaging_daily_hours),
+                    # 工时用我们已解析的值 (基础条件/用户传值), 不被候选方案的 recommended_daily_hours 覆盖
+                    assembly_daily_hours=assembly_daily_hours,
+                    packaging_daily_hours=packaging_daily_hours,
                     target_ready_date=target_ready_date,
                     ready_offset_days=READY_OFFSET_DAYS,
                     assembly_workhour_plan={**assembly_workhour_plan, **selected_assembly_candidate},
                     packaging_workhour_plan={**packaging_workhour_plan, **selected_packaging_candidate},
-                    assembly_manpower=effective_manpower,
-                    packaging_manpower=effective_manpower,
+                    assembly_manpower=assembly_manpower,
+                    packaging_manpower=packaging_manpower,
                 )
                 adjusted_candidate_result = await _resolve_conflict_aware_mixed_plan(
                     db,
@@ -3736,8 +3841,9 @@ async def _create_schedule_plan_from_request(
             calculation_result=assembly_calculation,
             existing_plan=assembly_existing_plan,
             operation_remark=operation_remark or "两段排产创建-组装",
-            manpower=effective_manpower,
+            manpower=assembly_manpower,
             effective_order_qty=effective_order_qty,
+            include_sunday=resolved_include_sunday,
         )
         packaging_record = await _save_schedule_plan_record(
             db,
@@ -3752,8 +3858,9 @@ async def _create_schedule_plan_from_request(
             calculation_result=packaging_calculation,
             existing_plan=packaging_existing_plan,
             operation_remark=operation_remark or "两段排产创建-包装",
-            manpower=effective_manpower,
+            manpower=packaging_manpower,
             effective_order_qty=effective_order_qty,
+            include_sunday=resolved_include_sunday,
         )
         return [assembly_record, packaging_record], {
             "schedule_bucket": "mixed",
@@ -3863,14 +3970,15 @@ async def _create_schedule_plan_from_request(
         risk_level=risk_level,
         operator=operator,
         owner=owner,
-        schedule_bucket=str(schedule_bucket or "pending"),
-        resolved_upph=float(resolved_upph),
-        resolved_daily_hours=float(resolved_daily_hours),
-        calculation_result=calculation_result,
-        existing_plan=existing_plan,
-        operation_remark=operation_remark,
-        effective_order_qty=effective_order_qty,
-    )
+            schedule_bucket=str(schedule_bucket or "pending"),
+            resolved_upph=float(resolved_upph),
+            resolved_daily_hours=float(resolved_daily_hours),
+            calculation_result=calculation_result,
+            existing_plan=existing_plan,
+            operation_remark=operation_remark,
+            effective_order_qty=effective_order_qty,
+            include_sunday=resolved_include_sunday,
+        )
     return [record], _build_schedule_response_calculation(
         schedule_bucket=schedule_bucket,
         order_line=order_line,
@@ -4948,6 +5056,72 @@ async def delete_schedule_plan(
     )
 
 
+@router.post("/batch-delete", response_model=ResponseModel[dict])
+async def batch_delete_plans(
+    data: dict,
+    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """批量删除排产计划（简化版：不走补位逻辑，直接删 plan + slot + 重置 snapshot）
+
+    用于测试期间快速清理排产数据。
+    正式生产环境应该用单条删除（带补位预览）。
+    """
+    plan_ids = data.get("plan_ids") or []
+    if not plan_ids:
+        raise HTTPException(status_code=400, detail="请先选择要删除的计划")
+
+    # 查出要删的订单 key (用于重置 snapshot)
+    plan_rows = (await db.execute(
+        select(ProductionSchedulePlan).where(
+            ProductionSchedulePlan.id.in_(plan_ids)
+        )
+    )).scalars().all()
+    order_keys = {(p.order_no, p.line_no) for p in plan_rows if p.order_no and p.line_no}
+
+    # 删 capacity_slot
+    from app.services.production.capacity_slot_service import release_slots_for_plan
+    for p in plan_rows:
+        try:
+            await release_slots_for_plan(db, p.id)
+        except Exception:
+            pass
+
+    # 删 plan
+    for p in plan_rows:
+        p.is_active = False
+        db.add(p)
+
+    await db.commit()
+
+    # 重置 snapshot 状态（让这些订单重新出现在待排工作台）
+    for order_no, line_no in order_keys:
+        snap = (await db.execute(
+            select(ProductionOrderScheduleSnapshot).where(
+                ProductionOrderScheduleSnapshot.order_no == order_no,
+                ProductionOrderScheduleSnapshot.line_no == line_no,
+            )
+        )).scalars().first()
+        if snap:
+            snap.display_status = 'ready'
+            snap.display_status_label = '可排产'
+            snap.scheduling_status = 'pending'
+            snap.scheduling_status_label = '待排产'
+            snap.scheduling_reason_code = 'ready'
+            snap.scheduling_reason = '可排产'
+            snap.scheduling_reason_details_json = '[]'
+            db.add(snap)
+
+    await db.commit()
+    _invalidate_schedule_runtime_caches()
+    await _sync_snapshot_schedule_state_for_keys(db, order_keys)
+
+    return ResponseModel(data={
+        "deleted_count": len(plan_rows),
+        "order_keys": [f"{k[0]}/{k[1]}" for k in order_keys],
+    }, message=f"已删除 {len(plan_rows)} 条计划")
+
+
 @router.post("/backfill/execute", response_model=ResponseModel[DeleteBackfillExecuteResponse])
 async def execute_delete_backfill(
     data: DeleteBackfillExecuteRequest,
@@ -5125,6 +5299,7 @@ async def reschedule_plan(
     break_frozen_reason: Optional[str] = Query(None, description="破冻理由(涉及冷冻区时必填)"),
     manpower: Optional[int] = Query(None, description="新班组人数(可空, 不传则沿用原值)"),
     daily_work_hours: Optional[float] = Query(None, description="新每日工时(可空, 不传则沿用原值)"),
+    include_sunday: Optional[bool] = Query(None, description="周日是否排产(可空, 不传则走基础条件)"),
     current_user: dict = Depends(PermissionChecker("production.schedule_plans", "update")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -5167,7 +5342,8 @@ async def reschedule_plan(
             )
 
         new_plans = await apply_reschedule(
-            db, preview, operator=current_user["username"], break_frozen_reason=break_frozen_reason,
+            db, preview, operator=current_user["username"],
+            break_frozen_reason=break_frozen_reason, include_sunday=include_sunday,
         )
         # 返回目标计划的新版本
         target_plan = next((p for p in new_plans if p.previous_plan_id == plan_id), None)
@@ -5275,10 +5451,19 @@ async def list_schedule_change_events(
     db: AsyncSession = Depends(get_db),
 ):
     current_user = decode_access_token(token)
-    # 进程内缓存：变更事件计算很重（逐条检测），30 秒内复用
+    # 进程内缓存：变更事件计算很重（连 ERP + N 次 DB 查询 ~10 秒），复用结果
+    # 主缓存 5 分钟；即使前端 force 强刷，30 秒兜底也不重算（避免操作后必卡 10 秒）
     import time as _time
     global _change_events_cache, _change_events_ts
-    if _change_events_cache and (_time.time() - _change_events_ts) < 30:
+    cache_age = (_time.time() - _change_events_ts) if _change_events_ts else 9999
+    cache_fresh_enough = (
+        _change_events_cache
+        and cache_age < CHANGE_EVENTS_CACHE_TTL_SECONDS
+    ) or (
+        _change_events_cache
+        and cache_age < CHANGE_EVENTS_FORCE_FLOOR_SECONDS
+    )
+    if cache_fresh_enough:
         items = list(_change_events_cache)
     else:
         conditions_change = [ProductionSchedulePlan.is_active == True]
@@ -5950,7 +6135,8 @@ async def list_todo_workbench(
         snapshot_stats_base_conditions = [
             ProductionOrderScheduleSnapshot.promised_date >= first_day,
             ProductionOrderScheduleSnapshot.promised_date <= last_day,
-            ProductionOrderScheduleSnapshot.display_status.in_(["ready", "pending"]),
+            # 把 excluded 也计入统计 (前端能看到缺UPPH的订单数量)
+            ProductionOrderScheduleSnapshot.display_status.in_(["ready", "pending", "excluded"]),
         ]
         if risk_level:
             snapshot_stats_base_conditions.append(ProductionOrderScheduleSnapshot.risk_level == risk_level)
@@ -5992,7 +6178,11 @@ async def list_todo_workbench(
         step_started_at = perf_counter()
         for display_status_value, bucket_value, item_count, missing_upph_count in (await db.execute(snapshot_stats_stmt)).all():
             status_key = str(display_status_value or "")
-            if status_key in {"ready", "pending"}:
+            # 把 excluded 计入"待确认"桶 (工人看到 excluded = 待确认原因之一: 缺数据)
+            if status_key == "excluded":
+                stats["pending"] += int(item_count or 0)
+                stats["missing_upph"] += int(missing_upph_count or 0)
+            elif status_key in {"ready", "pending"}:
                 stats[status_key] += int(item_count or 0)
                 stats["missing_upph"] += int(missing_upph_count or 0)
             for workspace_bucket in _resolve_workspace_bucket_hits(bucket_value):
@@ -6002,9 +6192,15 @@ async def list_todo_workbench(
         order_items: List[TodoWorkbenchItemOut] = []
         order_total = 0
         if todo_status != "reschedule":
-            snapshot_status_condition = ProductionOrderScheduleSnapshot.display_status.in_(["ready", "pending"])
-            if todo_status in {"ready", "pending"}:
-                snapshot_status_condition = ProductionOrderScheduleSnapshot.display_status == todo_status
+            # 待排列表: 让工人能看到所有需要处理的订单, 包括 excluded(缺UPPH)
+            # - todo_status='ready' 只看 ready (排产入口)
+            # - todo_status='pending' 看 pending + excluded (待确认: 包括缺数据)
+            # - 其他 (全部) 看 ready + pending + excluded
+            snapshot_status_condition = ProductionOrderScheduleSnapshot.display_status.in_(["ready", "pending", "excluded"])
+            if todo_status == "ready":
+                snapshot_status_condition = ProductionOrderScheduleSnapshot.display_status == "ready"
+            elif todo_status == "pending":
+                snapshot_status_condition = ProductionOrderScheduleSnapshot.display_status.in_(["pending", "excluded"])
 
             snapshot_base_conditions = [
                 ProductionOrderScheduleSnapshot.promised_date >= first_day,
@@ -6336,20 +6532,77 @@ async def refresh_todo_workbench_snapshots(
     )
 
 
+# work-hours-config 聚合结果进程内缓存（远程 DB 查 node_standard+base_condition 2 秒，5 分钟复用）
+# 这个接口数据低频变动（用户改基础条件/工时配置后，保存接口会清缓存）
+WORK_HOURS_CONFIG_CACHE_TTL_SECONDS = 300
+_work_hours_config_cache: tuple[float, dict] | None = None
+# base-conditions 独立缓存（抽屉打开会单独拉这个接口）
+BASE_CONDITIONS_CACHE_TTL_SECONDS = 300
+_base_conditions_cache: tuple[float, list] | None = None
+
+
 @router.get("/work-hours-config", response_model=ResponseModel[dict])
 async def get_work_hours_config(
     current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_read_only_db),
 ):
-    """获取每日工作时间配置"""
-    work_hours_config = await ProductionScheduleConfigService(db).get_work_hours_config()
-    return ResponseModel(data={
+    """获取每日工作时间配置 + 车间基础条件(人数/工时/周日排产)"""
+    global _work_hours_config_cache
+    import time as _time
+    now = _time.time()
+    # 缓存命中时直接返回，避免无谓的 DB session 建立（远程 DB commit 一次 2 秒）
+    if _work_hours_config_cache and (now - _work_hours_config_cache[0]) < WORK_HOURS_CONFIG_CACHE_TTL_SECONDS:
+        return ResponseModel(data=_work_hours_config_cache[1])
+
+    config_service = ProductionScheduleConfigService(db)
+    work_hours_config = await config_service.get_work_hours_config()
+    base_conditions = await config_service.get_base_conditions()
+    payload = {
         "daily_work_hours": work_hours_config["default_daily_work_hours"],
         "work_hours_by_bucket": work_hours_config["work_hours_by_bucket"],
         "ready_offset_days": work_hours_config["ready_offset_days"],
         "lean_standard_daily_hours": work_hours_config["lean_standard_daily_hours"],
         "lean_max_daily_hours": work_hours_config["lean_max_daily_hours"],
-    })
+        "base_conditions": base_conditions,
+    }
+    _work_hours_config_cache = (now, payload)
+    return ResponseModel(data=payload)
+
+
+@router.get("/base-conditions", response_model=ResponseModel[list])
+async def get_base_conditions(
+    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
+    db: AsyncSession = Depends(get_read_only_db),
+):
+    """获取车间排产基础条件(按排产阶段分桶)"""
+    import time as _time
+    global _base_conditions_cache
+    now = _time.time()
+    if _base_conditions_cache and (now - _base_conditions_cache[0]) < BASE_CONDITIONS_CACHE_TTL_SECONDS:
+        return ResponseModel(data=list(_base_conditions_cache[1]))
+    items = await ProductionScheduleConfigService(db).get_base_conditions()
+    _base_conditions_cache = (now, list(items))
+    return ResponseModel(data=items)
+
+
+@router.post("/base-conditions", response_model=ResponseModel[list])
+async def save_base_conditions(
+    data: BaseConditionSaveRequest,
+    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """保存车间排产基础条件(设一次, 后续新排产自动套用)"""
+    global _work_hours_config_cache, _base_conditions_cache
+    await ProductionScheduleConfigService(db).save_base_conditions(
+        [it.model_dump() for it in data.items],
+        operator=current_user["username"],
+    )
+    await db.commit()
+    # 清 work-hours-config 和 base-conditions 缓存，让前端立即读到新值
+    _work_hours_config_cache = None
+    _base_conditions_cache = None
+    items = await ProductionScheduleConfigService(db).get_base_conditions()
+    return ResponseModel(data=items, message="基础条件已保存")
 
 
 @router.get("/capacity-usage", response_model=ResponseModel[list])
@@ -6501,6 +6754,7 @@ async def auto_schedule(
         owner=data.owner,
         operator=current_user["username"],
         manpower=data.manpower,
+        include_sunday=data.include_sunday,
     )
     await db.commit()
     await _sync_snapshot_schedule_state_for_keys(
@@ -6562,6 +6816,7 @@ async def batch_auto_schedule(
                 fail_if_scheduled=True,
                 operation_remark="批量排产创建",
                 manpower=item.manpower or data.manpower,
+                include_sunday=data.include_sunday,
             )
             await db.commit()
             synced_keys.update({

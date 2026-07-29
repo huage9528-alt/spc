@@ -35,6 +35,7 @@ export const productionApi = {
     breakFrozenReason?: string,
     manpower?: number,
     dailyWorkHours?: number,
+    includeSunday?: boolean,
   ) =>
     api.post(`/production/schedule-plans/${planId}/reschedule`, null, {
       params: {
@@ -42,6 +43,7 @@ export const productionApi = {
         break_frozen_reason: breakFrozenReason,
         manpower,
         daily_work_hours: dailyWorkHours,
+        include_sunday: includeSunday,
       },
       timeout: 120000,
     }),
@@ -53,6 +55,10 @@ export const productionApi = {
   refreshTodoSnapshots: (data: Record<string, any>) => api.post('/production/schedule-plans/todo-workbench/refresh-snapshots', data),
   // 获取工作时间配置
   getWorkHoursConfig: () => api.get('/production/schedule-plans/work-hours-config'),
+  // 车间排产基础条件 (人数/工时/周日排产, 按阶段分桶)
+  getBaseConditions: () => api.get('/production/schedule-plans/base-conditions'),
+  saveBaseConditions: (data: { items: Array<{ schedule_bucket: string; default_manpower: number; daily_work_hours: number; include_sunday: boolean }> }) =>
+    api.post('/production/schedule-plans/base-conditions', data),
   // 查询产能时间槽使用情况
   getCapacityUsage: (params: {
     department: string
@@ -64,7 +70,7 @@ export const productionApi = {
   simulateLeanSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/simulate-lean', data),
   // 一键排产
   autoSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/auto-schedule', data, { timeout: 120000 }),
-  batchAutoSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/batch-auto-schedule', data, { timeout: 300000 }),
+  batchAutoSchedule: (data: Record<string, any>) => api.post('/production/schedule-plans/batch-auto-schedule', data, { timeout: 900000 }),
   // 检测变更
   detectScheduleChanges: () => api.post('/production/schedule-plans/detect-changes'),
   // UPPH 变更影响
@@ -73,6 +79,7 @@ export const productionApi = {
     api.post('/production/schedule-plans/change-events/status', data),
   listUpphImpactPlans: (params: Record<string, any>) => api.get('/production/schedule-plans/upph-impact', { params }),
   batchReschedulePlans: (data: { plan_ids: number[], all_or_none?: boolean }) => api.post('/production/schedule-plans/batch-reschedule', data),
+  batchDeletePlans: (planIds: number[]) => api.post('/production/schedule-plans/batch-delete', { plan_ids: planIds }, { timeout: 120000 }),
   listOperationLogs: (params: Record<string, any>) => api.get('/production/schedule-plans/operation-logs', { params }),
   getScheduleDebugTrace: (params: { order_no: string; line_no: string }) =>
     api.get('/production/schedule-plans/debug-trace', { params }),

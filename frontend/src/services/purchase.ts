@@ -35,4 +35,10 @@ export const purchaseApi = {
     api.get('/purchase/price-change/employees/search', { params: { keyword, page, page_size: 10 } }),
   searchMaterials: (keyword: string, page = 1, pageSize = 15) =>
     api.get('/purchase/price-change/materials/search', { params: { keyword, page, page_size: pageSize } }),
+
+  // 自检
+  selfCheckPreview: (data: Record<string, any>) =>
+    api.post('/purchase/price-change/self-check-preview', data),
+  selfCheckRecord: (id: number) =>
+    api.post(`/purchase/price-change/${id}/self-check`),
 }

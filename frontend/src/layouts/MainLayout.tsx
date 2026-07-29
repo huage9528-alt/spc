@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+﻿import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { Layout, Menu, Button, Dropdown, Space, Modal, Form, Input, message, Result, Badge, Popover, Tabs, List, Tag, Typography, notification as antNotification } from 'antd'
 import {
@@ -34,8 +34,6 @@ import {
   IdcardOutlined,
   SafetyOutlined,
   ApiOutlined,
-  EnvironmentOutlined,
-  StockOutlined,
   ClockCircleOutlined,
   ThunderboltOutlined,
   ScheduleOutlined,
@@ -47,7 +45,7 @@ import { usePermissionStore, PermNode } from '../store/permission'
 import { authApi, notificationApi } from '../services/api'
 import FeedbackButton from '../pages/BasicDataCenter/FeedbackManagement/FeedbackButton'
 import ShareButton from '../components/ShareButton'
-import { FloatingAssistant } from '../components/Assistant'
+import { FloatingAssistant, TopBarAssistant } from '../components/Assistant'
 import FontSizeSetting from '../components/FontSizeSetting'
 import { SUPPLIER_PORTAL_PATHS } from '../constants/permissions'
 
@@ -61,7 +59,7 @@ type PermissionAwareItem = {
   children?: PermissionAwareItem[]
 }
 
-// 模块 code → 图标映射（数据库不存储图标，由前端约定）
+// 妯″潡 code 鈫?鍥炬爣鏄犲皠锛堟暟鎹簱涓嶅瓨鍌ㄥ浘鏍囷紝鐢卞墠绔害瀹氾級
 const MODULE_ICON_MAP: Record<string, React.ReactNode> = {
   dashboard: <DashboardOutlined />,
   topbar: <SettingOutlined />,
@@ -75,7 +73,7 @@ const MODULE_ICON_MAP: Record<string, React.ReactNode> = {
   basicdata: <DatabaseOutlined />,
 }
 
-// 权限 code → 图标映射（叶子节点图标）
+// 鏉冮檺 code 鈫?鍥炬爣鏄犲皠锛堝彾瀛愯妭鐐瑰浘鏍囷級
 const PERMISSION_ICON_MAP: Record<string, React.ReactNode> = {
   'orders.list': <UnorderedListOutlined />,
   'orders.run_orders': <RocketOutlined />,
@@ -135,11 +133,10 @@ const PERMISSION_ICON_MAP: Record<string, React.ReactNode> = {
   npi: <ProjectOutlined />,
 }
 
-// 从权限树动态生成菜单项
+// 浠庢潈闄愭爲鍔ㄦ€佺敓鎴愯彍鍗曢」
 function buildMenuItemsFromTree(nodes: PermNode[]): PermissionAwareItem[] {
   return nodes
-    .filter(node => node.code !== 'topbar') // 顶栏功能不在侧边栏显示
-    .map(node => {
+    .filter(node => node.code !== 'topbar') // 椤舵爮鍔熻兘涓嶅湪渚ц竟鏍忔樉绀?    .map(node => {
       const hasChildren = node.children && node.children.length > 0
       const icon = PERMISSION_ICON_MAP[node.code] || MODULE_ICON_MAP[node.module] || <AppstoreOutlined />
       const key = node.route_path || node.code
@@ -164,147 +161,146 @@ function buildMenuItemsFromTree(nodes: PermNode[]): PermissionAwareItem[] {
     })
 }
 
-// 保留硬编码菜单作为 fallback（权限 API 不可用时使用）
-const allMenuItems: PermissionAwareItem[] = [
-  { key: '/dashboard', icon: <DashboardOutlined />, label: '供应链驾驶舱', permission: 'dashboard' },
+// 淇濈暀纭紪鐮佽彍鍗曚綔涓?fallback锛堟潈闄?API 涓嶅彲鐢ㄦ椂浣跨敤锛?const allMenuItems: PermissionAwareItem[] = [
+  { key: '/dashboard', icon: <DashboardOutlined />, label: '渚涘簲閾鹃┚椹惰埍', permission: 'dashboard' },
   {
     key: 'order-delivery',
     icon: <FileTextOutlined />,
-    label: '订单交付中心',
+    label: '璁㈠崟浜や粯涓績',
     permission: 'orders',
     children: [
-      { key: '/orders', icon: <UnorderedListOutlined />, label: '订单总控台', permission: 'orders.list' },
-      { key: '/run-orders', icon: <RocketOutlined />, label: '跑单管理', permission: 'orders.run_orders' },
-      { key: '/order-risk-pool', icon: <WarningOutlined />, label: '订单风险池', permission: 'orders.risk_pool' },
-      { key: '/inventory-check', icon: <CheckOutlined />, label: '订单物料盘点', permission: 'orders.inventory_check' },
+      { key: '/orders', icon: <UnorderedListOutlined />, label: '璁㈠崟鎬绘帶鍙?, permission: 'orders.list' },
+      { key: '/run-orders', icon: <RocketOutlined />, label: '璺戝崟绠＄悊', permission: 'orders.run_orders' },
+      { key: '/order-risk-pool', icon: <WarningOutlined />, label: '璁㈠崟椋庨櫓姹?, permission: 'orders.risk_pool' },
+      { key: '/inventory-check', icon: <CheckOutlined />, label: '璁㈠崟鐗╂枡鐩樼偣', permission: 'orders.inventory_check' },
     ],
   },
   {
     key: 'material-center',
     icon: <ExperimentOutlined />,
-    label: '物料齐套中心',
+    label: '鐗╂枡榻愬涓績',
     permission: 'materials',
     children: [
-      { key: '/purchase-plan', icon: <ShoppingCartOutlined />, label: '采购到料计划', permission: 'materials.purchase_plan' },
-      { key: '/material-issues', icon: <WarningOutlined />, label: '问题物料池', permission: 'materials.issues' },
-      { key: '/long-lead-materials', icon: <ContainerOutlined />, label: '长交期物料池', permission: 'materials.long_lead' },
-      { key: '/kit-analysis', icon: <AppstoreOutlined />, label: '齐套分析', permission: 'materials.kit_analysis' },
-      { key: '/supplier-risk', icon: <AuditOutlined />, label: '供应商风险分析', permission: 'materials.supplier_risk' },
-      { key: '/supplier-payment', icon: <AccountBookOutlined />, label: '供应商付款排程', permission: 'materials.supplier_payment' },
+      { key: '/purchase-plan', icon: <ShoppingCartOutlined />, label: '閲囪喘鍒版枡璁″垝', permission: 'materials.purchase_plan' },
+      { key: '/material-issues', icon: <WarningOutlined />, label: '闂鐗╂枡姹?, permission: 'materials.issues' },
+      { key: '/long-lead-materials', icon: <ContainerOutlined />, label: '闀夸氦鏈熺墿鏂欐睜', permission: 'materials.long_lead' },
+      { key: '/kit-analysis', icon: <AppstoreOutlined />, label: '榻愬鍒嗘瀽', permission: 'materials.kit_analysis' },
+      { key: '/supplier-risk', icon: <AuditOutlined />, label: '渚涘簲鍟嗛闄╁垎鏋?, permission: 'materials.supplier_risk' },
+      { key: '/supplier-payment', icon: <AccountBookOutlined />, label: '渚涘簲鍟嗕粯娆炬帓绋?, permission: 'materials.supplier_payment' },
     ],
   },
   {
     key: 'production-center',
     icon: <RocketOutlined />,
-    label: '生产协同中心',
+    label: '鐢熶骇鍗忓悓涓績',
     permission: 'production',
     children: [
-        { key: '/production-dashboard', icon: <HomeOutlined />, label: '生产驾驶舱', permission: 'production.overview' },
-      { key: '/todo-workbench', icon: <ThunderboltOutlined />, label: '待排工作台', permission: 'production.schedule_plans' },
-      { key: '/change-events', icon: <AlertOutlined />, label: '变更事件中心', permission: 'production.schedule_plans' },
-      { key: '/schedule-plans', icon: <ProjectOutlined />, label: '排产台账', permission: 'production.schedule_plans' },
-      { key: '/schedule-board', icon: <ScheduleOutlined />, label: '排产看板', permission: 'production.schedule_plans' },
-      { key: '/production-overview', icon: <DashboardOutlined />, label: '生产总览', permission: 'production.overview' },
-      { key: '/product-process-capacities', icon: <DatabaseOutlined />, label: '产品工序产能', permission: 'production.product_process_capacities' },
-      { key: '/front-process', icon: <ContainerOutlined />, label: '前道管理', permission: 'production.front_process' },
-      { key: '/smt', icon: <ExperimentOutlined />, label: '贴片管理', permission: 'production.smt' },
-      { key: '/lean', icon: <AuditOutlined />, label: '精益今日看板', permission: 'production.lean' },
-      { key: '/lean-management', icon: <AuditOutlined />, label: '精益管理', permission: 'production.lean' },
-      { key: '/assembly', icon: <ToolOutlined />, label: '组装管理', permission: 'production.assembly' },
-      { key: '/packaging', icon: <ContainerOutlined />, label: '包装管理', permission: 'production.packaging' },
-      { key: '/process-exceptions', icon: <WarningOutlined />, label: '工序异常池', permission: 'production.exceptions' },
+        { key: '/production-dashboard', icon: <HomeOutlined />, label: '鐢熶骇椹鹃┒鑸?, permission: 'production.overview' },
+      { key: '/todo-workbench', icon: <ThunderboltOutlined />, label: '寰呮帓宸ヤ綔鍙?, permission: 'production.schedule_plans' },
+      { key: '/change-events', icon: <AlertOutlined />, label: '鍙樻洿浜嬩欢涓績', permission: 'production.schedule_plans' },
+      { key: '/schedule-plans', icon: <ProjectOutlined />, label: '鎺掍骇鍙拌处', permission: 'production.schedule_plans' },
+      { key: '/schedule-board', icon: <ScheduleOutlined />, label: '鎺掍骇鐪嬫澘', permission: 'production.schedule_plans' },
+      { key: '/production-overview', icon: <DashboardOutlined />, label: '鐢熶骇鎬昏', permission: 'production.overview' },
+      { key: '/product-process-capacities', icon: <DatabaseOutlined />, label: '浜у搧宸ュ簭浜ц兘', permission: 'production.product_process_capacities' },
+      { key: '/front-process', icon: <ContainerOutlined />, label: '鍓嶉亾绠＄悊', permission: 'production.front_process' },
+      { key: '/smt', icon: <ExperimentOutlined />, label: '璐寸墖绠＄悊', permission: 'production.smt' },
+      { key: '/lean', icon: <AuditOutlined />, label: '绮剧泭浠婃棩鐪嬫澘', permission: 'production.lean' },
+      { key: '/lean-management', icon: <AuditOutlined />, label: '绮剧泭绠＄悊', permission: 'production.lean' },
+      { key: '/assembly', icon: <ToolOutlined />, label: '缁勮绠＄悊', permission: 'production.assembly' },
+      { key: '/packaging', icon: <ContainerOutlined />, label: '鍖呰绠＄悊', permission: 'production.packaging' },
+      { key: '/process-exceptions', icon: <WarningOutlined />, label: '宸ュ簭寮傚父姹?, permission: 'production.exceptions' },
     ],
   },
   {
     key: 'exception-center',
     icon: <WarningOutlined />,
-    label: '异常与质量中心',
+    label: '寮傚父涓庤川閲忎腑蹇?,
     permission: 'exceptions',
     children: [
-      { key: '/issues', icon: <WarningOutlined />, label: '异常总池', permission: 'exceptions.pool' },
-      { key: '/issue-log', icon: <FileTextOutlined />, label: '问题日志', permission: 'exceptions.issue_log' },
-      { key: '/change-log', icon: <SwapOutlined />, label: '变更日志', permission: 'exceptions.change_log' },
-      { key: '/quality-issues', icon: <AuditOutlined />, label: '品质异常', permission: 'exceptions.quality' },
-      { key: '/product-samples', icon: <FileTextOutlined />, label: '产品封样', permission: 'exceptions.product_samples' },
-      { key: '/closure-tracking', icon: <AuditOutlined />, label: '闭环跟踪', permission: 'exceptions.closure' },
+      { key: '/issues', icon: <WarningOutlined />, label: '寮傚父鎬绘睜', permission: 'exceptions.pool' },
+      { key: '/issue-log', icon: <FileTextOutlined />, label: '闂鏃ュ織', permission: 'exceptions.issue_log' },
+      { key: '/change-log', icon: <SwapOutlined />, label: '鍙樻洿鏃ュ織', permission: 'exceptions.change_log' },
+      { key: '/quality-issues', icon: <AuditOutlined />, label: '鍝佽川寮傚父', permission: 'exceptions.quality' },
+      { key: '/product-samples', icon: <FileTextOutlined />, label: '浜у搧灏佹牱', permission: 'exceptions.product_samples' },
+      { key: '/closure-tracking', icon: <AuditOutlined />, label: '闂幆璺熻釜', permission: 'exceptions.closure' },
     ],
   },
   {
     key: 'meeting-center',
     icon: <TeamOutlined />,
-    label: '会议与任务中心',
+    label: '浼氳涓庝换鍔′腑蹇?,
     children: [
-      { key: '/meetings', icon: <TeamOutlined />, label: '会议与行动项', permission: 'meetings' },
+      { key: '/meetings', icon: <TeamOutlined />, label: '浼氳涓庤鍔ㄩ」', permission: 'meetings' },
     ],
   },
   {
     key: 'npi-center',
     icon: <ProjectOutlined />,
-    label: '新品/NPI项目中心',
+    label: '鏂板搧/NPI椤圭洰涓績',
     children: [
-      { key: '/npi', icon: <ProjectOutlined />, label: '项目总览', permission: 'npi' },
+      { key: '/npi', icon: <ProjectOutlined />, label: '椤圭洰鎬昏', permission: 'npi' },
     ],
   },
   {
     key: 'rules-center',
     icon: <ToolOutlined />,
-    label: '规则配置中心',
+    label: '瑙勫垯閰嶇疆涓績',
     permission: 'rules',
     children: [
-      { key: '/risk-rules', icon: <SettingOutlined />, label: '预警规则', permission: 'rules.risk_rules' },
-      { key: '/inspection-rules', icon: <AuditOutlined />, label: '点检规则', permission: 'rules.inspection' },
-      { key: '/node-standards', icon: <ContainerOutlined />, label: '节点标准', permission: 'rules.node_standards' },
-      { key: '/order-standards', icon: <FileTextOutlined />, label: '订单标准', permission: 'rules.order_standards' },
-      { key: '/work-instructions', icon: <AuditOutlined />, label: '作业指导书', permission: 'rules.work_instructions' },
-      { key: '/responsibility-map', icon: <TeamOutlined />, label: '责任归属', permission: 'rules.responsibility' },
-      { key: '/status-dict', icon: <AppstoreOutlined />, label: '状态字典', permission: 'rules.status_dict' },
+      { key: '/risk-rules', icon: <SettingOutlined />, label: '棰勮瑙勫垯', permission: 'rules.risk_rules' },
+      { key: '/inspection-rules', icon: <AuditOutlined />, label: '鐐规瑙勫垯', permission: 'rules.inspection' },
+      { key: '/node-standards', icon: <ContainerOutlined />, label: '鑺傜偣鏍囧噯', permission: 'rules.node_standards' },
+      { key: '/order-standards', icon: <FileTextOutlined />, label: '璁㈠崟鏍囧噯', permission: 'rules.order_standards' },
+      { key: '/work-instructions', icon: <AuditOutlined />, label: '浣滀笟鎸囧涔?, permission: 'rules.work_instructions' },
+      { key: '/responsibility-map', icon: <TeamOutlined />, label: '璐ｄ换褰掑睘', permission: 'rules.responsibility' },
+      { key: '/status-dict', icon: <AppstoreOutlined />, label: '鐘舵€佸瓧鍏?, permission: 'rules.status_dict' },
     ],
   },
   {
     key: 'basicdata-center',
     icon: <DatabaseOutlined />,
-    label: '基础数据与集成中心',
+    label: '鍩虹鏁版嵁涓庨泦鎴愪腑蹇?,
     children: [
-      { key: '/import', icon: <ImportOutlined />, label: '数据集成', permission: 'basicdata.import' },
+      { key: '/import', icon: <ImportOutlined />, label: '鏁版嵁闆嗘垚', permission: 'basicdata.import' },
       {
         key: 'basicdata-management',
         icon: <DatabaseOutlined />,
-        label: '基础数据管理',
+        label: '鍩虹鏁版嵁绠＄悊',
         permission: 'basicdata.data',
         children: [
-          { key: '/basicdata/customers', icon: <UserOutlined />, label: '客户', permission: 'basicdata.data' },
-          { key: '/basicdata/suppliers', icon: <ShoppingCartOutlined />, label: '供应商', permission: 'basicdata.data' },
-          { key: '/basicdata/materials', icon: <AppstoreOutlined />, label: '物料', permission: 'basicdata.data' },
+          { key: '/basicdata/customers', icon: <UserOutlined />, label: '瀹㈡埛', permission: 'basicdata.data' },
+          { key: '/basicdata/suppliers', icon: <ShoppingCartOutlined />, label: '渚涘簲鍟?, permission: 'basicdata.data' },
+          { key: '/basicdata/materials', icon: <AppstoreOutlined />, label: '鐗╂枡', permission: 'basicdata.data' },
           { key: '/basicdata/skus', icon: <ContainerOutlined />, label: 'SKU', permission: 'basicdata.data' },
-          { key: '/basicdata/products', icon: <FileTextOutlined />, label: '产品', permission: 'basicdata.data' },
-          { key: '/basicdata/warehouses', icon: <ContainerOutlined />, label: '仓库', permission: 'basicdata.data' },
-          { key: '/basicdata/locations', icon: <EnvironmentOutlined />, label: '库位', permission: 'basicdata.data' },
-          { key: '/basicdata/processes', icon: <RocketOutlined />, label: '工序', permission: 'basicdata.data' },
-          { key: '/basicdata/organizations', icon: <TeamOutlined />, label: '组织', permission: 'basicdata.data' },
-          { key: '/basicdata/positions', icon: <IdcardOutlined />, label: '岗位', permission: 'basicdata.data' },
-          { key: '/basicdata/employees', icon: <UserOutlined />, label: '人员', permission: 'basicdata.data' },
-          { key: '/basicdata/inventory', icon: <StockOutlined />, label: '库存', permission: 'basicdata.data' },
+          { key: '/basicdata/products', icon: <FileTextOutlined />, label: '浜у搧', permission: 'basicdata.data' },
+          { key: '/basicdata/warehouses', icon: <ContainerOutlined />, label: '浠撳簱', permission: 'basicdata.data' },
+          { key: '/basicdata/locations', icon: <EnvironmentOutlined />, label: '搴撲綅', permission: 'basicdata.data' },
+          { key: '/basicdata/processes', icon: <RocketOutlined />, label: '宸ュ簭', permission: 'basicdata.data' },
+          { key: '/basicdata/organizations', icon: <TeamOutlined />, label: '缁勭粐', permission: 'basicdata.data' },
+          { key: '/basicdata/positions', icon: <IdcardOutlined />, label: '宀椾綅', permission: 'basicdata.data' },
+          { key: '/basicdata/employees', icon: <UserOutlined />, label: '浜哄憳', permission: 'basicdata.data' },
+          { key: '/basicdata/inventory', icon: <StockOutlined />, label: '搴撳瓨', permission: 'basicdata.data' },
         ],
       },
-      { key: '/users', icon: <UserOutlined />, label: '用户管理', permission: 'users' },
-      { key: '/roles', icon: <SafetyOutlined />, label: '角色管理', permission: 'roles' },
-      { key: '/audit', icon: <AuditOutlined />, label: '审计日志', permission: 'audit' },
-      { key: '/sync-config', icon: <SwapOutlined />, label: '同步SQL配置', permission: 'settings' },
-      { key: '/basicdata/data-supply', icon: <ApiOutlined />, label: '数据供给', permission: 'basicdata.data_supply' },
-      { key: '/basicdata/feedback', icon: <MessageOutlined />, label: '问题反馈', permission: 'basicdata.feedback' },
-      { key: '/basicdata/files', icon: <FolderOpenOutlined />, label: '文件管理', permission: 'basicdata.files' },
-      { key: '/announcements', icon: <NotificationOutlined />, label: '公告管理', permission: 'announcements' },
+      { key: '/users', icon: <UserOutlined />, label: '鐢ㄦ埛绠＄悊', permission: 'users' },
+      { key: '/roles', icon: <SafetyOutlined />, label: '瑙掕壊绠＄悊', permission: 'roles' },
+      { key: '/audit', icon: <AuditOutlined />, label: '瀹¤鏃ュ織', permission: 'audit' },
+      { key: '/sync-config', icon: <SwapOutlined />, label: '鍚屾SQL閰嶇疆', permission: 'settings' },
+      { key: '/basicdata/data-supply', icon: <ApiOutlined />, label: '鏁版嵁渚涚粰', permission: 'basicdata.data_supply' },
+      { key: '/basicdata/feedback', icon: <MessageOutlined />, label: '闂鍙嶉', permission: 'basicdata.feedback' },
+      { key: '/basicdata/files', icon: <FolderOpenOutlined />, label: '鏂囦欢绠＄悊', permission: 'basicdata.files' },
+      { key: '/announcements', icon: <NotificationOutlined />, label: '鍏憡绠＄悊', permission: 'announcements' },
     ],
   },
   {
     key: 'purchase-center',
     icon: <AccountBookOutlined />,
-    label: '采购中心',
+    label: '閲囪喘涓績',
     permission: 'purchase',
     children: [
-      { key: '/purchase/price-change', icon: <FileTextOutlined />, label: '调价单管理', permission: 'purchase.price_change' },
-      { key: '/purchase/price-change/pending', icon: <ClockCircleOutlined />, label: '待我审批', permission: 'purchase.price_change.pending' },
-      { key: '/purchase/price-change/config', icon: <SettingOutlined />, label: '审批配置', permission: 'purchase.price_change.config' },
+      { key: '/purchase/price-change', icon: <FileTextOutlined />, label: '璋冧环鍗曠鐞?, permission: 'purchase.price_change' },
+      { key: '/purchase/price-change/pending', icon: <ClockCircleOutlined />, label: '寰呮垜瀹℃壒', permission: 'purchase.price_change.pending' },
+      { key: '/purchase/price-change/config', icon: <SettingOutlined />, label: '瀹℃壒閰嶇疆', permission: 'purchase.price_change.config' },
     ],
   },
 ]
@@ -362,7 +358,7 @@ function toAntdItems(items: PermissionAwareItem[]): any[] {
 
 function findPurchase(menuItems: PermissionAwareItem[]): PermissionAwareItem | undefined {
   for (const item of menuItems) {
-    if (item.label === '采购中心') return item
+    if (item.label === '閲囪喘涓績') return item
     if (item.children) {
       const found = findPurchase(item.children)
       if (found) return found
@@ -536,36 +532,35 @@ export default function MainLayout() {
   const [forcePwdDismissable, setForcePwdDismissable] = useState(false)
   const toastShown = useRef(false)
 
-  // 加载权限树
-  useEffect(() => {
+  // 鍔犺浇鏉冮檺鏍?  useEffect(() => {
     if (originalToken && !permLoaded) {
       fetchTree()
     }
   }, [originalToken, permLoaded, fetchTree])
 
-  // 动态菜单项：优先使用 API 数据，fallback 到硬编码
+  // 鍔ㄦ€佽彍鍗曢」锛氫紭鍏堜娇鐢?API 鏁版嵁锛宖allback 鍒扮‖缂栫爜
   const dynamicMenuItems = useMemo(() => {
     if (permLoaded && permTree.length > 0) {
       const items = buildMenuItemsFromTree(permTree)
-      // 注入 v2 新页面（共享 schedule_plans 权限，不在后端权限树里）
+      // 娉ㄥ叆 v2 鏂伴〉闈紙鍏变韩 schedule_plans 鏉冮檺锛屼笉鍦ㄥ悗绔潈闄愭爲閲岋級
       const v2ExtraItems: PermissionAwareItem[] = [
-      { key: '/production-dashboard', icon: <HomeOutlined />, label: '生产驾驶舱', permission: 'production.overview' },
-        { key: '/todo-workbench', icon: <ThunderboltOutlined />, label: '待排工作台', permission: 'production.schedule_plans' },
-        { key: '/change-events', icon: <AlertOutlined />, label: '变更事件中心', permission: 'production.schedule_plans' },
-        { key: '/schedule-board', icon: <ScheduleOutlined />, label: '排产看板', permission: 'production.schedule_plans' },
-        { key: '/lean-today', icon: <AuditOutlined />, label: '精益今日看板', permission: 'production.lean' },
-        { key: '/lean-management', icon: <AuditOutlined />, label: '精益管理', permission: 'production.lean' },
+      { key: '/production-dashboard', icon: <HomeOutlined />, label: '鐢熶骇椹鹃┒鑸?, permission: 'production.overview' },
+        { key: '/todo-workbench', icon: <ThunderboltOutlined />, label: '寰呮帓宸ヤ綔鍙?, permission: 'production.schedule_plans' },
+        { key: '/change-events', icon: <AlertOutlined />, label: '鍙樻洿浜嬩欢涓績', permission: 'production.schedule_plans' },
+        { key: '/schedule-board', icon: <ScheduleOutlined />, label: '鎺掍骇鐪嬫澘', permission: 'production.schedule_plans' },
+        { key: '/lean-today', icon: <AuditOutlined />, label: '绮剧泭浠婃棩鐪嬫澘', permission: 'production.lean' },
+        { key: '/lean-management', icon: <AuditOutlined />, label: '绮剧泭绠＄悊', permission: 'production.lean' },
       ]
       const merged = items.map(item =>
         item.permission === 'production'
           ? { ...item, children: [...v2ExtraItems, ...(item.children || [])] }
           : item
       )
-      // 采购中心：若权限树已有则注入子菜单，否则新增整个模块
+      // 閲囪喘涓績锛氳嫢鏉冮檺鏍戝凡鏈夊垯娉ㄥ叆瀛愯彍鍗曪紝鍚﹀垯鏂板鏁翠釜妯″潡
       const purchaseChildren: PermissionAwareItem[] = [
-        { key: '/purchase/price-change', icon: <FileTextOutlined />, label: '调价单管理', permission: 'purchase.price_change' },
-        { key: '/purchase/price-change/pending', icon: <ClockCircleOutlined />, label: '待我审批', permission: 'purchase.price_change.pending' },
-        { key: '/purchase/price-change/config', icon: <SettingOutlined />, label: '审批配置', permission: 'purchase.price_change.config' },
+        { key: '/purchase/price-change', icon: <FileTextOutlined />, label: '璋冧环鍗曠鐞?, permission: 'purchase.price_change' },
+        { key: '/purchase/price-change/pending', icon: <ClockCircleOutlined />, label: '寰呮垜瀹℃壒', permission: 'purchase.price_change.pending' },
+        { key: '/purchase/price-change/config', icon: <SettingOutlined />, label: '瀹℃壒閰嶇疆', permission: 'purchase.price_change.config' },
       ]
       const existingPurchase = findPurchase(merged)
       if (existingPurchase) {
@@ -578,7 +573,7 @@ export default function MainLayout() {
         merged.push({
           key: 'purchase-center',
           icon: <AccountBookOutlined />,
-          label: '采购中心',
+          label: '閲囪喘涓績',
           permission: 'purchase',
           children: purchaseChildren,
         })
@@ -588,8 +583,7 @@ export default function MainLayout() {
     return allMenuItems
   }, [permLoaded, permTree])
 
-  // 动态路径映射
-  const dynamicPathToPermission = useMemo(() => {
+  // 鍔ㄦ€佽矾寰勬槧灏?  const dynamicPathToPermission = useMemo(() => {
     if (permLoaded && permTree.length > 0) {
       return getPathToPermission()
     }
@@ -670,8 +664,8 @@ export default function MainLayout() {
         const items = (res.data?.items || []).filter((n: any) => n.priority === 'important' || n.priority === 'urgent')
         if (items.length > 0) {
           antNotification.info({
-            message: '您有新的公告',
-            description: items.map((n: any) => n.title).join('、'),
+            message: '鎮ㄦ湁鏂扮殑鍏憡',
+            description: items.map((n: any) => n.title).join('銆?),
             placement: 'topRight',
             duration: 8,
             onClick: () => { setBellOpen(true) },
@@ -719,7 +713,7 @@ export default function MainLayout() {
     try {
       const values = await pwdForm.validateFields()
       await authApi.changePassword(values.old_password, values.new_password)
-      message.success('密码修改成功')
+      message.success('瀵嗙爜淇敼鎴愬姛')
       setPwdModalOpen(false)
       pwdForm.resetFields()
       const user = useAuthStore.getState().currentUser
@@ -735,7 +729,7 @@ export default function MainLayout() {
     try {
       const values = await forcePwdForm.validateFields()
       await authApi.changePassword(values.old_password, values.new_password)
-      message.success('密码修改成功')
+      message.success('瀵嗙爜淇敼鎴愬姛')
       setForcePwdModalOpen(false)
       forcePwdForm.resetFields()
       const user = useAuthStore.getState().currentUser
@@ -797,11 +791,10 @@ export default function MainLayout() {
             {!collapsed && (
               <div className="flex flex-col">
                 <span className="font-bold" style={{ color: '#fff', fontSize: 'calc(1.125rem * var(--font-size-scale))', letterSpacing: 0.5 }}>
-                  SPC 中台
+                  SPC 涓彴
                 </span>
                 <span style={{ color: '#94a3b8', fontSize: 'calc(0.6875rem * var(--font-size-scale))', fontWeight: 400, letterSpacing: 1, textTransform: 'uppercase' }}>
-                  供应链协同
-                </span>
+                  渚涘簲閾惧崗鍚?                </span>
               </div>
             )}
           </div>
@@ -851,18 +844,18 @@ export default function MainLayout() {
                       items={[
                         {
                           key: 'announcement_system',
-                          label: <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}><SoundOutlined /> 公告系统 {(unreadByType['announcement'] || 0) + (unreadByType['system'] || 0) > 0 ? <Badge count={(unreadByType['announcement'] || 0) + (unreadByType['system'] || 0)} size="small" offset={[4, -2]} /> : null}</span>,
+                          label: <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}><SoundOutlined /> 鍏憡绯荤粺 {(unreadByType['announcement'] || 0) + (unreadByType['system'] || 0) > 0 ? <Badge count={(unreadByType['announcement'] || 0) + (unreadByType['system'] || 0)} size="small" offset={[4, -2]} /> : null}</span>,
                         },
                         {
                           key: 'alert',
-                          label: <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}><WarningOutlined /> 提醒 {(unreadByType['material_alert'] || 0) + (unreadByType['exception_alert'] || 0) > 0 ? <Badge count={(unreadByType['material_alert'] || 0) + (unreadByType['exception_alert'] || 0)} size="small" offset={[4, -2]} /> : null}</span>,
+                          label: <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}><WarningOutlined /> 鎻愰啋 {(unreadByType['material_alert'] || 0) + (unreadByType['exception_alert'] || 0) > 0 ? <Badge count={(unreadByType['material_alert'] || 0) + (unreadByType['exception_alert'] || 0)} size="small" offset={[4, -2]} /> : null}</span>,
                         },
                       ]}
                     />
                     <List
                       loading={notifLoading}
                       dataSource={notifList}
-                      locale={{ emptyText: '暂无消息' }}
+                      locale={{ emptyText: '鏆傛棤娑堟伅' }}
                       style={{ maxHeight: 360, overflowY: 'auto', padding: '0 12px' }}
                       renderItem={(item: any) => (
                         <List.Item
@@ -875,8 +868,8 @@ export default function MainLayout() {
                               <Space size={4}>
                                 {!item.is_read && <Badge status="processing" />}
                                 <Typography.Text style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }} strong={!item.is_read}>{item.title}</Typography.Text>
-                                {item.priority === 'urgent' && <Tag color="red" style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', lineHeight: '18px' }}>紧急</Tag>}
-                                {item.priority === 'important' && <Tag color="gold" style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', lineHeight: '18px' }}>重要</Tag>}
+                                {item.priority === 'urgent' && <Tag color="red" style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', lineHeight: '18px' }}>绱ф€?/Tag>}
+                                {item.priority === 'important' && <Tag color="gold" style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', lineHeight: '18px' }}>閲嶈</Tag>}
                               </Space>
                             }
                             description={<Typography.Text type="secondary" style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}>{item.created_at}</Typography.Text>}
@@ -885,8 +878,8 @@ export default function MainLayout() {
                       )}
                     />
                     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 12px', borderTop: '1px solid #f0f0f0' }}>
-                      <Button type="link" size="small" icon={<CheckOutlined />} onClick={handleMarkAllRead} style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}>全部已读</Button>
-                      <Button type="link" size="small" onClick={() => { setBellOpen(false); navigate('/announcements') }} style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}>查看全部</Button>
+                      <Button type="link" size="small" icon={<CheckOutlined />} onClick={handleMarkAllRead} style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}>鍏ㄩ儴宸茶</Button>
+                      <Button type="link" size="small" onClick={() => { setBellOpen(false); navigate('/announcements') }} style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}>鏌ョ湅鍏ㄩ儴</Button>
                     </div>
                   </div>
                 }
@@ -902,15 +895,14 @@ export default function MainLayout() {
                 icon={<LogoutOutlined />}
                 onClick={() => { exitShare(); navigate('/dashboard') }}
               >
-                退出分享
-              </Button>
+                閫€鍑哄垎浜?              </Button>
             ) : (
               <Dropdown
                 menu={{
                   items: [
-                    { key: 'change-pwd', icon: <KeyOutlined />, label: '修改密码' },
+                    { key: 'change-pwd', icon: <KeyOutlined />, label: '淇敼瀵嗙爜' },
                     { type: 'divider' as const },
-                    { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', danger: true },
+                    { key: 'logout', icon: <LogoutOutlined />, label: '閫€鍑虹櫥褰?, danger: true },
                   ],
                   onClick: ({ key }) => {
                     if (key === 'logout') { logout(); navigate('/login') }
@@ -924,7 +916,7 @@ export default function MainLayout() {
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
                     <span style={{ color: '#334155', fontSize: 'calc(0.875rem * var(--font-size-scale))', fontWeight: 500 }}>
-                      {currentUser && 'display_name' in currentUser ? (currentUser.display_name || currentUser.username) : '用户'}
+                      {currentUser && 'display_name' in currentUser ? (currentUser.display_name || currentUser.username) : '鐢ㄦ埛'}
                     </span>
                     {currentUser && 'position_name' in currentUser && currentUser.position_name && (
                       <span style={{ color: '#94a3b8', fontSize: 'calc(0.75rem * var(--font-size-scale))', fontWeight: 400 }}>
@@ -939,76 +931,75 @@ export default function MainLayout() {
         </div>
 
         <Modal
-          title="修改密码"
+          title="淇敼瀵嗙爜"
           open={pwdModalOpen}
           onOk={handleChangePassword}
           onCancel={() => setPwdModalOpen(false)}
           width={420}
-          okText="确认修改"
+          okText="纭淇敼"
         >
           <Form form={pwdForm} layout="vertical" style={{ marginTop: 16 }}>
-            <Form.Item name="old_password" label="原密码" rules={[{ required: true, message: '请输入原密码' }]}>
-              <Input.Password placeholder="输入当前密码" />
+            <Form.Item name="old_password" label="鍘熷瘑鐮? rules={[{ required: true, message: '璇疯緭鍏ュ師瀵嗙爜' }]}>
+              <Input.Password placeholder="杈撳叆褰撳墠瀵嗙爜" />
             </Form.Item>
-            <Form.Item name="new_password" label="新密码" rules={[{ required: true, message: '请输入新密码' }, { min: 6, message: '密码至少6位' }]}>
-              <Input.Password placeholder="至少6位" />
+            <Form.Item name="new_password" label="鏂板瘑鐮? rules={[{ required: true, message: '璇疯緭鍏ユ柊瀵嗙爜' }, { min: 6, message: '瀵嗙爜鑷冲皯6浣? }]}>
+              <Input.Password placeholder="鑷冲皯6浣? />
             </Form.Item>
             <Form.Item
               name="confirm_password"
-              label="确认新密码"
+              label="纭鏂板瘑鐮?
               dependencies={['new_password']}
               rules={[
-                { required: true, message: '请确认新密码' },
+                { required: true, message: '璇风‘璁ゆ柊瀵嗙爜' },
                 ({ getFieldValue }) => ({
                   validator(_, value) {
                     if (!value || getFieldValue('new_password') === value) return Promise.resolve()
-                    return Promise.reject(new Error('两次密码不一致'))
+                    return Promise.reject(new Error('涓ゆ瀵嗙爜涓嶄竴鑷?))
                   },
                 }),
               ]}
             >
-              <Input.Password placeholder="再次输入新密码" />
+              <Input.Password placeholder="鍐嶆杈撳叆鏂板瘑鐮? />
             </Form.Item>
           </Form>
         </Modal>
 
         <Modal
-          title="安全提醒 — 请修改默认密码"
+          title="瀹夊叏鎻愰啋 鈥?璇蜂慨鏀归粯璁ゅ瘑鐮?
           open={forcePwdModalOpen}
           onOk={handleForceChangePassword}
           onCancel={forcePwdDismissable ? () => { setForcePwdModalOpen(false); forcePwdForm.resetFields() } : undefined}
           closable={forcePwdDismissable}
           maskClosable={forcePwdDismissable}
           width={420}
-          okText="确认修改"
-          cancelText={forcePwdDismissable ? '稍后再说' : undefined}
+          okText="纭淇敼"
+          cancelText={forcePwdDismissable ? '绋嶅悗鍐嶈' : undefined}
           cancelButtonProps={forcePwdDismissable ? undefined : { style: { display: 'none' } }}
         >
           <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, color: '#ad6800', fontSize: 13 }}>
-            检测到您正在使用默认密码，为保障账号安全，请立即修改密码
-          </div>
+            妫€娴嬪埌鎮ㄦ鍦ㄤ娇鐢ㄩ粯璁ゅ瘑鐮侊紝涓轰繚闅滆处鍙峰畨鍏紝璇风珛鍗充慨鏀瑰瘑鐮?          </div>
           <Form form={forcePwdForm} layout="vertical" style={{ marginTop: 8 }}>
-            <Form.Item name="old_password" label="原密码" rules={[{ required: true, message: '请输入原密码' }]}>
-              <Input.Password placeholder="输入当前密码" />
+            <Form.Item name="old_password" label="鍘熷瘑鐮? rules={[{ required: true, message: '璇疯緭鍏ュ師瀵嗙爜' }]}>
+              <Input.Password placeholder="杈撳叆褰撳墠瀵嗙爜" />
             </Form.Item>
-            <Form.Item name="new_password" label="新密码" rules={[{ required: true, message: '请输入新密码' }, { min: 6, message: '密码至少6位' }]}>
-              <Input.Password placeholder="至少6位" />
+            <Form.Item name="new_password" label="鏂板瘑鐮? rules={[{ required: true, message: '璇疯緭鍏ユ柊瀵嗙爜' }, { min: 6, message: '瀵嗙爜鑷冲皯6浣? }]}>
+              <Input.Password placeholder="鑷冲皯6浣? />
             </Form.Item>
             <Form.Item
               name="confirm_password"
-              label="确认新密码"
+              label="纭鏂板瘑鐮?
               dependencies={['new_password']}
               rules={[
-                { required: true, message: '请确认新密码' },
+                { required: true, message: '璇风‘璁ゆ柊瀵嗙爜' },
                 ({ getFieldValue }) => ({
                   validator(_, value) {
                     if (!value || getFieldValue('new_password') === value) return Promise.resolve()
-                    return Promise.reject(new Error('两次密码不一致'))
+                    return Promise.reject(new Error('涓ゆ瀵嗙爜涓嶄竴鑷?))
                   },
                 }),
               ]}
             >
-              <Input.Password placeholder="再次输入新密码" />
+              <Input.Password placeholder="鍐嶆杈撳叆鏂板瘑鐮? />
             </Form.Item>
           </Form>
         </Modal>
@@ -1019,14 +1010,14 @@ export default function MainLayout() {
           ) : (
             <Result
               status="403"
-              title="无访问权限"
-              subTitle={`缺少 ${requiredPermission}.read 权限`}
+              title="鏃犺闂潈闄?
+              subTitle={`缂哄皯 ${requiredPermission}.read 鏉冮檺`}
             />
           )}
         </Content>
       </Layout>
 
-      {/* AI 智能助手：右下角悬浮球，可自由拖动，闲置自动收进右侧边 */}
+      {/* AI 鏅鸿兘鍔╂墜锛氬彸涓嬭鎮诞鐞冿紝鍙嚜鐢辨嫋鍔紝闂茬疆鑷姩鏀惰繘鍙充晶杈?*/}
       {!isSupplierUser() && canUseTopbar.aiSearch && <FloatingAssistant />}
     </Layout>
   )

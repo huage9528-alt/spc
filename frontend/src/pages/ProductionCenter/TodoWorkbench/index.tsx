@@ -11,6 +11,7 @@ import { renderBucketTag, renderCopyableText, renderSchedulingReasonCell, render
 import ScheduleModal from '../components/ScheduleModal'
 import BatchScheduleModal from '../components/BatchScheduleModal'
 import CollapsibleStats from '../components/CollapsibleStats'
+import BaseConditionDrawer from '../components/BaseConditionDrawer'
 
 interface TodoRow {
   id: number
@@ -43,6 +44,7 @@ export default function TodoWorkbench() {
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false)
   const [scheduleOrder, setScheduleOrder] = useState<any>(null)
   const [batchScheduleOpen, setBatchScheduleOpen] = useState(false)
+  const [baseConditionOpen, setBaseConditionOpen] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [selectedRows, setSelectedRows] = useState<any[]>([])
 
@@ -272,6 +274,7 @@ export default function TodoWorkbench() {
                 <span style={{ color: '#595959' }}>
                   共 {total} 条，已选 {selectedRows.length} 条（其中待排产 {selectedRows.filter(r => r.todo_kind === 'ready').length} 条）
                 </span>
+                <Button onClick={() => setBaseConditionOpen(true)}>基础条件</Button>
                 <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
                 <Tooltip title={selectedRows.filter(r => r.todo_kind === 'ready').length > 0 ? `批量排产 ${selectedRows.filter(r => r.todo_kind === 'ready').length} 条` : '请先勾选待排产订单'}>
                   <Button type="primary" icon={<ThunderboltOutlined />} disabled={selectedRows.filter(r => r.todo_kind === 'ready').length === 0} onClick={openBatchSchedule}>
@@ -332,9 +335,20 @@ export default function TodoWorkbench() {
         onSuccess={() => {
           setSelectedRowKeys([])
           setSelectedRows([])
-          load()
-          message.success('批量排产完成，已自动刷新列表', 2)
+          // 延迟刷新: 批量排产刚结束, 后端可能还在处理 snapshot 同步等后续工作
+          // 立即刷新可能撞上后端忙碌导致超时, 延迟 1 秒给后端喘息
+          setTimeout(() => {
+            load().catch(() => {
+              // 静默失败, 不弹"网络错误"打扰用户 (排产已成功, 刷新失败不影响结果)
+            })
+          }, 1000)
+          message.success('批量排产完成，列表将在后台自动刷新', 2)
         }}
+      />
+
+      <BaseConditionDrawer
+        open={baseConditionOpen}
+        onClose={() => setBaseConditionOpen(false)}
       />
     </div>
   )

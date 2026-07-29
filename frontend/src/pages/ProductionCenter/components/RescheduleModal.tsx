@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, DatePicker, Descriptions, Input, InputNumber, Modal, Space, Spin, Table, Tag, message } from 'antd'
+import { Alert, DatePicker, Descriptions, Input, InputNumber, Modal, Space, Spin, Switch, Table, Tag, message } from 'antd'
 import dayjs, { Dayjs } from 'dayjs'
 import { productionApi } from '../../../services/production'
+import { useBaseConditionStore } from '../../../store/baseCondition'
 import { formatDate } from '../../../utils'
 import { EVENT_TYPE_MAP } from '../SchedulePlans/constants'
 
@@ -72,14 +73,21 @@ export default function RescheduleModal({ open, planData, onClose, onSuccess }: 
   // 产能调整: 默认沿用原值, 用户可改
   const [manpower, setManpower] = useState<number | null>(null)
   const [dailyWorkHours, setDailyWorkHours] = useState<number | null>(null)
+  const [includeSunday, setIncludeSunday] = useState<boolean>(false)
+  const { getItem, load: loadBaseConditions } = useBaseConditionStore()
 
   // 弹窗打开时初始化默认值(沿用原计划)
   useEffect(() => {
     if (open && planData) {
       setManpower(planData.manpower ?? 10)
       setDailyWorkHours(planData.daily_work_hours ?? 8.5)
+      // 周日: 默认读 store(按当前计划段), 读不到则关
+      loadBaseConditions()
+      const bucket = (planData as any).source_process_type
+      const base = getItem(bucket)
+      setIncludeSunday(!!base?.include_sunday)
     }
-  }, [open, planData])
+  }, [open, planData, loadBaseConditions, getItem])
 
   // 选日期 / 改人数 / 改工时 后自动调 preview 接口
   useEffect(() => {
@@ -145,6 +153,7 @@ export default function RescheduleModal({ open, planData, onClose, onSuccess }: 
         breakFrozenReason || undefined,
         manpowerParam,
         hoursParam,
+        includeSunday,
       )
       message.success('重排成功')
       handleClose()
@@ -242,6 +251,15 @@ export default function RescheduleModal({ open, planData, onClose, onSuccess }: 
             <div style={{ color: '#888', fontSize: 12, marginTop: 4 }}>
               原 {planData.daily_work_hours ?? '-'} h
             </div>
+          </Descriptions.Item>
+          <Descriptions.Item label="周日排产" span={2}>
+            <Switch
+              checkedChildren="开"
+              unCheckedChildren="关"
+              checked={includeSunday}
+              onChange={(v) => setIncludeSunday(v)}
+            />
+            <span style={{ color: '#888', fontSize: 12, marginLeft: 12 }}>默认按基础条件</span>
           </Descriptions.Item>
           <Descriptions.Item label="产能公式" span={2}>
             <div style={{ color: '#595959', fontSize: 12 }}>

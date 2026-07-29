@@ -111,7 +111,7 @@ export const BUCKET_COLOR_MAP: Record<string, string> = {
 export const ORDER_POOL_STATUS_COLOR_MAP: Record<string, string> = {
   ready: 'success',
   pending: 'warning',
-  excluded: 'default',
+  excluded: 'error',
   scheduled: 'processing',
 }
 
@@ -119,6 +119,7 @@ export const TODO_STATUS_META: Record<string, { label: string; color: string; pr
   reschedule: { label: '待重排', color: 'error', priority: 0 },
   ready: { label: '待排产', color: 'processing', priority: 1 },
   pending: { label: '待确认', color: 'warning', priority: 2 },
+  excluded: { label: '缺产能(需补UPPH)', color: 'error', priority: 3 },
 }
 
 export const ORDER_STAT_CARD_STYLE_MAP: Record<string, { background: string; border: string }> = {

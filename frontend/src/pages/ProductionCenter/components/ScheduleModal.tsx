@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Col, DatePicker, Form, Input, InputNumber, Modal, Progress, Row, Select, Tag, message } from 'antd'
+import { Alert, Button, Col, DatePicker, Form, Input, InputNumber, Modal, Progress, Row, Select, Switch, Tag, message } from 'antd'
 import dayjs from 'dayjs'
 import { productionApi } from '../../../services/production'
+import { useBaseConditionStore } from '../../../store/baseCondition'
 import { DEPARTMENTS } from '../SchedulePlans/constants'
 
 interface ScheduleOrderData {
@@ -34,13 +35,14 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
   const [readyOffsetDays, setReadyOffsetDays] = useState(2)
   const [leanStandardHours, setLeanStandardHours] = useState(8.5)
   const [leanMaxHours, setLeanMaxHours] = useState(12)
+  const { items: baseConditions, getItem, load: loadBaseConditions } = useBaseConditionStore()
   // 产能预览
   const [capacityUsage, setCapacityUsage] = useState<Array<{
     date: string; capacity: number; booked: number; available: number; utilization: number
   }> | null>(null)
   const [capacityLoading, setCapacityLoading] = useState(false)
 
-  // 加载工作时间配置
+  // 加载工作时间配置（工时相关字段还要走原接口；基础条件走 store 避免 4 个弹窗重复拉）
   useEffect(() => {
     const loadConfig = async () => {
       try {
@@ -55,7 +57,8 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
       }
     }
     loadConfig()
-  }, [])
+    loadBaseConditions()
+  }, [loadBaseConditions])
 
   // 打开 Modal 时填表单
   useEffect(() => {
@@ -65,6 +68,7 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
         if (bucket && workHoursByBucket[bucket]) return workHoursByBucket[bucket]
         return workHours
       }
+      const base = getItem(orderData.schedule_bucket)
       form.setFieldsValue({
         order_no: orderData.order_no,
         line_no: orderData.line_no,
@@ -75,13 +79,18 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
         department: '生产',
         plan_date: null,
         upph: (orderData.upph && orderData.upph > 0) ? orderData.upph : undefined,
-        manpower: 10,
-        daily_work_hours: orderData.schedule_bucket === 'lean'
-          ? orderData.recommended_daily_hours
-          : getRecommendedDailyWorkHours(orderData.schedule_bucket),
+        manpower: base?.default_manpower ?? 10,
+        // 预填工时：基础条件为准（保持空的话后端会自动试算）
+        // Alert 里显示后端试算建议值作为提醒，让用户决定要不要改
+        daily_work_hours: base?.daily_work_hours
+          ?? (orderData.schedule_bucket === 'lean'
+            ? undefined  // 精益基础条件空时，留空让后端试算
+            : getRecommendedDailyWorkHours(orderData.schedule_bucket)),
+        include_sunday: base?.include_sunday ?? false,
       })
     }
-  }, [open, orderData, form, workHours, workHoursByBucket])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, orderData, form, workHours, workHoursByBucket, baseConditions])
 
   const getRecommendedDailyWorkHours = (bucket?: string | null) => {
     if (bucket && workHoursByBucket[bucket]) return workHoursByBucket[bucket]
@@ -140,6 +149,7 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
   }, [formData?.quantity, formData?.upph, formData?.manpower, formData?.daily_work_hours, orderData])
 
   const handleAutoSchedule = async (confirmRisky: boolean = false) => {
+    if (loading) return  // 防重复点击
     try {
       const values = await form.validateFields()
       const planDate = values.plan_date ? values.plan_date.format('YYYY-MM-DD') : null
@@ -151,9 +161,11 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
         upph: orderData?.schedule_bucket === 'lean' ? values.upph : undefined,
         manpower: values.manpower || undefined,
         daily_work_hours: values.daily_work_hours ?? undefined,
+        include_sunday: values.include_sunday ?? undefined,
         owner: values.owner,
         confirm_risky: confirmRisky,
       }
+      setLoading(true)
       const res: any = await productionApi.autoSchedule(payload)
 
       // v2 阶段 4：周日生产/前挪强制人工确认
@@ -172,16 +184,23 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
           okText: '确认排产',
           cancelText: '取消',
           okButtonProps: { danger: true },
-          onOk: () => handleAutoSchedule(true),
+          onOk: () => {
+            setLoading(false)
+            handleAutoSchedule(true)
+          },
+          onCancel: () => setLoading(false),
         })
         return
       }
 
       const result = res.data?.calculation_result || {}
-      message.success(res.data?.message || '排产成功')
-      form.resetFields()
-      onClose()
-      onSuccess?.()
+      message.success(res.data?.message || '排产成功', 3)
+      // 让用户看到成功提示再关弹窗
+      setTimeout(() => {
+        form.resetFields()
+        onClose()
+        onSuccess?.()
+      }, 800)
 
       // 弹通知（精简版）
       const descriptionParts: string[] = []
@@ -266,6 +285,11 @@ export default function ScheduleModal({ open, orderData, onClose, onSuccess }: S
           <Col span={8}>
             <Form.Item name="daily_work_hours" label="每日工时">
               <InputNumber min={1} max={24} style={{ width: '100%' }} />
+            </Form.Item>
+          </Col>
+          <Col span={8}>
+            <Form.Item name="include_sunday" label="周日排产" valuePropName="checked">
+              <Switch checkedChildren="开" unCheckedChildren="关" />
             </Form.Item>
           </Col>
           <Col span={24}><Form.Item name="owner" label="负责人"><Input /></Form.Item></Col>

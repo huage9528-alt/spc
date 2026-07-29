@@ -17,6 +17,7 @@ from app.models.material.supplier_message import SupplierMessage
 from app.models.production.process_progress import ProcessProgress
 from app.models.production.process_exception import ProcessException
 from app.models.production.schedule_plan import ProductionSchedulePlan
+from app.models.production.base_condition import ProductionBaseCondition  # noqa: F401
 
 # 异常与质量中心
 from app.models.exception.risk_issue import RiskIssue

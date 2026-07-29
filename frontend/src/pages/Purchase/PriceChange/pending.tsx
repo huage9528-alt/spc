@@ -149,6 +149,19 @@ export default function PriceChangePending() {
               },
             },
             {
+              title: '自检',
+              width: 110,
+              render: (_: any, row: any) => {
+                const scResult = row.self_check_result
+                const status = scResult?.overall_status || 'low'
+                const hasEvidence = row.self_check_evidence && (() => { try { const e = typeof row.self_check_evidence === 'string' ? JSON.parse(row.self_check_evidence) : row.self_check_evidence; return Array.isArray(e) && e.length > 0 } catch { return false } })()
+                const colorMap: Record<string, string> = { high: 'red', medium: 'orange', low: 'green', passed: 'green' }
+                const labelMap: Record<string, string> = { high: '高风险', medium: '中风险', low: '通过', passed: '通过' }
+                const label = hasEvidence ? `${labelMap[status] || '-'} ✓` : (labelMap[status] || '-')
+                return <Tag color={colorMap[status] || 'default'}>{label}</Tag>
+              },
+            },
+            {
               title: '操作', width: 140,
               render: (_: any, row: any) => (
                 <Space>

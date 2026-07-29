@@ -111,6 +111,7 @@ export default function SchedulePlans() {
   const [readyOffsetDays, setReadyOffsetDays] = useState(2)
   const [leanStandardHours, setLeanStandardHours] = useState(8.5)
   const [leanMaxHours, setLeanMaxHours] = useState(12)
+  const [baseConditions, setBaseConditions] = useState<any[]>([])
 
   const [todoData, setTodoData] = useState<any[]>([])
   const [todoTotal, setTodoTotal] = useState(0)
@@ -166,6 +167,8 @@ export default function SchedulePlans() {
   const [onlyPendingEvents, setOnlyPendingEvents] = useState(false)
   const [selectedImpactKeys, setSelectedImpactKeys] = useState<React.Key[]>([])
   const [selectedBatchPlanIds, setSelectedBatchPlanIds] = useState<number[]>([])
+  const [selectedPlanRowKeys, setSelectedPlanRowKeys] = useState<React.Key[]>([])
+  const [batchDeleting, setBatchDeleting] = useState(false)
   const [batchPreviewOpen, setBatchPreviewOpen] = useState(false)
   const [missingUpphData, setMissingUpphData] = useState<any[]>([])
   const todoWorkbenchCacheRef = useRef<Record<string, { ts: number; items: any[]; total: number; stats: TodoWorkbenchStats }>>({})
@@ -316,10 +319,17 @@ export default function SchedulePlans() {
       setReadyOffsetDays(res.data?.ready_offset_days || 2)
       setLeanStandardHours(res.data?.lean_standard_daily_hours || 8.5)
       setLeanMaxHours(res.data?.lean_max_daily_hours || 12)
+      setBaseConditions(res.data?.base_conditions || [])
     } catch (e) {
       console.error('获取工作时间配置失败', e)
     }
   }, [])
+
+  // 取某阶段的基础条件默认值 (人数/工时/周日), 缺失返回安全默认
+  const getBaseCondition = useCallback((bucket?: string | null) => {
+    if (!bucket) return null
+    return baseConditions.find((b) => b.schedule_bucket === bucket) || null
+  }, [baseConditions])
 
   const getRecommendedDailyWorkHours = useCallback((bucket?: string | null) => {
     if (bucket && workHoursByBucket[bucket]) return workHoursByBucket[bucket]
@@ -764,6 +774,34 @@ export default function SchedulePlans() {
     setDeleteModalOpen(true)
   }
 
+  const handleBatchDelete = async () => {
+    if (selectedPlanRowKeys.length === 0) {
+      message.warning('请先勾选要删除的计划')
+      return
+    }
+    Modal.confirm({
+      title: `批量删除 ${selectedPlanRowKeys.length} 条计划？`,
+      content: '删除后这些订单会回到待排工作台，可以重新排产。此操作不走补位逻辑。',
+      okText: '确认删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setBatchDeleting(true)
+        try {
+          const ids = selectedPlanRowKeys.map(k => Number(k))
+          const res: any = await productionApi.batchDeletePlans(ids)
+          message.success(res.data?.message || `已删除 ${ids.length} 条计划`, 3)
+          setSelectedPlanRowKeys([])
+          loadPlanBoard(true)
+        } catch (e: any) {
+          message.error(e.message || '批量删除失败')
+        } finally {
+          setBatchDeleting(false)
+        }
+      },
+    })
+  }
+
   // v2 阶段 2：判断计划是否在冷冻区（plan_date 在 today+1 ~ today+3）
   const isPlanInFrozenZone = (planDateStr?: string | null): boolean => {
     if (!planDateStr) return false
@@ -956,6 +994,15 @@ export default function SchedulePlans() {
     // #endregion
   }
 
+  // 后台静默刷新：不阻塞 UI，操作成功提示立即弹出，数据在后台刷新
+  // 用于"删除/排产/重排成功后"这类场景，避免用户等 10 秒看 change-events 重算
+  const refreshAllViewsInBackground = () => {
+    // 不 await，让调用方立即返回
+    Promise.resolve(refreshAllViews()).catch((e) => {
+      console.warn('background refresh failed:', e)
+    })
+  }
+
   const handleSave = async () => {
     try {
       const values = await form.validateFields()
@@ -1021,7 +1068,7 @@ export default function SchedulePlans() {
       const result = res.data?.calculation_result || {}
       invalidatePageCaches()
       setScheduleModalOpen(false)
-      await refreshAllViews()
+      refreshAllViewsInBackground()
       openPostScheduleNotification({
         title: '排产成功',
         bucket: selectedOrder?.schedule_bucket,
@@ -1113,7 +1160,7 @@ export default function SchedulePlans() {
       setSelectedOrderRows([])
       invalidatePageCaches()
       try {
-        await refreshAllViews()
+        refreshAllViewsInBackground()
       } catch (refreshError: any) {
         message.warning(refreshError?.message ? `批量排产已完成，但刷新列表失败：${refreshError.message}` : '批量排产已完成，但刷新列表失败，请手动刷新页面')
       }
@@ -1212,7 +1259,7 @@ export default function SchedulePlans() {
       if (executeBackfill) {
         phase = 'refresh'
         const refreshStartedAt = performance.now()
-        await refreshAllViews()
+        refreshAllViewsInBackground()
         refreshMs = performance.now() - refreshStartedAt
       } else {
         const alreadyAtTargetTodoView = (
@@ -1279,7 +1326,7 @@ export default function SchedulePlans() {
       const res: any = await productionApi.detectScheduleChanges()
       message.info(res.data?.length ? `已检测到 ${res.data.length} 条变更并标记待重排` : '未检测到订单行变更')
       invalidatePageCaches()
-      await refreshAllViews()
+      refreshAllViewsInBackground()
     } catch (e: any) {
       message.error(e.message || '检测变更失败')
     } finally {
@@ -1325,7 +1372,7 @@ export default function SchedulePlans() {
       setSelectedImpactKeys([])
       setSelectedBatchPlanIds([])
       invalidatePageCaches()
-      await refreshAllViews()
+      refreshAllViewsInBackground()
     } catch (e: any) {
       message.error(e.message || '批量重排失败')
     } finally {
@@ -1363,7 +1410,7 @@ export default function SchedulePlans() {
       setSelectedImpactKeys([])
       setSelectedBatchPlanIds([])
       invalidatePageCaches()
-      await refreshAllViews()
+      refreshAllViewsInBackground()
     } catch (e: any) {
       message.error(e.message || `${statusLabelMap[processStatus]}失败`)
     } finally {
@@ -2032,6 +2079,19 @@ export default function SchedulePlans() {
               </Space>
             </Col>
           </Row>
+          {selectedPlanRowKeys.length > 0 ? (
+            <div style={{ background: '#e6f4ff', padding: '8px 16px', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ color: '#1677ff', fontWeight: 500 }}>
+                已选 {selectedPlanRowKeys.length} 条计划
+              </span>
+              <Space>
+                <Button onClick={() => setSelectedPlanRowKeys([])}>取消选择</Button>
+                <Button danger loading={batchDeleting} onClick={handleBatchDelete}>
+                  批量删除
+                </Button>
+              </Space>
+            </div>
+          ) : null}
           <Tabs
             activeKey={planBucketFilter}
             onChange={(key) => {
@@ -2046,6 +2106,10 @@ export default function SchedulePlans() {
       <div className="card-modern" style={{ padding: '0 0 4px', marginBottom: 16 }}>
         <Table
           rowKey="id"
+          rowSelection={{
+            selectedRowKeys: selectedPlanRowKeys,
+            onChange: (keys) => setSelectedPlanRowKeys(keys),
+          }}
           columns={planColumns}
           dataSource={planData}
           loading={loading}
@@ -2243,7 +2307,7 @@ export default function SchedulePlans() {
         open={reschedulePreviewOpen}
         planData={reschedulePreviewRow}
         onClose={() => { setReschedulePreviewOpen(false); setReschedulePreviewRow(null) }}
-        onSuccess={async () => { invalidatePageCaches(); await refreshAllViews() }}
+        onSuccess={async () => { invalidatePageCaches();         refreshAllViewsInBackground() }}
       />
 
 
@@ -2429,7 +2493,7 @@ export default function SchedulePlans() {
         open={deleteModalOpen}
         planData={deletingPlan}
         onClose={() => { setDeleteModalOpen(false); setDeletingPlan(null) }}
-        onSuccess={async () => { invalidatePageCaches(); await refreshAllViews() }}
+        onSuccess={async () => { invalidatePageCaches();         refreshAllViewsInBackground() }}
       />
 
       <Modal
@@ -2482,7 +2546,7 @@ export default function SchedulePlans() {
         onClose={() => setScheduleModalOpen(false)}
         onSuccess={async () => {
           invalidatePageCaches()
-          await refreshAllViews()
+          refreshAllViewsInBackground()
         }}
       />
 
@@ -2494,7 +2558,7 @@ export default function SchedulePlans() {
           setSelectedOrderKeys([])
           setSelectedOrderRows([])
           invalidatePageCaches()
-          await refreshAllViews()
+          refreshAllViewsInBackground()
         }}
       />
     </div>

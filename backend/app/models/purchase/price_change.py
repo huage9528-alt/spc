@@ -40,6 +40,10 @@ class PurchasePriceChange(Base):
     remark = Column(Text)
     signature_opinion = Column(Text)
 
+    self_check_status = Column(String(16), default="pending")
+    self_check_result = Column(JSON, default=list)
+    self_check_evidence = Column(JSON, default=list)
+
     approval_status = Column(String(16), default="draft")
     approval_level = Column(Integer, default=1)
     approved_by = Column(String(64))

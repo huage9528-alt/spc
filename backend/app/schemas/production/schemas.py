@@ -400,8 +400,9 @@ class AutoScheduleRequest(BaseModel):
     department: str = "生产"
     plan_date: Optional[date] = None
     upph: Optional[float] = None
-    manpower: Optional[int] = None  # 班组人数(默认走配置, 可手动覆盖)
+    manpower: Optional[int] = None  # 班组人数(默认走基础条件, 可手动覆盖)
     daily_work_hours: Optional[float] = None
+    include_sunday: Optional[bool] = None  # 周日是否排产(默认走基础条件, 可手动覆盖)
     owner: Optional[str] = None
     confirm_risky: bool = False  # v2 阶段 4：周日生产/前挪需人工确认，前端二次提交时传 true
 
@@ -451,7 +452,7 @@ class BatchAutoScheduleItemIn(BaseModel):
     order_no: str
     line_no: str
     upph: Optional[float] = None
-    manpower: Optional[int] = None  # 班组人数(可空, 默认走配置)
+    manpower: Optional[int] = None  # 班组人数(可空, 默认走基础条件)
 
 
 class BatchAutoScheduleRequest(BaseModel):
@@ -460,7 +461,19 @@ class BatchAutoScheduleRequest(BaseModel):
     daily_work_hours: Optional[float] = None
     owner: Optional[str] = None
     manpower: Optional[int] = None  # 批量统一人数(可被 item.manpower 覆盖)
+    include_sunday: Optional[bool] = None  # 批量统一周日排产(可被 item 覆盖)
     items: List[BatchAutoScheduleItemIn]
+
+
+class BaseConditionItemIn(BaseModel):
+    schedule_bucket: str
+    default_manpower: int = Field(ge=1, le=200)
+    daily_work_hours: float = Field(ge=1, le=24)
+    include_sunday: bool = False
+
+
+class BaseConditionSaveRequest(BaseModel):
+    items: List[BaseConditionItemIn]
 
 
 class BatchAutoScheduleItemOut(BaseModel):

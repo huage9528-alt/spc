@@ -457,15 +457,18 @@ async def create_price_change(
 ):
     service = PriceChangeService(db)
     submit = data.pop("submit", False)
-    main_data = {k: v for k, v in data.items() if k not in ("items", "submit")}
+    evidence = data.pop("self_check_evidence", None)
+    main_data = {k: v for k, v in data.items() if k not in ("items", "submit", "self_check_evidence")}
     if main_data.get("change_date") and isinstance(main_data["change_date"], str):
         try:
             main_data["change_date"] = date_type.fromisoformat(main_data["change_date"][:10])
         except Exception:
             pass
     items_data = data.get("items", [])
-    record = await service.create_price_change(main_data, items_data, submit=submit, applicant=user["username"])
+    record = await service.create_price_change(main_data, items_data, submit=submit, applicant=user["username"], self_check_evidence=evidence)
     await db.commit()
+    if isinstance(record, dict) and record.get("_self_check_required"):
+        return ResponseModel(data=record, code=1, message=record.get("_message", "自检未通过"))
     return ResponseModel(data=record, message="创建成功")
 
 
@@ -492,17 +495,51 @@ async def update_price_change(
     return ResponseModel(data=record, message="更新成功")
 
 
+@router.post("/self-check-preview", response_model=ResponseModel)
+async def self_check_preview(
+    data: dict,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "create")),
+    db: AsyncSession = Depends(get_db),
+):
+    """提价前自检预览：传入 items 数据，返回自检结果。不写数据库。"""
+    service = PriceChangeService(db)
+    items_data = data.get("items", [])
+    supplier_code = data.get("supplier_code", "")
+    result = await service.self_check_preview(items_data, supplier_code)
+    return ResponseModel(data=result)
+
+
+@router.post("/{change_id}/self-check", response_model=ResponseModel)
+async def self_check_record(
+    change_id: int,
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """对已有记录执行自检并存储结果。"""
+    service = PriceChangeService(db)
+    result = await service.self_check_record(change_id)
+    await db.commit()
+    return ResponseModel(data=result)
+
+
 @router.post("/{change_id}/submit", response_model=ResponseModel)
 async def submit_for_approval(
     change_id: int,
+    data: dict = {},
     user: dict = Depends(get_current_user_payload),
     _: dict = Depends(PermissionChecker("purchase.price_change", "update")),
     db: AsyncSession = Depends(get_db),
 ):
     service = PriceChangeService(db)
-    record = await service.submit_for_approval(change_id, applicant=user["username"])
-    if not record:
+    evidence = data.get("self_check_evidence") if isinstance(data, dict) else None
+    record = await service.submit_for_approval(change_id, applicant=user["username"], self_check_evidence=evidence)
+    if record is None:
         raise HTTPException(status_code=400, detail="仅草稿/已驳回/已撤回状态可提交")
+    if isinstance(record, dict) and record.get("_self_check_required"):
+        await db.commit()
+        return ResponseModel(data=record, code=1, message=record.get("_message", "自检未通过"))
     await db.commit()
     return ResponseModel(data=record, message="已提交审批")
 

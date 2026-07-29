@@ -277,6 +277,8 @@ export default function ScheduleBoard() {
           if (getBucketKey(item) !== bucket) return false
           const start = getPlanStart(item).startOf('day')
           const end = getPlanEnd(item).endOf('day')
+          // 周日格子始终不显示（用户基础条件周日不生产）
+          if (day.day() === 0) return false
           return start.isBefore(dayEnd) && end.isAfter(dayStart)
         })
         return {

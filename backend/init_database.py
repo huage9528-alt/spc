@@ -48,9 +48,9 @@ from app.models.basicdata.field_mapping import FieldMapping
 from app.models.basicdata.sync_sql_config import SyncSqlConfig
 from app.models.basicdata.sync_log import SyncLog
 from app.models.basicdata.position import Position
-from app.models.basicdata.bom import Bom
-from app.models.basicdata.bom_detail import BomDetail
-from app.models.basicdata.inventory import Inventory
+# from app.models.basicdata.bom import Bom
+# from app.models.basicdata.bom_detail import BomDetail
+# from app.models.basicdata.inventory import Inventory
 from app.models.basicdata.file_asset import FileAsset
 from app.models.basicdata.feedback import Feedback
 
@@ -266,6 +266,9 @@ class DatabaseInitializer:
             }
             "purchase_price_change": {
                 "erp_price_snapshot": "JSONB",
+                "self_check_status": "VARCHAR(16) NOT NULL DEFAULT 'pending'",
+                "self_check_result": "JSONB",
+                "self_check_evidence": "JSONB",
             },
             "mrp_plan_order": {
                 "stock_qty": "NUMERIC(15,2)",
@@ -1487,6 +1490,73 @@ ORDER BY so.FID, mat.FItemID
                 print(f"Error seeding sync SQL config: {e}")
                 raise
 
+    async def seed_base_conditions(self):
+        """Seed 车间排产基础条件默认值 (人数/工时/周日排产, 按排产阶段分桶).
+
+        人数初始值尽力读 UPPH 公式配置表, 读不到用 10.
+        已存在的桶不覆盖 (用户在抽屉里设过的值不被重新 seed 覆盖).
+        """
+        print("Seeding production base conditions...")
+        from app.models.production.base_condition import ProductionBaseCondition
+
+        # 桶 → (中文名, UPPH 车间名, UPPH 工序) 用于读人数默认
+        buckets = [
+            ("lean", "精益", "精益车间", "*"),
+            ("assembly", "组装", "装配车间", "组装"),
+            ("packaging", "包装", "装配车间", "包装"),
+            ("mixed", "混合", "装配车间", "*"),
+        ]
+
+        async with AsyncSessionLocal() as session:
+            try:
+                # 读 UPPH 公式配置表取人数默认
+                manpower_map: dict[str, int] = {}
+                for bucket, _, workshop, process in buckets:
+                    row = (
+                        await session.execute(
+                            text(
+                                "SELECT manpower FROM production_upph_formula_config "
+                                "WHERE workshop_name = :w AND process_type = :p AND is_active = true "
+                                "LIMIT 1"
+                            ),
+                            {"w": workshop, "p": process},
+                        )
+                    ).first()
+                    manpower_map[bucket] = int(row[0]) if row and row[0] else 10
+
+                for bucket, label, _, _ in buckets:
+                    existing = (
+                        await session.execute(
+                            select(ProductionBaseCondition).where(
+                                ProductionBaseCondition.schedule_bucket == bucket
+                            )
+                        )
+                    ).scalars().first()
+                    if existing:
+                        # 已存在不覆盖用户设的值, 仅补 label
+                        if not existing.bucket_label:
+                            existing.bucket_label = label
+                        continue
+                    session.add(
+                        ProductionBaseCondition(
+                            schedule_bucket=bucket,
+                            bucket_label=label,
+                            default_manpower=manpower_map.get(bucket, 10),
+                            daily_work_hours=8,
+                            include_sunday=False,
+                            is_active=True,
+                            created_by="admin",
+                        )
+                    )
+
+                await session.commit()
+                print(f"Production base conditions seeded for {len(buckets)} buckets (manpower={manpower_map})")
+
+            except Exception as e:
+                await session.rollback()
+                print(f"Error seeding production base conditions: {e}")
+                raise
+
     async def initialize_all(self):
         """Initialize complete database"""
         print("=" * 50)
@@ -1504,6 +1574,7 @@ ORDER BY so.FID, mat.FItemID
             await self.seed_risk_rules()
             await self.seed_field_mapping()
             await self.seed_normal_order_standards()
+            await self.seed_base_conditions()
             await self.seed_sync_sql_config()
             await self.seed_sample_data()
             

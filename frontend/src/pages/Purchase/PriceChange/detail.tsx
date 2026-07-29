@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Button, Collapse, Descriptions, Input, Modal, Space, Steps, Table, Tag, Tabs, Timeline, message } from 'antd'
-import { FileTextOutlined, AuditOutlined, BulbOutlined } from '@ant-design/icons'
+import { FileTextOutlined, AuditOutlined, BulbOutlined, WarningOutlined } from '@ant-design/icons'
 import { ArrowLeftOutlined, CheckOutlined, CloseOutlined, RollbackOutlined, ClockCircleOutlined, CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined, ExclamationCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { purchaseApi } from '../../../services/purchase'
@@ -252,6 +252,78 @@ export default function PriceChangeDetail() {
               <Descriptions.Item label="备注" span={3}>{r.remark || '-'}</Descriptions.Item>
             </Descriptions>
           </div>
+
+          {/* 自检结果摘要 — 显性展示 */}
+          {r.self_check_result && (() => {
+            const sc = typeof r.self_check_result === 'string' ? JSON.parse(r.self_check_result) : r.self_check_result
+            if (!sc || !sc.checks) return null
+            const status = sc.overall_status || 'low'
+            const highCount = sc.checks.filter((c: any) => c.risk_level === 'high').length
+            const medCount = sc.checks.filter((c: any) => c.risk_level === 'medium').length
+            const evidence = (() => {
+              try { const e = typeof r.self_check_evidence === 'string' ? JSON.parse(r.self_check_evidence) : (r.self_check_evidence || []); return Array.isArray(e) ? e : [] } catch { return [] }
+            })()
+            const bgColor = status === 'high' ? '#fef2f2' : status === 'medium' ? '#fffbeb' : '#f0fdf4'
+            const borderColor = status === 'high' ? '#fecaca' : status === 'medium' ? '#fde68a' : '#bbf7d0'
+            const textColor = status === 'high' ? '#991b1b' : status === 'medium' ? '#92400e' : '#166534'
+            const iconColor = status === 'high' ? '#dc2626' : status === 'medium' ? '#d97706' : '#16a34a'
+            const icon = status === 'high' ? <WarningOutlined style={{ color: iconColor, fontSize: 18 }} />
+              : status === 'medium' ? <ExclamationCircleOutlined style={{ color: iconColor, fontSize: 18 }} />
+              : <CheckCircleOutlined style={{ color: iconColor, fontSize: 18 }} />
+            const label = status === 'high' ? '自检异常 — 高风险' : status === 'medium' ? '自检异常 — 中风险' : '自检通过'
+            return (
+              <div style={{ ...sectionStyle, border: `1.5px solid ${borderColor}`, background: bgColor }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                  {icon}
+                  <span style={{ fontSize: 14, fontWeight: 700, color: textColor }}>{label}</span>
+                  <Tag color={status === 'high' ? 'error' : status === 'medium' ? 'warning' : 'success'}>{sc.summary || '-'}</Tag>
+                </div>
+
+                {/* 逐项风险详情 */}
+                {sc.checks?.filter((c: any) => c.risk_level !== 'low').map((check: any, idx: number) => {
+                  const risks = check.risks?.filter((r: any) => r.severity !== 'low') || []
+                  if (risks.length === 0) return null
+                  return (
+                    <div key={idx} style={{ padding: '8px 12px', marginBottom: 8, background: '#fff', borderRadius: 6, border: `1px solid ${status === 'high' ? '#fecaca' : '#fde68a'}` }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                        <Tag color={check.risk_level === 'high' ? 'red' : 'orange'}>{check.risk_level === 'high' ? '高风险' : '中风险'}</Tag>
+                        <span style={{ fontWeight: 600, fontSize: 13 }}>{check.material_code} {check.material_name}</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#64748b', marginBottom: 4 }}>
+                        <span>原价: <b>{check.old_price}</b></span>
+                        <span>新价: <b>{check.new_price}</b></span>
+                      </div>
+                      {risks.map((risk: any, ri: number) => (
+                        <div key={ri} style={{ fontSize: 12, color: risk.severity === 'high' ? '#dc2626' : '#d97706', padding: '1px 0' }}>
+                          • [{risk.type}] {risk.detail}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                })}
+
+                {/* 凭证信息 */}
+                {evidence.length > 0 && (
+                  <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff', borderRadius: 6 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#16a34a', marginBottom: 4 }}>
+                      <CheckCircleOutlined style={{ fontSize: 12, marginRight: 4 }} />已上传支撑凭证（{evidence.length} 个）
+                    </div>
+                    {evidence.map((ev: any, ei: number) => (
+                      <div key={ei} style={{ fontSize: 12, color: '#334155', padding: '2px 0' }}>
+                        • {ev.name || '凭证文件'}
+                        {ev.key && <a onClick={(e) => { e.preventDefault(); downloadAtt(ev.key, ev.name || '凭证') }} style={{ color: '#2563eb', marginLeft: 8, cursor: 'pointer' }}>下载</a>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {evidence.length === 0 && status !== 'low' && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: '#dc2626' }}>
+                    ⚠️ 该调价单异常项未上传支撑凭证
+                  </div>
+                )}
+              </div>
+            )
+          })()}
 
           <div style={sectionStyle}>
             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: '#0f172a' }}>物料明细</div>

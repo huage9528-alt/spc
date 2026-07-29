@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message, AutoComplete, Upload } from 'antd'
-import { PlusOutlined, DeleteOutlined, SaveOutlined, SendOutlined, ArrowLeftOutlined, SearchOutlined, CloseOutlined } from '@ant-design/icons'
+import { Alert, Button, DatePicker, Divider, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message, AutoComplete, Upload } from 'antd'
+import { PlusOutlined, DeleteOutlined, SaveOutlined, SendOutlined, ArrowLeftOutlined, SearchOutlined, CloseOutlined, WarningOutlined, ExclamationCircleOutlined, CheckCircleOutlined, UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { purchaseApi } from '../../../services/purchase'
 import { fileApi } from '../../../services/api'
@@ -201,6 +201,33 @@ export default function PriceChangeNew() {
       if (!supName && !v.supplier_name && !v.supplier_code) { message.error('请选择供应商'); return }
       setSaving(true)
 
+      // 如果是要提交审批，先运行自检预览
+      if (submit) {
+        try {
+          const previewPayload = {
+            items: items.map(i => ({
+              seq: i.seq || 0, material_code: i.material_code, material_name: i.material_name,
+              old_price: i.old_price, new_price: i.new_price,
+            })),
+            supplier_code: v.supplier_code || '',
+          }
+          const scRes: any = await purchaseApi.selfCheckPreview(previewPayload)
+          const scData = scRes.data
+          if (scData?.overall_status === 'high' || scData?.overall_status === 'medium') {
+            setScResult(scData)
+            setScEvidence([])
+            setScEvidenceFiles([])
+            setScPendingSubmit(true)
+            setScModal(true)
+            setSaving(false)
+            return  // 阻断：显示弹窗，等待用户上传凭证
+          }
+        } catch (scErr: any) {
+          // 自检失败不应阻断提交流程
+          console.warn('自检预览失败，将直接提交:', scErr)
+        }
+      }
+
       // 上传新添加的文件
       const newUploads: any[] = []
       const pendingFiles = fileList.filter((f: any) => !f.url && (f.originFileObj || f))
@@ -280,6 +307,92 @@ export default function PriceChangeNew() {
     { title:'备注',width:90,render:(_:any,r:any)=><Input size="small" value={r.remark} style={{background:'#fff',border:'1px solid #d9d9d9',borderRadius:4}} onChange={e=>upItem(r.key,'remark',e.target.value)} /> },
     { title:'',width:40,render:(_:any,r:any)=><Button size="small" type="text" danger icon={<DeleteOutlined/>} onClick={()=>rmItem(r.key)} /> },
   ]
+
+  // 自检弹窗
+  const [scModal, setScModal] = useState(false)
+  const [scResult, setScResult] = useState<any>(null)
+  const [scEvidence, setScEvidence] = useState<any[]>([])
+  const [scEvidenceFiles, setScEvidenceFiles] = useState<any[]>([])
+  const [scPendingSubmit, setScPendingSubmit] = useState(false)
+  const [scSaving, setScSaving] = useState(false)
+
+  const closeScModal = () => {
+    setScModal(false)
+    setScResult(null)
+    setScEvidence([])
+    setScEvidenceFiles([])
+    setScPendingSubmit(false)
+  }
+
+  const uploadScEvidence = async (file: File): Promise<any> => {
+    try {
+      const upRes: any = await fileApi.upload(file, 'purchase-price-change-evidence')
+      return { id: upRes.data.id, key: upRes.data.key, name: upRes.data.name, url: upRes.data.url }
+    } catch (err: any) {
+      message.warning(`上传失败: ${file.name}: ${err?.message || err}`)
+      return null
+    }
+  }
+
+  const submitWithEvidence = async () => {
+    setScSaving(true)
+    try {
+      const v = await form.validateFields()
+      if (!supName && !v.supplier_name && !v.supplier_code) { message.error('请选择供应商'); setScSaving(false); return }
+      // 上传凭证文件
+      const evidenceItems: any[] = []
+      for (const ef of scEvidenceFiles) {
+        const rawFile = ef.originFileObj || ef
+        const uploaded = await uploadScEvidence(rawFile)
+        if (uploaded) {
+          evidenceItems.push(uploaded)
+        }
+      }
+      for (const existing of scEvidence) {
+        if (existing.id) evidenceItems.push(existing)
+      }
+
+      const allAttachments = [...uploadedFiles, ...fileList.map((f: any) => f.originFileObj || f).filter(Boolean).map((f: any) => f)]
+      const pendingFiles = fileList.filter((f: any) => !f.url && (f.originFileObj || f))
+      const newUploads: any[] = []
+      for (const f of pendingFiles) {
+        try {
+          const rawFile = f.originFileObj || f
+          const upRes: any = await fileApi.upload(rawFile, 'purchase-price-change')
+          newUploads.push({ id: upRes.data.id, key: upRes.data.key, name: upRes.data.name, url: upRes.data.url })
+        } catch (err: any) { message.warning(`上传失败: ${f.name}: ${err?.message || err}`) }
+      }
+      const finalAttachments = [...uploadedFiles, ...newUploads]
+
+      const payload = {
+        ...v, supplier_name: supName || v.supplier_name, remark, title,
+        change_date: v.change_date ? dayjs(v.change_date).format('YYYY-MM-DD') : null,
+        attachments: finalAttachments,
+        erp_price_snapshot: items.flatMap(i => i._otherPrices || []).filter((p: any, idx: number, arr: any[]) => arr.findIndex((x: any) => x.supplier_code === p.supplier_code && x.price === p.price) === idx),
+        submit: true,
+        self_check_evidence: evidenceItems,
+        items: items.map(i => ({
+          material_code: i.material_code, material_name: i.material_name, spec: i.spec, unit: i.unit,
+          order_qty: i.order_qty, delivery_qty: i.delivery_qty,
+          old_price: i.old_price, old_price_date: i.old_price_date,
+          new_price: i.new_price, remark: i.remark,
+        })),
+      }
+
+      if (isEdit) {
+        await purchaseApi.update(parseInt(editId!), payload)
+      } else {
+        await purchaseApi.create(payload)
+      }
+      message.success('已提交审批')
+      closeScModal()
+      navigate('/purchase/price-change')
+    } catch (e: any) {
+      if (!e?.errorFields) message.error(e.message || '提交失败')
+    } finally {
+      setScSaving(false)
+    }
+  }
 
   // 自动检测调价类型
   useEffect(() => {
@@ -504,6 +617,97 @@ export default function PriceChangeNew() {
             { title: '工号', dataIndex: 'emp_code', width: 120 },
             { title: '岗位', dataIndex: 'position_name', width: 180, ellipsis: true },
           ]} />
+      </Modal>
+
+      {/* 自检阻断弹窗 */}
+      <Modal title={null} open={scModal} width={640} onCancel={closeScModal}
+        footer={
+          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+            <div style={{ fontSize: 12, color: '#94a3b8' }}>
+              {scResult?.overall_status === 'high' ? '高风险项必须上传支撑凭证才能提交' : '中风险项建议上传凭证说明'}
+            </div>
+            <Space>
+              <Button onClick={closeScModal}>取消提交</Button>
+              <Button type="primary" icon={<SendOutlined />} loading={scSaving}
+                disabled={scResult?.overall_status === 'high' && scEvidence.length === 0 && scEvidenceFiles.length === 0}
+                onClick={submitWithEvidence}>
+                确认提交
+              </Button>
+            </Space>
+          </Space>
+        }>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+            {scResult?.overall_status === 'high'
+              ? <WarningOutlined style={{ fontSize: 22, color: '#dc2626' }} />
+              : <ExclamationCircleOutlined style={{ fontSize: 22, color: '#d97706' }} />}
+            <span style={{ fontSize: 16, fontWeight: 700, color: '#0f172a' }}>价格自检异常</span>
+            <Tag color={scResult?.overall_status === 'high' ? 'red' : 'orange'}>
+              {scResult?.overall_status === 'high' ? '高风险' : '中风险'}
+            </Tag>
+          </div>
+
+          {/* 自检摘要 */}
+          <div style={{ background: scResult?.overall_status === 'high' ? '#fef2f2' : '#fffbeb', borderRadius: 6, padding: '12px 16px', marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: scResult?.overall_status === 'high' ? '#991b1b' : '#92400e', marginBottom: 4 }}>自检摘要</div>
+            <div style={{ fontSize: 13, color: scResult?.overall_status === 'high' ? '#7f1d1d' : '#78350f' }}>{scResult?.summary || '-'}</div>
+          </div>
+
+          {/* 明细风险列表 */}
+          {scResult?.checks?.map((check: any, idx: number) => {
+            const highRisks = check.risks?.filter((r: any) => r.severity === 'high') || []
+            const medRisks = check.risks?.filter((r: any) => r.severity === 'medium') || []
+            const hasIssue = highRisks.length > 0 || medRisks.length > 0
+            if (!hasIssue) return null
+            return (
+              <div key={idx} style={{ border: '1px solid #e5e7eb', borderRadius: 6, padding: '12px 16px', marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <Tag color={check.risk_level === 'high' ? 'red' : 'orange'}>{check.risk_level === 'high' ? '高风险' : '中风险'}</Tag>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{check.material_code} {check.material_name}</span>
+                </div>
+                <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#64748b', marginBottom: 6 }}>
+                  <span>原价: <b>{check.old_price}</b></span>
+                  <span>新价: <b>{check.new_price}</b></span>
+                </div>
+                {[...highRisks, ...medRisks].map((risk: any, ri: number) => (
+                  <div key={ri} style={{ fontSize: 12, color: risk.severity === 'high' ? '#dc2626' : '#d97706', padding: '2px 0' }}>
+                    • {risk.detail}
+                  </div>
+                ))}
+              </div>
+            )
+          })}
+
+          {/* 凭证上传 */}
+          <Divider style={{ margin: '12px 0' }} />
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#334155', marginBottom: 4 }}>
+              支撑凭证 {scResult?.overall_status === 'high' ? <span style={{ color: '#dc2626' }}>（必填）</span> : <span style={{ color: '#d97706' }}>（建议上传）</span>}
+            </div>
+            <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8 }}>
+              请上传供应商报价单、大宗商品指数截图、物流成本调整函等证明材料
+            </div>
+            <Upload fileList={scEvidenceFiles} onChange={({fileList: fl}) => setScEvidenceFiles(fl)}
+              beforeUpload={() => false} multiple
+              accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"
+              showUploadList={true}>
+              <Button icon={<UploadOutlined />}>选择文件</Button>
+            </Upload>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>支持 PDF、图片、Word、Excel</div>
+          </div>
+
+          {/* 已上传的凭证列表占位（实际在上传后显示）*/}
+          {scEvidence.length > 0 && (
+            <div style={{ marginTop: 8, background: '#f0fdf4', borderRadius: 6, padding: '6px 12px' }}>
+              <div style={{ fontSize: 12, color: '#16a34a', marginBottom: 4 }}>已上传凭证（{scEvidence.length} 个）</div>
+              {scEvidence.map((f: any, i: number) => (
+                <span key={i} style={{ display: 'inline-block', fontSize: 12, color: '#334155', marginRight: 8, background: '#fff', padding: '2px 8px', borderRadius: 4, border: '1px solid #d9d9d9' }}>
+                  {f.name} <a onClick={() => setScEvidence(scEvidence.filter((_: any, j: number) => j !== i))} style={{ color: '#ef4444', marginLeft: 4 }}>x</a>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       </Modal>
 
       {/* 物料选择弹窗 */}
