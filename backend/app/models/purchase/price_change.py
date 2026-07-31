@@ -43,6 +43,7 @@ class PurchasePriceChange(Base):
     self_check_status = Column(String(16), default="pending")
     self_check_result = Column(JSON, default=list)
     self_check_evidence = Column(JSON, default=list)
+    self_check_action_note = Column(Text)
 
     approval_status = Column(String(16), default="draft")
     approval_level = Column(Integer, default=1)
@@ -132,5 +133,16 @@ class ApprovalConfig(Base):
     biz_name = Column(String(128))
     nodes = Column(JSON, nullable=False, default=list)
     is_active = Column(Boolean, default=True)
+    updated_by = Column(String(64))
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PriceChangeRuleConfig(Base):
+    __tablename__ = "price_change_rule_config"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_key = Column(String(64), unique=True, nullable=False)
+    config_value = Column(String(64), nullable=False)
+    description = Column(String(256))
     updated_by = Column(String(64))
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

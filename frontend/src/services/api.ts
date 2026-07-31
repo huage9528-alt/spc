@@ -19,7 +19,10 @@ api.interceptors.response.use(
   (response) => {
     const data = response.data
     if (data.code !== 0) {
-      return Promise.reject(new Error(data.message || '请求失败'))
+      const err: any = new Error(data.message || '请求失败')
+      err._apiData = data
+      err._apiResponse = response
+      return Promise.reject(err)
     }
     return data
   },

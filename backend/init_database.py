@@ -283,6 +283,7 @@ class DatabaseInitializer:
                 "self_check_status": "VARCHAR(16) NOT NULL DEFAULT 'pending'",
                 "self_check_result": "JSONB",
                 "self_check_evidence": "JSONB",
+                "self_check_action_note": "TEXT",
             },
             "mrp_plan_order": {
                 "stock_qty": "NUMERIC(15,2)",
@@ -1366,6 +1367,59 @@ class DatabaseInitializer:
                 print(f"Error seeding normal order standards: {e}")
                 raise
 
+    async def seed_price_change_rule_config(self):
+        """Seed default price change self-check rule thresholds (idempotent UPSERT)."""
+        print("Seeding price change rule config...")
+        # 先确保表存在（init_database 的 create_all 不导入 purchase 域模型，需手动建）
+        async with AsyncSessionLocal() as session:
+            try:
+                await session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS price_change_rule_config (
+                        id SERIAL PRIMARY KEY,
+                        config_key VARCHAR(64) UNIQUE NOT NULL,
+                        config_value VARCHAR(64) NOT NULL,
+                        description VARCHAR(256),
+                        updated_by VARCHAR(64),
+                        updated_at TIMESTAMP DEFAULT NOW()
+                    )
+                """))
+                await session.commit()
+            except Exception as e:
+                print(f"Error creating price_change_rule_config table: {e}")
+                raise
+        defaults = [
+            ("compare_over_max_high", "1.10", "新价超过历史最高价的倍数 → high"),
+            ("compare_over_avg_medium", "1.05", "新价超过历史均价的倍数 → medium"),
+            ("surge_no_history_high", "20", "无历史时涨幅% ≥ 该值 → high"),
+            ("surge_no_history_medium", "10", "无历史时涨幅% ≥ 该值 → medium"),
+            ("surge_over_hist_high", "2.0", "有历史时涨幅超过历史均值倍数 → high"),
+            ("surge_over_hist_medium", "1.5", "有历史时涨幅超过历史均值倍数 → medium"),
+            ("erp_price_lookback_months", "12", "ERP 采购价回溯月数"),
+            ("require_action_note_min_len", "10", "高风险行动项说明最少字数"),
+        ]
+        async with AsyncSessionLocal() as session:
+            try:
+                for key, value, desc in defaults:
+                    existing = await session.execute(
+                        text("SELECT id FROM price_change_rule_config WHERE config_key=:k"),
+                        {"k": key},
+                    )
+                    if existing.fetchone():
+                        await session.execute(
+                            text("UPDATE price_change_rule_config SET description=:d WHERE config_key=:k"),
+                            {"d": desc, "k": key},
+                        )
+                    else:
+                        await session.execute(
+                            text("INSERT INTO price_change_rule_config (config_key, config_value, description) VALUES (:k,:v,:d)"),
+                            {"k": key, "v": value, "d": desc},
+                        )
+                await session.commit()
+                print(f"Price change rule config: {len(defaults)} rows ensured.")
+            except Exception as e:
+                print(f"Error seeding price change rule config: {e}")
+                raise
+
     async def seed_sample_data(self):
         """Seed comprehensive sample data for dashboard visualization"""
         print("Seeding sample business data...")
@@ -2009,6 +2063,7 @@ ORDER BY FModifyDate DESC
             await self.migrate_stock_check_permission()
             await self.seed_roles()
             await self.seed_users()
+            await self.seed_price_change_rule_config()
             await self.seed_risk_rules()
             await self.seed_field_mapping()
             await self.seed_normal_order_standards()

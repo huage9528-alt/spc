@@ -31,6 +31,15 @@ export default function PriceChangeList() {
     { title: '状态', dataIndex: 'approval_status', width: 100,
       render: (_, r) => { const s = STATUS_MAP[r.approval_status] || STATUS_MAP.draft; return <Tag color={s.color}>{s.text}</Tag> },
       valueType: 'select', valueEnum: { draft: '草稿', pending: '审批中', approved: '已归档', rejected: '已驳回', recalled: '已撤回' } },
+    { title: '自检', dataIndex: 'self_check_status', width: 90, search: false,
+      render: (_, r) => {
+        const sc: any = r.self_check_result
+        let st = 'pending'
+        try { st = (typeof sc === 'string' ? JSON.parse(sc) : sc)?.overall_status || r.self_check_status || 'pending' } catch { st = r.self_check_status || 'pending' }
+        const map: Record<string, [string, string]> = { high: ['red', '高风险'], medium: ['orange', '中风险'], low: ['green', '通过'], pending: ['default', '未检'] }
+        const [color, text] = map[st] || ['default', '-']
+        return <Tag color={color} style={{ cursor: 'pointer' }} onClick={() => navigate(`/purchase/price-change/${r.id}`)}>{text}</Tag>
+      } },
     { title: '申请人', dataIndex: 'applicant_display', width: 100,
       render: (_: any, r: any) => r.applicant_display || r.applicant || '-',
     },

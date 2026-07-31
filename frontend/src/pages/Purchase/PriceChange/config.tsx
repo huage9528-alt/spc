@@ -8,6 +8,53 @@ interface Config { biz_type: string; biz_name?: string; nodes: ApprovalNode[]; i
 
 const DIR_VALUES = ['涨价', '降价', '新报价']
 
+// 自检规则阈值配置卡片（读/写 /rule-config）
+function RuleConfigCard() {
+  const [rules, setRules] = useState<{ config_key: string; config_value: string; description?: string }[]>([])
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const load = async () => {
+    setLoading(true)
+    try {
+      const res: any = await api.get('/purchase/price-change/rule-config')
+      setRules(res.data?.items || [])
+    } catch { message.error('规则加载失败') } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+  const update = (k: string, v: string) => setRules(rs => rs.map(r => r.config_key === k ? { ...r, config_value: v } : r))
+  const save = async () => {
+    setSaving(true)
+    try {
+      await api.put('/purchase/price-change/rule-config', { items: rules.map(r => ({ config_key: r.config_key, config_value: r.config_value })) })
+      message.success('规则阈值已保存')
+    } catch (e: any) { message.error(e.message || '保存失败') } finally { setSaving(false) }
+  }
+  const labelMap: Record<string, string> = {
+    compare_over_max_high: '新价超历史最高价倍数 → high',
+    compare_over_avg_medium: '新价超历史均价倍数 → medium',
+    surge_no_history_high: '无历史时涨幅% → high',
+    surge_no_history_medium: '无历史时涨幅% → medium',
+    surge_over_hist_high: '有历史时涨幅超均值倍数 → high',
+    surge_over_hist_medium: '有历史时涨幅超均值倍数 → medium',
+    erp_price_lookback_months: 'ERP采购价回溯月数',
+    require_action_note_min_len: '高风险行动项最少字数',
+  }
+  return (
+    <Card title="自检规则阈值" size="small" style={{ marginTop: 16 }} loading={loading}
+      extra={<Button type="primary" size="small" icon={<SaveOutlined />} loading={saving} onClick={save}>保存</Button>}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        {rules.map(r => (
+          <div key={r.config_key}>
+            <div style={{ fontSize: 12, color: '#475569', marginBottom: 4 }}>{labelMap[r.config_key] || r.description || r.config_key}</div>
+            <InputNumber value={r.config_value} onChange={(v) => update(r.config_key, String(v ?? ''))} style={{ width: '100%' }} step={r.config_key.startsWith('compare') || r.config_key.startsWith('surge_over') ? 0.1 : 1} />
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 8, fontSize: 12, color: '#94a3b8' }}>调整后对新提交的自检生效，不影响已审批单。倍数类阈值如 1.1 = 超出10%。</div>
+    </Card>
+  )
+}
+
 export default function ApprovalConfigCenter() {
   const [configs, setConfigs] = useState<Config[]>([])
   const [loading, setLoading] = useState(false)
@@ -101,6 +148,8 @@ export default function ApprovalConfigCenter() {
         <Input placeholder="标识，如 purchase_order" value={newBizType} onChange={e => setNewBizType(e.target.value)} onPressEnter={createAndEdit} style={{ marginBottom: 12 }} />
         <Button type="primary" block onClick={createAndEdit}>创建并配置</Button>
       </Modal>
+
+      <RuleConfigCard />
 
       <Modal title={editing ? `编辑审批流 - ${editing.biz_name || editing.biz_type}` : ''} open={!!editing && modalOpen} width={900}
         onCancel={() => { setModalOpen(false); setEditing(null) }}

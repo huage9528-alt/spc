@@ -140,6 +140,15 @@ export default function PriceChangeNew() {
       if (cur) {
         upItem(key, 'old_price', cur.price)
         upItem(key, 'old_price_date', cur.start_date || '')
+      } else if (sc) {
+        // 回退：查 ERP 采购订单该供应商最近一次成交价（修复后的 supplier-last-price）
+        try {
+          const lp: any = await purchaseApi.lastPrice(mc, sc)
+          if (lp.data?.old_price) {
+            upItem(key, 'old_price', lp.data.old_price)
+            upItem(key, 'old_price_date', lp.data.old_price_date || '')
+          }
+        } catch {}
       }
     } catch {}
   }
@@ -217,6 +226,7 @@ export default function PriceChangeNew() {
             setScResult(scData)
             setScEvidence([])
             setScEvidenceFiles([])
+            setScActionNote('')
             setScPendingSubmit(true)
             setScModal(true)
             setSaving(false)
@@ -261,8 +271,20 @@ export default function PriceChangeNew() {
       }
       message.success(submit ? '已提交审批' : (isEdit ? '已更新' : '草稿已保存'))
       navigate('/purchase/price-change')
-    } catch (e: any) { if (!e?.errorFields) message.error(e.message || '保存失败') }
-    finally { setSaving(false) }
+    } catch (e: any) {
+      const apiData = e._apiData
+      if (apiData?.data?._self_check_required) {
+        setScResult(apiData.data._self_check_result || { overall_status: 'high' })
+        setScEvidence([])
+        setScEvidenceFiles([])
+        setScActionNote('')
+        setScPendingSubmit(true)
+        setScModal(true)
+        message.warning(apiData.message || '自检未通过，请上传支撑凭证')
+        return
+      }
+      if (!e?.errorFields) message.error(e.message || '保存失败')
+    } finally { setSaving(false) }
   }
 
   const totalItems = items.length
@@ -313,14 +335,17 @@ export default function PriceChangeNew() {
   const [scResult, setScResult] = useState<any>(null)
   const [scEvidence, setScEvidence] = useState<any[]>([])
   const [scEvidenceFiles, setScEvidenceFiles] = useState<any[]>([])
+  const [scActionNote, setScActionNote] = useState('')
   const [scPendingSubmit, setScPendingSubmit] = useState(false)
   const [scSaving, setScSaving] = useState(false)
+  const [previewFile, setPreviewFile] = useState<{ url: string; name: string } | null>(null)
 
   const closeScModal = () => {
     setScModal(false)
     setScResult(null)
     setScEvidence([])
     setScEvidenceFiles([])
+    setScActionNote('')
     setScPendingSubmit(false)
   }
 
@@ -339,15 +364,14 @@ export default function PriceChangeNew() {
     try {
       const v = await form.validateFields()
       if (!supName && !v.supplier_name && !v.supplier_code) { message.error('请选择供应商'); setScSaving(false); return }
-      // 上传凭证文件
+      // 上传凭证文件（并行）
       const evidenceItems: any[] = []
-      for (const ef of scEvidenceFiles) {
+      const uploadTasks = scEvidenceFiles.map(async (ef) => {
         const rawFile = ef.originFileObj || ef
         const uploaded = await uploadScEvidence(rawFile)
-        if (uploaded) {
-          evidenceItems.push(uploaded)
-        }
-      }
+        if (uploaded) evidenceItems.push(uploaded)
+      })
+      await Promise.all(uploadTasks)
       for (const existing of scEvidence) {
         if (existing.id) evidenceItems.push(existing)
       }
@@ -355,13 +379,14 @@ export default function PriceChangeNew() {
       const allAttachments = [...uploadedFiles, ...fileList.map((f: any) => f.originFileObj || f).filter(Boolean).map((f: any) => f)]
       const pendingFiles = fileList.filter((f: any) => !f.url && (f.originFileObj || f))
       const newUploads: any[] = []
-      for (const f of pendingFiles) {
+      const attachTasks = pendingFiles.map(async (f) => {
         try {
           const rawFile = f.originFileObj || f
           const upRes: any = await fileApi.upload(rawFile, 'purchase-price-change')
           newUploads.push({ id: upRes.data.id, key: upRes.data.key, name: upRes.data.name, url: upRes.data.url })
         } catch (err: any) { message.warning(`上传失败: ${f.name}: ${err?.message || err}`) }
-      }
+      })
+      await Promise.all(attachTasks)
       const finalAttachments = [...uploadedFiles, ...newUploads]
 
       const payload = {
@@ -371,6 +396,7 @@ export default function PriceChangeNew() {
         erp_price_snapshot: items.flatMap(i => i._otherPrices || []).filter((p: any, idx: number, arr: any[]) => arr.findIndex((x: any) => x.supplier_code === p.supplier_code && x.price === p.price) === idx),
         submit: true,
         self_check_evidence: evidenceItems,
+        self_check_action_note: scActionNote,
         items: items.map(i => ({
           material_code: i.material_code, material_name: i.material_name, spec: i.spec, unit: i.unit,
           order_qty: i.order_qty, delivery_qty: i.delivery_qty,
@@ -388,9 +414,23 @@ export default function PriceChangeNew() {
       closeScModal()
       navigate('/purchase/price-change')
     } catch (e: any) {
-      if (!e?.errorFields) message.error(e.message || '提交失败')
+      // 后端拒回（高风险无凭证等）→ 重新弹出自检弹窗，让用户补充
+      const apiData = e._apiData
+      if (apiData?.data?._self_check_required) {
+        setScResult(apiData.data._self_check_result || scResult)
+        setScModal(true)
+        setScSaving(false)
+        message.warning(apiData.message || '自检未通过，请上传支撑凭证')
+        return
+      }
+      // 表单校验错误不弹
+      if (e?.errorFields) {
+        setScSaving(false)
+        return
+      }
+      message.error(e.message || '提交失败')
     } finally {
-      setScSaving(false)
+      if (!document.querySelector('.ant-modal-open')) setScSaving(false)
     }
   }
 
@@ -629,7 +669,7 @@ export default function PriceChangeNew() {
             <Space>
               <Button onClick={closeScModal}>取消提交</Button>
               <Button type="primary" icon={<SendOutlined />} loading={scSaving}
-                disabled={scResult?.overall_status === 'high' && scEvidence.length === 0 && scEvidenceFiles.length === 0}
+                disabled={scResult?.overall_status === 'high' && (scEvidence.length === 0 && scEvidenceFiles.length === 0 || scActionNote.trim().length < 10)}
                 onClick={submitWithEvidence}>
                 确认提交
               </Button>
@@ -669,18 +709,47 @@ export default function PriceChangeNew() {
                   <span>原价: <b>{check.old_price}</b></span>
                   <span>新价: <b>{check.new_price}</b></span>
                 </div>
-                {[...highRisks, ...medRisks].map((risk: any, ri: number) => (
-                  <div key={ri} style={{ fontSize: 12, color: risk.severity === 'high' ? '#dc2626' : '#d97706', padding: '2px 0' }}>
-                    • {risk.detail}
-                  </div>
-                ))}
+                {[...highRisks, ...medRisks].map((risk: any, ri: number) => {
+                  const srcLabel = risk.source === 'erp' ? '[ERP采购]' : risk.source === 'surge' ? '[涨幅]' : '[历史比价]'
+                  return (
+                    <div key={ri} style={{ fontSize: 12, color: risk.severity === 'high' ? '#dc2626' : '#d97706', padding: '2px 0' }}>
+                      • {srcLabel} {risk.detail}
+                    </div>
+                  )
+                })}
               </div>
             )
           })}
 
-          {/* 凭证上传 */}
+          {/* 行动项说明（高风险必填，≥10字） */}
           <Divider style={{ margin: '12px 0' }} />
           <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#334155', marginBottom: 4 }}>
+              行动项说明 {scResult?.overall_status === 'high' ? <span style={{ color: '#dc2626' }}>（必填，≥10字）</span> : <span style={{ color: '#d97706' }}>（建议填写）</span>}
+            </div>
+            <Input.TextArea rows={3} value={scActionNote} onChange={(e) => setScActionNote(e.target.value)}
+              placeholder="请说明涨价原因、已采取的行动项（如已比价3家、获供应商书面调价函等）。高风险必填，至少10字" />
+            {scResult?.overall_status === 'high' && scActionNote.trim().length < 10 && (
+              <div style={{ color: '#dc2626', fontSize: 12, marginTop: 4 }}>高风险需填写至少 10 字行动项说明</div>
+            )}
+          </div>
+
+          {/* 凭证上传 */}
+          <Divider style={{ margin: '12px 0' }} />
+          <div style={{ marginBottom: 8 }} onPaste={(e) => {
+            const items = e.clipboardData?.items
+            if (!items) return
+            for (const item of items) {
+              if (item.type.startsWith('image/')) {
+                const file = item.getAsFile()
+                if (file) {
+                  const uid = Date.now().toString()
+                  setScEvidenceFiles(prev => [...prev, { uid, name: `截图_${uid}.png`, status: 'done', originFileObj: file, url: URL.createObjectURL(file) } as any])
+                }
+                break
+              }
+            }
+          }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: '#334155', marginBottom: 4 }}>
               支撑凭证 {scResult?.overall_status === 'high' ? <span style={{ color: '#dc2626' }}>（必填）</span> : <span style={{ color: '#d97706' }}>（建议上传）</span>}
             </div>
@@ -690,10 +759,11 @@ export default function PriceChangeNew() {
             <Upload fileList={scEvidenceFiles} onChange={({fileList: fl}) => setScEvidenceFiles(fl)}
               beforeUpload={() => false} multiple
               accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"
-              showUploadList={true}>
+              showUploadList={{ showPreviewIcon: true, showRemoveIcon: true }}
+              onPreview={(file) => setPreviewFile({ url: file.url || URL.createObjectURL(file.originFileObj as File), name: file.name })}>
               <Button icon={<UploadOutlined />}>选择文件</Button>
             </Upload>
-            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>支持 PDF、图片、Word、Excel</div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>支持 PDF、图片、Word、Excel，也可直接截图 Ctrl+V 粘贴上传</div>
           </div>
 
           {/* 已上传的凭证列表占位（实际在上传后显示）*/}
@@ -708,6 +778,15 @@ export default function PriceChangeNew() {
             </div>
           )}
         </div>
+      </Modal>
+
+      {/* 凭证预览弹窗 */}
+      <Modal title={previewFile?.name || '预览'} open={!!previewFile} onCancel={() => setPreviewFile(null)} width={700} footer={null}>
+        {previewFile?.url && (
+          <div style={{ textAlign: 'center' }}>
+            <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
+          </div>
+        )}
       </Modal>
 
       {/* 物料选择弹窗 */}

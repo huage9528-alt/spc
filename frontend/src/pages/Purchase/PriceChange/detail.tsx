@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Button, Collapse, Descriptions, Input, Modal, Space, Steps, Table, Tag, Tabs, Timeline, message } from 'antd'
+import { Button, Collapse, Descriptions, Input, Modal, Space, Steps, Table, Tag, Tabs, Timeline, Alert, Divider, Upload, message } from 'antd'
 import { FileTextOutlined, AuditOutlined, BulbOutlined, WarningOutlined } from '@ant-design/icons'
-import { ArrowLeftOutlined, CheckOutlined, CloseOutlined, RollbackOutlined, ClockCircleOutlined, CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined, ExclamationCircleOutlined, ReloadOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, CheckOutlined, CloseOutlined, RollbackOutlined, ClockCircleOutlined, CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined, ExclamationCircleOutlined, ReloadOutlined, SendOutlined, UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { purchaseApi } from '../../../services/purchase'
+import { fileApi } from '../../../services/api'
 import axios from 'axios'
 import { useAuthStore } from '../../../store/auth'
 
@@ -38,6 +39,14 @@ export default function PriceChangeDetail() {
   const [submitting, setSubmitting] = useState(false)
   const [refreshingAi, setRefreshingAi] = useState(false)
   const [loading, setLoading] = useState(false)
+  // 详情页提交弹窗
+  const [scModal, setScModal] = useState(false)
+  const [scResult, setScResult] = useState<any>(null)
+  const [scEvidence, setScEvidence] = useState<any[]>([])
+  const [scEvidenceFiles, setScEvidenceFiles] = useState<any[]>([])
+  const [scActionNote, setScActionNote] = useState('')
+  const [scSaving, setScSaving] = useState(false)
+  const [previewFile, setPreviewFile] = useState<{ url: string; name: string } | null>(null)
 
   const load = async () => {
     if (!id) return
@@ -61,7 +70,21 @@ export default function PriceChangeDetail() {
     setSubmitting(true)
     try {
       const cid = parseInt(id)
-      if (action === 'submit') await purchaseApi.submit(cid)
+      if (action === 'submit') {
+        // 提交前先查自检结果，高风险弹窗传凭证
+        const scRes: any = await purchaseApi.selfCheckRecord(cid)
+        const scData = scRes.data
+        if (scData?.overall_status === 'high' || scData?.overall_status === 'medium') {
+          setScResult(scData)
+          setScEvidence([])
+          setScEvidenceFiles([])
+          setScActionNote('')
+          setScModal(true)
+          setSubmitting(false)
+          return
+        }
+        await purchaseApi.submit(cid)
+      }
       else if (action === 'approve') await purchaseApi.approve(cid, comment, r?.version)
       else if (action === 'reject') await purchaseApi.reject(cid, comment, r?.version)
       else if (action === 'recall') await purchaseApi.recall(cid)
@@ -70,6 +93,13 @@ export default function PriceChangeDetail() {
       setComment('')
       load()
     } catch (e: any) {
+      const apiData = e._apiData
+      if (apiData?.data?._self_check_required) {
+        setScResult(apiData.data._self_check_result || { overall_status: 'high' })
+        setScModal(true)
+        message.warning(apiData.message || '自检未通过，请上传支撑凭证')
+        return
+      }
       message.error(e.message || '操作失败')
     } finally {
       setSubmitting(false)
@@ -106,6 +136,56 @@ export default function PriceChangeDetail() {
     } catch (e: any) {
       message.error('下载失败: ' + (e.message || ''))
     }
+  }
+
+  const uploadScEvidence = async (file: File): Promise<any> => {
+    try {
+      const upRes: any = await fileApi.upload(file, 'purchase-price-change-evidence')
+      return { id: upRes.data.id, key: upRes.data.key, name: upRes.data.name, url: upRes.data.url }
+    } catch (err: any) {
+      message.warning(`上传失败: ${file.name}: ${err?.message || err}`)
+      return null
+    }
+  }
+
+  const submitWithEvidence = async () => {
+    if (!id) return
+    setScSaving(true)
+    try {
+      const cid = parseInt(id)
+      const evidenceItems: any[] = []
+      const uploadTasks = scEvidenceFiles.map(async (ef) => {
+        const rawFile = ef.originFileObj || ef
+        const uploaded = await uploadScEvidence(rawFile)
+        if (uploaded) evidenceItems.push(uploaded)
+      })
+      await Promise.all(uploadTasks)
+      for (const existing of scEvidence) {
+        if (existing.id) evidenceItems.push(existing)
+      }
+      await purchaseApi.submit(cid, { self_check_evidence: evidenceItems, self_check_action_note: scActionNote })
+      message.success('已提交审批')
+      setScModal(false)
+      load()
+    } catch (e: any) {
+      const apiData = e._apiData
+      if (apiData?.data?._self_check_required) {
+        message.warning(apiData.message || '自检未通过，请补充凭证')
+        setScSaving(false)
+        return
+      }
+      message.error(e.message || '提交失败')
+    } finally {
+      setScSaving(false)
+    }
+  }
+
+  const closeScModal = () => {
+    setScModal(false)
+    setScResult(null)
+    setScEvidence([])
+    setScEvidenceFiles([])
+    setScActionNote('')
   }
 
   const del = () => {
@@ -171,6 +251,80 @@ export default function PriceChangeDetail() {
     marginBottom: 12,
   } as const
 
+  // 自检风险块渲染（详情 Tab 与审批 Tab 共用，确保审批人无论看哪个 Tab 都能看到风险）
+  const renderSelfCheckBlock = (record: any) => {
+    if (!record || !record.self_check_result) return null
+    let sc: any = record.self_check_result
+    if (typeof sc === 'string') { try { sc = JSON.parse(sc) } catch { return null } }
+    if (!sc || !sc.checks) return null
+    const status = sc.overall_status || 'low'
+    const highCount = sc.checks.filter((c: any) => c.risk_level === 'high').length
+    const medCount = sc.checks.filter((c: any) => c.risk_level === 'medium').length
+    const evidence = (() => {
+      try { const e = typeof record.self_check_evidence === 'string' ? JSON.parse(record.self_check_evidence) : (record.self_check_evidence || []); return Array.isArray(e) ? e : [] } catch { return [] }
+    })()
+    const bgColor = status === 'high' ? '#fef2f2' : status === 'medium' ? '#fffbeb' : '#f0fdf4'
+    const borderColor = status === 'high' ? '#fecaca' : status === 'medium' ? '#fde68a' : '#bbf7d0'
+    const textColor = status === 'high' ? '#991b1b' : status === 'medium' ? '#92400e' : '#166534'
+    const iconColor = status === 'high' ? '#dc2626' : status === 'medium' ? '#d97706' : '#16a34a'
+    const icon = status === 'high' ? <WarningOutlined style={{ color: iconColor, fontSize: 18 }} />
+      : status === 'medium' ? <ExclamationCircleOutlined style={{ color: iconColor, fontSize: 18 }} />
+      : <CheckCircleOutlined style={{ color: iconColor, fontSize: 18 }} />
+    const label = status === 'high' ? '自检异常 — 高风险' : status === 'medium' ? '自检异常 — 中风险' : '自检通过'
+    return (
+      <div style={{ ...sectionStyle, border: `1.5px solid ${borderColor}`, background: bgColor }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+          {icon}
+          <span style={{ fontSize: 14, fontWeight: 700, color: textColor }}>{label}</span>
+          <Tag color={status === 'high' ? 'error' : status === 'medium' ? 'warning' : 'success'}>{sc.summary || '-'}</Tag>
+        </div>
+        {sc.checks?.filter((c: any) => c.risk_level !== 'low').map((check: any, idx: number) => {
+          const risks = check.risks?.filter((rsk: any) => rsk.severity !== 'low') || []
+          if (risks.length === 0) return null
+          return (
+            <div key={idx} style={{ padding: '8px 12px', marginBottom: 8, background: '#fff', borderRadius: 6, border: `1px solid ${status === 'high' ? '#fecaca' : '#fde68a'}` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                <Tag color={check.risk_level === 'high' ? 'red' : 'orange'}>{check.risk_level === 'high' ? '高风险' : '中风险'}</Tag>
+                <span style={{ fontWeight: 600, fontSize: 13 }}>{check.material_code} {check.material_name}</span>
+              </div>
+              <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#64748b', marginBottom: 4 }}>
+                <span>原价: <b>{check.old_price}</b></span>
+                <span>新价: <b>{check.new_price}</b></span>
+              </div>
+              {risks.map((risk: any, ri: number) => (
+                <div key={ri} style={{ fontSize: 12, color: risk.severity === 'high' ? '#dc2626' : '#d97706', padding: '1px 0' }}>
+                  • [{risk.source === 'erp' ? 'ERP采购' : risk.source === 'surge' ? '涨幅' : '历史比价'}] {risk.detail}
+                </div>
+              ))}
+            </div>
+          )
+        })}
+        {evidence.length > 0 && (
+          <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff', borderRadius: 6 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#16a34a', marginBottom: 4 }}>
+              <CheckCircleOutlined style={{ fontSize: 12, marginRight: 4 }} />已上传支撑凭证（{evidence.length} 个）
+            </div>
+            {evidence.map((ev: any, ei: number) => (
+              <div key={ei} style={{ fontSize: 12, color: '#334155', padding: '2px 0' }}>
+                • {ev.name || '凭证文件'}
+                {ev.key && <a onClick={(e) => { e.preventDefault(); downloadAtt(ev.key, ev.name || '凭证') }} style={{ color: '#2563eb', marginLeft: 8, cursor: 'pointer' }}>下载</a>}
+              </div>
+            ))}
+          </div>
+        )}
+        {record.self_check_action_note && (
+          <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff', borderRadius: 6 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#334155', marginBottom: 4 }}>行动项说明</div>
+            <div style={{ fontSize: 12, color: '#475569', lineHeight: 1.6 }}>{record.self_check_action_note}</div>
+          </div>
+        )}
+        {evidence.length === 0 && status !== 'low' && (
+          <div style={{ marginTop: 8, fontSize: 12, color: '#dc2626' }}>⚠️ 该调价单异常项未上传支撑凭证</div>
+        )}
+      </div>
+    )
+  }
+
   const descProps = {
     bordered: true,
     size: 'small' as const,
@@ -207,6 +361,18 @@ export default function PriceChangeDetail() {
               </>
             )}
             {s === 'pending' && <Button icon={<RollbackOutlined />} onClick={() => act('recall')} loading={submitting}>撤回</Button>}
+            {s === 'pending' && (() => {
+              const currentUser = useAuthStore.getState().currentUser
+              const canAct = canApproveNode(currentUser, currentStep)
+              if (!canAct) return null
+              return (
+                <>
+                  <Input size="small" placeholder="审批意见（可选）" value={comment} onChange={e => setComment(e.target.value)} style={{ width: 200 }} />
+                  <Button type="primary" icon={<CheckOutlined />} loading={submitting} onClick={() => act('approve')}>通过</Button>
+                  <Button danger icon={<CloseOutlined />} loading={submitting} onClick={() => act('reject')}>驳回</Button>
+                </>
+              )
+            })()}
             {s === 'pending' && (() => {
               // 判断当前用户能否反审核：最后一条 approve/auto_skip log 是当前用户审的（admin 也可）
               const currentUser = useAuthStore.getState().currentUser
@@ -253,77 +419,8 @@ export default function PriceChangeDetail() {
             </Descriptions>
           </div>
 
-          {/* 自检结果摘要 — 显性展示 */}
-          {r.self_check_result && (() => {
-            const sc = typeof r.self_check_result === 'string' ? JSON.parse(r.self_check_result) : r.self_check_result
-            if (!sc || !sc.checks) return null
-            const status = sc.overall_status || 'low'
-            const highCount = sc.checks.filter((c: any) => c.risk_level === 'high').length
-            const medCount = sc.checks.filter((c: any) => c.risk_level === 'medium').length
-            const evidence = (() => {
-              try { const e = typeof r.self_check_evidence === 'string' ? JSON.parse(r.self_check_evidence) : (r.self_check_evidence || []); return Array.isArray(e) ? e : [] } catch { return [] }
-            })()
-            const bgColor = status === 'high' ? '#fef2f2' : status === 'medium' ? '#fffbeb' : '#f0fdf4'
-            const borderColor = status === 'high' ? '#fecaca' : status === 'medium' ? '#fde68a' : '#bbf7d0'
-            const textColor = status === 'high' ? '#991b1b' : status === 'medium' ? '#92400e' : '#166534'
-            const iconColor = status === 'high' ? '#dc2626' : status === 'medium' ? '#d97706' : '#16a34a'
-            const icon = status === 'high' ? <WarningOutlined style={{ color: iconColor, fontSize: 18 }} />
-              : status === 'medium' ? <ExclamationCircleOutlined style={{ color: iconColor, fontSize: 18 }} />
-              : <CheckCircleOutlined style={{ color: iconColor, fontSize: 18 }} />
-            const label = status === 'high' ? '自检异常 — 高风险' : status === 'medium' ? '自检异常 — 中风险' : '自检通过'
-            return (
-              <div style={{ ...sectionStyle, border: `1.5px solid ${borderColor}`, background: bgColor }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                  {icon}
-                  <span style={{ fontSize: 14, fontWeight: 700, color: textColor }}>{label}</span>
-                  <Tag color={status === 'high' ? 'error' : status === 'medium' ? 'warning' : 'success'}>{sc.summary || '-'}</Tag>
-                </div>
-
-                {/* 逐项风险详情 */}
-                {sc.checks?.filter((c: any) => c.risk_level !== 'low').map((check: any, idx: number) => {
-                  const risks = check.risks?.filter((r: any) => r.severity !== 'low') || []
-                  if (risks.length === 0) return null
-                  return (
-                    <div key={idx} style={{ padding: '8px 12px', marginBottom: 8, background: '#fff', borderRadius: 6, border: `1px solid ${status === 'high' ? '#fecaca' : '#fde68a'}` }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                        <Tag color={check.risk_level === 'high' ? 'red' : 'orange'}>{check.risk_level === 'high' ? '高风险' : '中风险'}</Tag>
-                        <span style={{ fontWeight: 600, fontSize: 13 }}>{check.material_code} {check.material_name}</span>
-                      </div>
-                      <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#64748b', marginBottom: 4 }}>
-                        <span>原价: <b>{check.old_price}</b></span>
-                        <span>新价: <b>{check.new_price}</b></span>
-                      </div>
-                      {risks.map((risk: any, ri: number) => (
-                        <div key={ri} style={{ fontSize: 12, color: risk.severity === 'high' ? '#dc2626' : '#d97706', padding: '1px 0' }}>
-                          • [{risk.type}] {risk.detail}
-                        </div>
-                      ))}
-                    </div>
-                  )
-                })}
-
-                {/* 凭证信息 */}
-                {evidence.length > 0 && (
-                  <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff', borderRadius: 6 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: '#16a34a', marginBottom: 4 }}>
-                      <CheckCircleOutlined style={{ fontSize: 12, marginRight: 4 }} />已上传支撑凭证（{evidence.length} 个）
-                    </div>
-                    {evidence.map((ev: any, ei: number) => (
-                      <div key={ei} style={{ fontSize: 12, color: '#334155', padding: '2px 0' }}>
-                        • {ev.name || '凭证文件'}
-                        {ev.key && <a onClick={(e) => { e.preventDefault(); downloadAtt(ev.key, ev.name || '凭证') }} style={{ color: '#2563eb', marginLeft: 8, cursor: 'pointer' }}>下载</a>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {evidence.length === 0 && status !== 'low' && (
-                  <div style={{ marginTop: 8, fontSize: 12, color: '#dc2626' }}>
-                    ⚠️ 该调价单异常项未上传支撑凭证
-                  </div>
-                )}
-              </div>
-            )
-          })()}
+          {/* 自检结果摘要 — 显性展示（复用 renderSelfCheckBlock，与审批 Tab 共用） */}
+          {renderSelfCheckBlock(r)}
 
           <div style={sectionStyle}>
             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: '#0f172a' }}>物料明细</div>
@@ -427,6 +524,16 @@ export default function PriceChangeDetail() {
           </div>
         </Tabs.TabPane>
         <Tabs.TabPane tab={<><AuditOutlined /> 审批</>} key="approval">
+          {/* 审批 Tab 顶部复用自检风险块 — 审批人无论看哪个 Tab 都能看到风险 */}
+          {renderSelfCheckBlock(r)}
+          {r.self_check_result && (() => {
+            const sc: any = typeof r.self_check_result === 'string' ? JSON.parse(r.self_check_result) : r.self_check_result
+            const ev: any[] = (() => { try { const e = typeof r.self_check_evidence === 'string' ? JSON.parse(r.self_check_evidence) : (r.self_check_evidence || []); return Array.isArray(e) ? e : [] } catch { return [] } })()
+            if (sc?.overall_status === 'high' && ev.length === 0) {
+              return <Alert type="error" showIcon message="该单为高风险且未上传支撑凭证，请谨慎审批" style={{ marginBottom: 12 }} />
+            }
+            return null
+          })()}
           <div style={sectionStyle}>
             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: '#0f172a' }}>审批流程</div>
             {snap.length > 0 ? (
@@ -506,6 +613,94 @@ export default function PriceChangeDetail() {
           </div>
         </Tabs.TabPane>
       </Tabs>
+      {/* 提交弹窗（自检高风险时上传凭证+行动项说明） */}
+      <Modal title={null} open={scModal} width={640} onCancel={closeScModal}
+        footer={
+          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+            <div style={{ fontSize: 12, color: '#94a3b8' }}>
+              {scResult?.overall_status === 'high' ? '高风险项必须上传支撑凭证+填写说明才能提交' : '中风险项建议上传凭证说明'}
+            </div>
+            <Space>
+              <Button onClick={closeScModal}>取消</Button>
+              <Button type="primary" icon={<SendOutlined />} loading={scSaving}
+                disabled={scResult?.overall_status === 'high' && (scEvidence.length === 0 && scEvidenceFiles.length === 0 || scActionNote.trim().length < 10)}
+                onClick={submitWithEvidence}>确认提交</Button>
+            </Space>
+          </Space>
+        }>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+            {scResult?.overall_status === 'high'
+              ? <WarningOutlined style={{ fontSize: 22, color: '#dc2626' }} />
+              : <ExclamationCircleOutlined style={{ fontSize: 22, color: '#d97706' }} />}
+            <span style={{ fontSize: 16, fontWeight: 700, color: '#0f172a' }}>价格自检异常</span>
+            <Tag color={scResult?.overall_status === 'high' ? 'red' : 'orange'}>
+              {scResult?.overall_status === 'high' ? '高风险' : '中风险'}
+            </Tag>
+          </div>
+          {scResult?.summary && (
+            <div style={{ background: scResult?.overall_status === 'high' ? '#fef2f2' : '#fffbeb', borderRadius: 6, padding: '12px 16px', marginBottom: 16 }}>
+              <div style={{ fontSize: 13, color: scResult?.overall_status === 'high' ? '#7f1d1d' : '#78350f' }}>{scResult.summary}</div>
+            </div>
+          )}
+          <Divider style={{ margin: '12px 0' }} />
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#334155', marginBottom: 4 }}>
+              行动项说明 {scResult?.overall_status === 'high' ? <span style={{ color: '#dc2626' }}>（必填，≥10字）</span> : <span style={{ color: '#d97706' }}>（建议填写）</span>}
+            </div>
+            <Input.TextArea rows={3} value={scActionNote} onChange={(e) => setScActionNote(e.target.value)}
+              placeholder="请说明涨价原因、已采取的行动项。高风险必填，至少10字" />
+            {scResult?.overall_status === 'high' && scActionNote.trim().length < 10 && (
+              <div style={{ color: '#dc2626', fontSize: 12, marginTop: 4 }}>高风险需填写至少 10 字行动项说明</div>
+            )}
+          </div>
+          <Divider style={{ margin: '12px 0' }} />
+          <div style={{ marginBottom: 8 }} onPaste={(e) => {
+            const items = e.clipboardData?.items
+            if (!items) return
+            for (const item of items) {
+              if (item.type.startsWith('image/')) {
+                const file = item.getAsFile()
+                if (file) {
+                  const uid = Date.now().toString()
+                  setScEvidenceFiles(prev => [...prev, { uid, name: `截图_${uid}.png`, status: 'done', originFileObj: file, url: URL.createObjectURL(file) } as any])
+                }
+                break
+              }
+            }
+          }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#334155', marginBottom: 4 }}>
+              支撑凭证 {scResult?.overall_status === 'high' ? <span style={{ color: '#dc2626' }}>（必填）</span> : <span style={{ color: '#d97706' }}>（建议上传）</span>}
+            </div>
+            <Upload fileList={scEvidenceFiles} onChange={({fileList: fl}) => setScEvidenceFiles(fl)}
+              beforeUpload={() => false} multiple
+              accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"
+              showUploadList={{ showPreviewIcon: true, showRemoveIcon: true }}
+              onPreview={(file) => setPreviewFile({ url: file.url || URL.createObjectURL(file.originFileObj as File), name: file.name })}>
+              <Button icon={<UploadOutlined />}>选择文件</Button>
+            </Upload>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>支持 PDF、图片、Word、Excel，也可直接截图 Ctrl+V 粘贴上传</div>
+          </div>
+          {scEvidence.length > 0 && (
+            <div style={{ marginTop: 8, background: '#f0fdf4', borderRadius: 6, padding: '6px 12px' }}>
+              {scEvidence.map((f: any, i: number) => (
+                <span key={i} style={{ display: 'inline-block', fontSize: 12, color: '#334155', marginRight: 8, background: '#fff', padding: '2px 8px', borderRadius: 4, border: '1px solid #d9d9d9' }}>
+                  {f.name} <a onClick={() => setScEvidence(scEvidence.filter((_: any, j: number) => j !== i))} style={{ color: '#ef4444', marginLeft: 4 }}>x</a>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </Modal>
+
+      {/* 凭证预览弹窗 */}
+      <Modal title={previewFile?.name || '预览'} open={!!previewFile} onCancel={() => setPreviewFile(null)} width={700} footer={null}>
+        {previewFile?.url && (
+          <div style={{ textAlign: 'center' }}>
+            <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }

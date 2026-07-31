@@ -75,3 +75,13 @@ Root-level `debug-*.md` files track open, evidence-gathering investigations — 
 - `CODE_WIKI.md` — architecture, module map, model overview (large; skim the TOC).
 - `backend/ERP_INTEGRATION.md` — ERP sync SQL/mapping model and manual trigger commands.
 - `init_database.py` — seed data (roles, users, risk rules, node standards) and the real migration logic.
+
+## Change reporting format
+
+After every code change session, output a change summary table with these columns:
+
+| 业务模块 | 功能 | 业务价值 / 解决的问题 | 状态 |
+|---|---|---|---|
+| ... | ... | ... | 已完成 |
+
+The table must be part of the final message before signing off, listing every file touched and its business impact.

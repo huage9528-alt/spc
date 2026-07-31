@@ -9,7 +9,8 @@ export const purchaseApi = {
   delete: (id: number) => api.delete(`/purchase/price-change/${id}`),
 
   // 审批
-  submit: (id: number) => api.post(`/purchase/price-change/${id}/submit`),
+  submit: (id: number, data?: Record<string, any>) =>
+    api.post(`/purchase/price-change/${id}/submit`, data || {}),
   aiAnalyze: (id: number) => api.post(`/purchase/price-change/${id}/ai-analyze`),
   approve: (id: number, comment: string, expectedVersion?: number) =>
     api.post(`/purchase/price-change/${id}/approve`, { comment, expected_version: expectedVersion }),
@@ -41,4 +42,11 @@ export const purchaseApi = {
     api.post('/purchase/price-change/self-check-preview', data),
   selfCheckRecord: (id: number) =>
     api.post(`/purchase/price-change/${id}/self-check`),
+  storeEvidence: (id: number, data: Record<string, any>) =>
+    api.post(`/purchase/price-change/${id}/evidence`, data),
+
+  // 自检规则阈值配置
+  getRuleConfig: () => api.get('/purchase/price-change/rule-config'),
+  updateRuleConfig: (items: Record<string, any>[]) =>
+    api.put('/purchase/price-change/rule-config', { items }),
 }

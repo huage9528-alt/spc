@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Button, Space, Table, Tabs, Tag, message } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { Alert, Button, Input, Modal, Space, Table, Tabs, Tag, message } from 'antd'
+import { ReloadOutlined, DownloadOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
 import { purchaseApi } from '../../../services/purchase'
+import { useAuthStore } from '../../../store/auth'
+import axios from 'axios'
 import dayjs from 'dayjs'
 
 export default function PriceChangePending() {
@@ -26,10 +28,77 @@ export default function PriceChangePending() {
     }
   }
 
+  const downloadAtt = async (key: string, name: string) => {
+    try {
+      const token = useAuthStore.getState().currentToken
+      const res = await axios.get(`/api/v1/files/download/${key}`, {
+        responseType: 'blob',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      const url = window.URL.createObjectURL(new Blob([res.data]))
+      const a = document.createElement('a')
+      a.href = url; a.download = name; a.click()
+      window.URL.revokeObjectURL(url)
+    } catch { message.warning('下载失败') }
+  }
+
+  const [previewFile, setPreviewFile] = useState<{ url: string; name: string } | null>(null)
+
+  const getEvidenceItems = (row: any): any[] => {
+    try {
+      const e = typeof row.self_check_evidence === 'string'
+        ? JSON.parse(row.self_check_evidence) : (row.self_check_evidence || [])
+      return Array.isArray(e) ? e : []
+    } catch { return [] }
+  }
+
+  // 判断当前用户能否审批当前行
+  const canApproveRow = (row: any): boolean => {
+    const user = useAuthStore.getState().currentUser
+    if (!user) return false
+    if ('role_code' in user && user.role_code === 'admin') return true
+    const snap = row.approval_snapshot || []
+    const node = snap[(row.approval_level || 1) - 1]
+    if (!node) return false
+    const approvers = node.approvers
+    if (Array.isArray(approvers)) {
+      return approvers.some((a: any) => a.username === (user as any).username || String(a.user_id) === String((user as any).id))
+    }
+    const role = node.role
+    if (role && role !== '__dept_manager__') {
+      return 'role_code' in user && (user as any).role_code === role
+    }
+    return false
+  }
+
+  const actInline = async (row: any, action: 'approve' | 'reject') => {
+    try {
+      if (action === 'approve') await purchaseApi.approve(row.id, '', row.version)
+      else await purchaseApi.reject(row.id, '', row.version)
+      message.success(action === 'approve' ? '已通过' : '已驳回')
+      load()
+    } catch (e: any) {
+      message.error(e.message || '操作失败')
+    }
+  }
+
   useEffect(() => { load() }, [tab])
 
   const pendingCount = data.length
-  const highRiskCount = data.filter((row) => row.ai_summary?.ai_risk_level === 'high').length
+  const getRowStatus = (row: any): string => {
+    let st = 'low'
+    try {
+      const sc: any = row.self_check_result
+      st = (typeof sc === 'string' ? JSON.parse(sc) : sc)?.overall_status || row.self_check_status || 'low'
+    } catch { st = row.self_check_status || 'low' }
+    return st
+  }
+  const riskRank = (st: string) => (st === 'high' ? 2 : st === 'medium' ? 1 : 0)
+  // 待审批 tab：高风险置顶
+  const sortedData = tab === 'pending'
+    ? [...data].sort((a, b) => riskRank(getRowStatus(b)) - riskRank(getRowStatus(a)))
+    : data
+  const highRiskCount = tab === 'pending' ? data.filter((row) => getRowStatus(row) === 'high').length : 0
   const todayCount = data.filter((row) => row.submitted_at && dayjs(row.submitted_at).isSame(dayjs(), 'day')).length
 
   const getAiMeta = (ai: any) => {
@@ -66,6 +135,11 @@ export default function PriceChangePending() {
           <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
         </div>
       </div>
+      {tab === 'pending' && highRiskCount > 0 && (
+        <Alert type="error" showIcon banner
+          message={`当前有 ${highRiskCount} 条高风险调价单待您审批，请优先处理（已自动置顶）`}
+          style={{ marginBottom: 16 }} />
+      )}
       <div className="card-modern" style={{ padding: '16px 20px', marginBottom: 16 }}>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           {[
@@ -87,47 +161,112 @@ export default function PriceChangePending() {
         ]} />
         <Table
           rowKey="id"
-          dataSource={data}
+          dataSource={sortedData}
           loading={loading}
           size="small"
           pagination={false}
-          scroll={{ x: 1180 }}
+          scroll={{ x: 1400 }}
+          rowClassName={(row: any) => getRowStatus(row) === 'high' ? 'pc-pending-risk-high' : ''}
           columns={[
             {
               title: '任务',
-              width: 280,
+              width: 200,
               render: (_: any, row: any) => (
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                     <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>{row.change_no}</span>
                     <Tag color={row.price_direction === '涨价' ? 'red' : row.price_direction === '降价' ? 'green' : 'blue'}>{row.price_direction || '-'}</Tag>
                   </div>
-                  <div style={{ fontSize: 14, color: '#0f172a', fontWeight: 600, marginBottom: 4 }}>{row.supplier_name || '-'}</div>
                   <div style={{ fontSize: 12, color: '#64748b' }}>{row.title || '未填写标题'}</div>
                 </div>
               ),
             },
-            { title: '类型', dataIndex: 'price_direction', width: 80, render: (v: string) => v ? <Tag color={v === '涨价' ? 'red' : 'green'}>{v}</Tag> : '-' },
+            { title: '供应商', dataIndex: 'supplier_name', width: 130, ellipsis: true },
+            { title: '申请人', dataIndex: 'applicant_display', width: 90,
+              render: (_: any, row: any) => row.applicant_display || row.applicant || '-',
+            },
             {
-              title: '当前节点',
-              width: 170,
+              title: '物料',
+              width: 180,
               render: (_: any, row: any) => {
-                const snap = row.approval_snapshot || []
-                const currentNode = snap[(row.approval_level || 1) - 1]
+                try {
+                  const checks = row.self_check_result?.checks || []
+                  return (
+                    <div>
+                      {checks.map((c: any, i: number) => (
+                        <div key={i} style={{ fontSize: 12, lineHeight: 1.8, color: '#334155' }}>
+                          <Tag style={{ fontSize: 10 }}>{c.material_code}</Tag>
+                          <span>{c.material_name}</span>
+                        </div>
+                      ))}
+                      {checks.length === 0 && <span style={{ color: '#94a3b8' }}>-</span>}
+                    </div>
+                  )
+                } catch { return <span style={{ color: '#94a3b8' }}>-</span> }
+              },
+            },
+            {
+              title: '涨幅',
+              width: 90,
+              render: (_: any, row: any) => {
+                let maxPct: number = NaN
+                try {
+                  const checks = row.self_check_result?.checks || []
+                  checks.forEach((c: any) => {
+                    const o = parseFloat(c.old_price), n = parseFloat(c.new_price)
+                    if (o && n && o !== 0) { const p = ((n / o) - 1) * 100; if (isNaN(maxPct) || p > maxPct) maxPct = p }
+                  })
+                } catch {}
+                return !isNaN(maxPct)
+                  ? <span style={{ color: maxPct > 0 ? '#dc2626' : '#16a34a', fontWeight: 600 }}>{maxPct > 0 ? '+' : ''}{maxPct.toFixed(1)}%</span>
+                  : <span style={{ color: '#94a3b8' }}>-</span>
+              },
+            },
+            {
+              title: '自检',
+              width: 100,
+              render: (_: any, row: any) => {
+                const status = getRowStatus(row)
+                const ev = getEvidenceItems(row)
+                const colorMap: Record<string, string> = { high: 'red', medium: 'orange', low: 'green', pending: 'default' }
+                const labelMap: Record<string, string> = { high: '高风险', medium: '中风险', low: '通过', pending: '未检' }
                 return (
                   <div>
-                    <div style={{ fontWeight: 600, color: '#0f172a' }}>{currentNode?.label || `第${row.approval_level || 1}级`}</div>
-                    <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>{currentNode?.role || '未配置角色'}</div>
+                    <Tag color={colorMap[status] || 'default'}>{labelMap[status] || '-'}</Tag>
+                    {ev.length > 0 && <Tag color="green" style={{ marginLeft: 2 }}>凭证{ev.length}</Tag>}
                   </div>
                 )
               },
             },
-            { title: '申请人', dataIndex: 'applicant_display', width: 100,
-              render: (_: any, row: any) => row.applicant_display || row.applicant || '-',
+            {
+              title: '凭证',
+              width: 120,
+              render: (_: any, row: any) => {
+                const ev = getEvidenceItems(row)
+                if (ev.length === 0) return <span style={{ color: '#94a3b8' }}>-</span>
+                return (
+                  <Space size={2} wrap>
+                    {ev.slice(0, 3).map((f: any, i: number) => (
+                      <Button key={i} size="small" type="link" icon={<DownloadOutlined />}
+                        onClick={() => {
+                          if (f.url && f.url.match(/\.(png|jpg|jpeg|gif|webp)$/i)) {
+                            setPreviewFile({ url: f.url, name: f.name || '凭证' })
+                          } else if (f.key) {
+                            downloadAtt(f.key, f.name || '凭证')
+                          }
+                        }}
+                        style={{ fontSize: 11, padding: 0 }}>
+                        {f.name?.length > 8 ? f.name.slice(0, 8) + '..' : (f.name || '文件')}
+                      </Button>
+                    ))}
+                    {ev.length > 3 && <span style={{ fontSize: 11, color: '#94a3b8' }}>+{ev.length - 3}</span>}
+                  </Space>
+                )
+              },
             },
             {
               title: '提交时间',
-              width: 160,
+              width: 150,
               render: (_: any, row: any) => (
                 <div>
                   <div style={{ color: '#0f172a' }}>{row.submitted_at ? dayjs(row.submitted_at).format('MM-DD HH:mm') : '-'}</div>
@@ -136,59 +275,45 @@ export default function PriceChangePending() {
               ),
             },
             {
-              title: 'AI 判断',
-              width: 240,
-              render: (_: any, row: any) => {
-                const aiMeta = getAiMeta(row.ai_summary)
-                return (
-                  <div>
-                    <Tag color={aiMeta.color}>{aiMeta.label}</Tag>
-                    <div style={{ marginTop: 6, fontSize: 12, color: '#475569', lineHeight: 1.6 }}>{aiMeta.text}</div>
-                  </div>
-                )
-              },
-            },
-            {
-              title: '自检',
-              width: 110,
-              render: (_: any, row: any) => {
-                const scResult = row.self_check_result
-                const status = scResult?.overall_status || 'low'
-                const hasEvidence = row.self_check_evidence && (() => { try { const e = typeof row.self_check_evidence === 'string' ? JSON.parse(row.self_check_evidence) : row.self_check_evidence; return Array.isArray(e) && e.length > 0 } catch { return false } })()
-                const colorMap: Record<string, string> = { high: 'red', medium: 'orange', low: 'green', passed: 'green' }
-                const labelMap: Record<string, string> = { high: '高风险', medium: '中风险', low: '通过', passed: '通过' }
-                const label = hasEvidence ? `${labelMap[status] || '-'} ✓` : (labelMap[status] || '-')
-                return <Tag color={colorMap[status] || 'default'}>{label}</Tag>
-              },
-            },
-            {
-              title: '操作', width: 140,
+              title: '操作', width: 180, fixed: 'right',
               render: (_: any, row: any) => (
-                <Space>
+                <Space size={2}>
                   <Button size="small" onClick={() => navigate(`/purchase/price-change/${row.id}`)}>查看</Button>
-                  {tab === 'pending' && <Button size="small" type="primary" onClick={() => navigate(`/purchase/price-change/${row.id}`)}>审批</Button>}
+                  {tab === 'pending' && canApproveRow(row) && (
+                    <>
+                      <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => actInline(row, 'approve')}>通过</Button>
+                      <Button size="small" danger icon={<CloseOutlined />} onClick={() => actInline(row, 'reject')}>驳回</Button>
+                    </>
+                  )}
+                  {tab === 'pending' && !canApproveRow(row) && (
+                    <Button size="small" type="primary" onClick={() => navigate(`/purchase/price-change/${row.id}`)}>审批</Button>
+                  )}
                 </Space>
               ),
             },
           ]}
           expandable={{
             expandedRowRender: (row: any) => {
-              const ai = getAiMeta(row.ai_summary)
               const snap = row.approval_snapshot || []
               const currentNode = snap[(row.approval_level || 1) - 1]
+              const checks = row.self_check_result?.checks || []
               return (
                 <div style={{ padding: '8px 0', display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-                  <div style={{ minWidth: 220 }}>
+                  <div style={{ minWidth: 200 }}>
                     <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>审批提示</div>
                     <div style={{ fontSize: 13, color: '#334155', lineHeight: 1.7 }}>
-                      当前单据由 <strong>{currentNode?.label || `第${row.approval_level || 1}级`}</strong> 处理，
-                      提交人 <strong>{row.applicant_display || row.applicant || '-'}</strong>。
+                      当前单据由 <strong>{currentNode?.label || `第${row.approval_level || 1}级`}</strong> 处理
                     </div>
                   </div>
-                  <div style={{ minWidth: 320 }}>
-                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>AI 摘要</div>
-                    <Tag color={ai.color}>{ai.label}</Tag>
-                    <div style={{ marginTop: 8, fontSize: 13, color: '#334155', lineHeight: 1.7 }}>{ai.text}</div>
+                  <div style={{ minWidth: 200 }}>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>自检明细</div>
+                    {checks.map((c: any, i: number) => (
+                      <div key={i} style={{ fontSize: 12, color: '#334155', lineHeight: 1.7 }}>
+                        <Tag color={c.risk_level === 'high' ? 'red' : c.risk_level === 'medium' ? 'orange' : 'green'}>{c.material_code}</Tag>
+                        {c.material_name} | {c.old_price}→{c.new_price}
+                      </div>
+                    ))}
+                    {checks.length === 0 && <span style={{ color: '#94a3b8' }}>无自检数据</span>}
                   </div>
                 </div>
               )
@@ -196,6 +321,16 @@ export default function PriceChangePending() {
           }}
         />
       </div>
+
+      {/* 凭证预览 */}
+      <Modal title={previewFile?.name || '凭证预览'} open={!!previewFile} onCancel={() => setPreviewFile(null)} width={700} footer={null}>
+        {previewFile?.url && (
+          <div style={{ textAlign: 'center' }}>
+            <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
+          </div>
+        )}
+      </Modal>
+      <style>{`.pc-pending-risk-high > td{background:#fef2f2 !important}.pc-pending-risk-high:hover > td{background:#fee2e2 !important}`}</style>
     </div>
   )
 }

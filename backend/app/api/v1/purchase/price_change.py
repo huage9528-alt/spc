@@ -4,7 +4,7 @@ import csv
 import io
 import json
 from datetime import date as date_type, datetime
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Body
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -181,6 +181,49 @@ async def delete_approval_config(
     return ResponseModel(data={"biz_type": biz_type}, message="已删除")
 
 
+# ---------- 自检规则阈值配置 ----------
+@router.get("/rule-config", response_model=ResponseModel)
+async def list_rule_config(
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change.config", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = await db.execute(
+        text("SELECT config_key, config_value, description, updated_by, updated_at FROM price_change_rule_config ORDER BY config_key")
+    )
+    items = []
+    for r in rows:
+        d = dict(r._mapping)
+        if isinstance(d.get("updated_at"), datetime):
+            d["updated_at"] = d["updated_at"].isoformat()
+        items.append(d)
+    return ResponseModel(data={"items": items})
+
+
+@router.put("/rule-config", response_model=ResponseModel)
+async def update_rule_config(
+    data: dict = Body(...),
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change.config", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """批量更新规则阈值。data = {items: [{config_key, config_value}]}"""
+    from app.services.purchase.price_change_service import clear_rule_cache
+    updates = data.get("items") or []
+    for u in updates:
+        key = u.get("config_key")
+        value = u.get("config_value")
+        if not key or value is None:
+            continue
+        await db.execute(
+            text("UPDATE price_change_rule_config SET config_value=:v, updated_by=:ub, updated_at=NOW() WHERE config_key=:k"),
+            {"v": str(value), "ub": username, "k": key},
+        )
+    await db.commit()
+    clear_rule_cache()  # 清除 service 进程内缓存
+    return ResponseModel(data={"updated": len(updates)}, message="规则阈值已更新")
+
+
 # ===== 静态路由（必须在 /{change_id} 前面）=====
 
 @router.get("/supplier-last-price", response_model=ResponseModel)
@@ -194,7 +237,7 @@ async def get_supplier_last_price(
     if not material_code:
         return ResponseModel(data=None)
     from sqlalchemy import text
-    result = await db.execute(text("SELECT price, order_date FROM purchase_order WHERE material_code=:mat AND supplier_code=:sup ORDER BY order_date DESC LIMIT 1"), {"mat": material_code, "sup": supplier_code or ""})
+    result = await db.execute(text("SELECT po_price, po_date FROM purchase_order WHERE material_code=:mat AND supplier_code=:sup ORDER BY po_date DESC LIMIT 1"), {"mat": material_code, "sup": supplier_code or ""})
     row = result.fetchone()
     if row:
         return ResponseModel(data={"old_price": float(row[0]), "old_price_date": str(row[1])})
@@ -458,14 +501,15 @@ async def create_price_change(
     service = PriceChangeService(db)
     submit = data.pop("submit", False)
     evidence = data.pop("self_check_evidence", None)
-    main_data = {k: v for k, v in data.items() if k not in ("items", "submit", "self_check_evidence")}
+    action_note = data.pop("self_check_action_note", "") or data.pop("action_note", "")
+    main_data = {k: v for k, v in data.items() if k not in ("items", "submit", "self_check_evidence", "self_check_action_note", "action_note")}
     if main_data.get("change_date") and isinstance(main_data["change_date"], str):
         try:
             main_data["change_date"] = date_type.fromisoformat(main_data["change_date"][:10])
         except Exception:
             pass
     items_data = data.get("items", [])
-    record = await service.create_price_change(main_data, items_data, submit=submit, applicant=user["username"], self_check_evidence=evidence)
+    record = await service.create_price_change(main_data, items_data, submit=submit, applicant=user["username"], self_check_evidence=evidence, action_note=action_note)
     await db.commit()
     if isinstance(record, dict) and record.get("_self_check_required"):
         return ResponseModel(data=record, code=1, message=record.get("_message", "自检未通过"))
@@ -481,7 +525,10 @@ async def update_price_change(
     db: AsyncSession = Depends(get_db),
 ):
     service = PriceChangeService(db)
-    main_data = {k: v for k, v in data.items() if k not in ("items", "submit")}
+    submit = data.pop("submit", False)
+    evidence = data.pop("self_check_evidence", None)
+    action_note = data.pop("self_check_action_note", "") or data.pop("action_note", "")
+    main_data = {k: v for k, v in data.items() if k not in ("items", "submit", "self_check_evidence", "self_check_action_note", "action_note")}
     if main_data.get("change_date") and isinstance(main_data["change_date"], str):
         try:
             main_data["change_date"] = date_type.fromisoformat(main_data["change_date"][:10])
@@ -491,6 +538,16 @@ async def update_price_change(
     record = await service.update_price_change(change_id, main_data, items_data)
     if not record:
         raise HTTPException(status_code=400, detail="仅草稿/已驳回/已撤回状态可编辑")
+
+    if submit:
+        result = await service.submit_for_approval(change_id, applicant=username, self_check_evidence=evidence, action_note=action_note)
+        if result is None:
+            raise HTTPException(status_code=400, detail="仅草稿/已驳回/已撤回状态可提交")
+        await db.commit()
+        if isinstance(result, dict) and result.get("_self_check_required"):
+            return ResponseModel(data=result, code=1, message=result.get("_message", "自检未通过"))
+        return ResponseModel(data=result, message="已提交审批")
+
     await db.commit()
     return ResponseModel(data=record, message="更新成功")
 
@@ -534,7 +591,8 @@ async def submit_for_approval(
 ):
     service = PriceChangeService(db)
     evidence = data.get("self_check_evidence") if isinstance(data, dict) else None
-    record = await service.submit_for_approval(change_id, applicant=user["username"], self_check_evidence=evidence)
+    action_note = data.get("self_check_action_note") or data.get("action_note") if isinstance(data, dict) else ""
+    record = await service.submit_for_approval(change_id, applicant=user["username"], self_check_evidence=evidence, action_note=action_note or "")
     if record is None:
         raise HTTPException(status_code=400, detail="仅草稿/已驳回/已撤回状态可提交")
     if isinstance(record, dict) and record.get("_self_check_required"):
@@ -542,6 +600,23 @@ async def submit_for_approval(
         return ResponseModel(data=record, code=1, message=record.get("_message", "自检未通过"))
     await db.commit()
     return ResponseModel(data=record, message="已提交审批")
+
+
+@router.post("/{change_id}/evidence", response_model=ResponseModel)
+async def store_evidence(
+    change_id: int,
+    data: dict = Body(...),
+    username: str = Depends(get_current_username),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """单独存储/更新自检凭证 + 行动项说明。data = {evidence:[...], action_note:""}"""
+    service = PriceChangeService(db)
+    res = await service._validate_and_store_evidence(change_id, data.get("evidence"), data.get("action_note", ""))
+    if not res["success"]:
+        return ResponseModel(code=1, message=res["message"])
+    await db.commit()
+    return ResponseModel(data={"success": True}, message="凭证已保存")
 
 
 @router.post("/{change_id}/ai-analyze", response_model=ResponseModel)
