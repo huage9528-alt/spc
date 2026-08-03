@@ -113,7 +113,7 @@ export default function PriceChangeNew() {
 
   const clearSupplier = () => {
     setSupName('')
-    form.setFieldsValue({ supplier_code: '', contact_person: '', phone: '', fax: '', address: '' })
+    form.setFieldsValue({ supplier_code: '', contact_person: '', phone: '', fax: '', address: '', payment_method: undefined, settlement_method: undefined })
   }
 
   const fillSupplier = (s: any) => {
@@ -121,6 +121,11 @@ export default function PriceChangeNew() {
       supplier_code: s.supplier_code || '',
       contact_person: s.contact_person || '', phone: s.contact_phone || '',
       address: s.address || '',
+      // 供应商表列语义与调价单表单相反，做交叉映射：
+      // 表单付款方式 ← 供应商.settlement_method（网银/现金/票据结算）
+      // 表单结算方式 ← 供应商.payment_method（预付款/票到N天）
+      payment_method: s.settlement_method && s.settlement_method !== '*' ? s.settlement_method : undefined,
+      settlement_method: s.payment_method && s.payment_method !== '*' ? s.payment_method : undefined,
     })
     setSupName(s.supplier_name || '')
     setTitle(`调价单 - ${applicantName} - ${todayStr} - ${s.supplier_name || ''}`)
@@ -535,10 +540,10 @@ export default function PriceChangeNew() {
               <Select options={['涨价','降价','新报价'].map(v=>({value:v,label:v}))} />
             </Form.Item>
             <Form.Item name="payment_method" label="付款方式" rules={[{ required: true, message: '请选择' }]} style={{ width: 120, marginBottom: 0 }}>
-              <Select options={['网银','承兑'].map(v=>({value:v,label:v}))} placeholder="选择" />
+              <Select options={['网银','承兑','现金','票据结算','商业汇票'].map(v=>({value:v,label:v}))} placeholder="选择" />
             </Form.Item>
             <Form.Item name="settlement_method" label="结算方式" rules={[{ required: true, message: '请选择' }]} style={{ width: 160, marginBottom: 0 }}>
-              <Select options={['票到付款','票到30天','票到60天','票到90天','票到120天','款到发货'].map(v=>({value:v,label:v}))} placeholder="选择" />
+              <Select options={['票到付款','票到30天','票到60天','票到90天','票到120天','款到发货','预付款','月结'].map(v=>({value:v,label:v}))} placeholder="选择" />
             </Form.Item>
             <Form.Item name="tax_rate" label="税率" rules={[{ required: true, message: '请选择' }]} style={{ width: 100, marginBottom: 0 }}>
               <Select options={['3%','6%','13%'].map(v=>({value:v,label:v}))} placeholder="选择" />
