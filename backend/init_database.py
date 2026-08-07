@@ -276,6 +276,13 @@ class DatabaseInitializer:
                 "planned_qty": "NUMERIC(15,2)",
                 "manpower": "INTEGER",
             },
+            "production_order_schedule_snapshot": {
+                "kit_rate": "NUMERIC(5,2)",
+                "kit_risk_level": "VARCHAR(16)",
+                "shortage_material_count": "INTEGER",
+                "latest_material_eta": "DATE",
+                "kit_snapshot_at": "TIMESTAMP",
+            },
             "production_schedule_operation_log": {
                 "is_frozen_break": "BOOLEAN NOT NULL DEFAULT FALSE",
             },

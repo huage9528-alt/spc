@@ -32,7 +32,9 @@ interface PlanItem {
   schedule_bucket?: string
   schedule_bucket_label?: string
   customer_due_date?: string
+  source_promised_date?: string
   target_ready_date?: string
+  delay_days?: number
   capacity_load_status?: string
   capacity_load_status_label?: string
   delivery_status?: string
@@ -41,13 +43,40 @@ interface PlanItem {
   created_at?: string
 }
 
+/** 格子里的一张卡片: 关联到完整 PlanItem + 该单当天真实占槽小时(slotHours)。 */
+interface DayCellItem {
+  plan: PlanItem
+  slotHours: number
+}
+
 type DayCell = {
   dateKey: string
   dayLabel: string
-  items: PlanItem[]
+  items: DayCellItem[]
   totalHours: number
+  maxDailyHours: number
+  utilization: number
   riskCount: number
   delayedCount: number
+}
+
+/** 来自 board-capacity 接口的单日单工段真实占槽。 */
+interface BoardCapacityApiItem {
+  plan_id: number
+  order_no: string | null
+  line_no: string | null
+  department: string | null
+  schedule_bucket: string | null
+  hours: number
+}
+
+interface BoardCapacityApiCell {
+  date: string
+  department: string
+  schedule_bucket: string
+  total_hours: number
+  max_daily_hours: number
+  items: BoardCapacityApiItem[]
 }
 
 type LaneRow = {
@@ -147,6 +176,8 @@ export default function ScheduleBoard() {
   const [total, setTotal] = useState(0)
   const [selectedPlan, setSelectedPlan] = useState<PlanItem | null>(null)
   const [focusedPlanId, setFocusedPlanId] = useState<number | null>(null)
+  // 周视图泳道专用：来自 board-capacity 接口的真实日占槽, 不含 long 单区间相交误算
+  const [cellMap, setCellMap] = useState<Record<string, Record<string, { totalHours: number; maxDailyHours: number; items: BoardCapacityApiItem[] }>>>({})
 
   const weekDays = useMemo(() => getWeekDays(weekAnchor), [weekAnchor])
   const weekStart = weekDays[0]
@@ -201,6 +232,29 @@ export default function ScheduleBoard() {
       })
       setPlans(allItems)
       setTotal(firstTotal)
+
+      // 周视图泳道专用：拉真实占槽表(8/6 = 9.14h / 3 单, 不是 long 单区间相加的 43.89h)
+      try {
+        const capRes: any = await productionApi.getBoardCapacity({
+          start_date: weekStart.format('YYYY-MM-DD'),
+          end_date: weekEnd.format('YYYY-MM-DD'),
+          ...(bucketFilter !== 'all' ? { schedule_bucket: bucketFilter } : {}),
+        })
+        const cells: BoardCapacityApiCell[] = capRes.data?.cells || []
+        const next: Record<string, Record<string, { totalHours: number; maxDailyHours: number; items: BoardCapacityApiItem[] }>> = {}
+        cells.forEach((cell) => {
+          if (!next[cell.date]) next[cell.date] = {}
+          next[cell.date][cell.schedule_bucket] = {
+            totalHours: cell.total_hours,
+            maxDailyHours: cell.max_daily_hours,
+            items: cell.items,
+          }
+        })
+        setCellMap(next)
+      } catch (capErr: any) {
+        console.warn('[ScheduleBoard] board-capacity failed, falling back to plans:', capErr?.message)
+        setCellMap({})
+      }
     } catch (e: any) {
       message.error(e.message || '加载排产看板失败')
     } finally {
@@ -268,26 +322,62 @@ export default function ScheduleBoard() {
       ? (Object.keys(BUCKET_META) as Array<Exclude<BucketKey, 'all'>>)
       : [bucketFilter as Exclude<BucketKey, 'all'>]
     )
+    // 用 cellMap (来自 board-capacity 接口的真实日占槽) 取代旧的「区间相交 + sum daily_work_hours」
+    // 旧口径下 long 单每天都被计入, 出现"一天 43.9h"假象; 新口径只看当天真实在干活的
+    const planById = new Map<number, PlanItem>()
+    plans.forEach((p) => { if (p.id) planById.set(p.id, p) })
+
+    const riskFromPlan = (plan: PlanItem | undefined) => {
+      if (!plan) return false
+      return RISK_CAPACITY_STATUS.has(plan.capacity_load_status || '') || !!plan.needs_reschedule
+    }
+    const delayedFromPlan = (plan: PlanItem | undefined) => !!plan && getDelayFlag(plan)
+
     return buckets.map((bucket) => {
       const meta = BUCKET_META[bucket]
       const cells = weekDays.map((day) => {
-        const dayStart = day.startOf('day')
-        const dayEnd = day.endOf('day')
-        const items = plans.filter((item) => {
-          if (getBucketKey(item) !== bucket) return false
-          const start = getPlanStart(item).startOf('day')
-          const end = getPlanEnd(item).endOf('day')
-          // 周日格子始终不显示（用户基础条件周日不生产）
-          if (day.day() === 0) return false
-          return start.isBefore(dayEnd) && end.isAfter(dayStart)
-        })
+        const dateKey = day.format('YYYY-MM-DD')
+        // 周日格子始终不显示（用户基础条件周日不生产）
+        if (day.day() === 0) {
+          return {
+            dateKey,
+            dayLabel: day.format('MM-DD'),
+            items: [] as DayCellItem[],
+            totalHours: 0,
+            maxDailyHours: 0,
+            utilization: 0,
+            riskCount: 0,
+            delayedCount: 0,
+          }
+        }
+        const dayBuckets = cellMap[dateKey] || {}
+        const cellFromApi = dayBuckets[bucket]
+        let items: DayCellItem[] = []
+        let totalHours = 0
+        let maxDailyHours = 0
+        if (cellFromApi) {
+          totalHours = cellFromApi.totalHours
+          maxDailyHours = cellFromApi.maxDailyHours
+          items = cellFromApi.items
+            .map((it) => {
+              const plan = planById.get(it.plan_id)
+              if (!plan) return null
+              return { plan, slotHours: it.hours }
+            })
+            .filter((x): x is DayCellItem => !!x)
+        } else {
+          // cellMap 为空 (例如 board-capacity 接口失败) → 退化为空格子, 避免误导
+          // 旧版的"区间相交 + sum daily_work_hours"被认定会误导, 这里不再降级到旧口径
+        }
         return {
-          dateKey: day.format('YYYY-MM-DD'),
+          dateKey,
           dayLabel: day.format('MM-DD'),
           items,
-          totalHours: Number(items.reduce((sum, item) => sum + getDailyHours(item), 0).toFixed(1)),
-          riskCount: items.filter((item) => RISK_CAPACITY_STATUS.has(item.capacity_load_status || '') || item.needs_reschedule).length,
-          delayedCount: items.filter((item) => getDelayFlag(item)).length,
+          totalHours: Number(totalHours.toFixed(1)),
+          maxDailyHours,
+          utilization: maxDailyHours > 0 ? Number((totalHours / maxDailyHours).toFixed(2)) : 0,
+          riskCount: items.filter((x) => riskFromPlan(x.plan)).length,
+          delayedCount: items.filter((x) => delayedFromPlan(x.plan)).length,
         }
       })
       return {
@@ -299,7 +389,7 @@ export default function ScheduleBoard() {
         totalCount: cells.reduce((sum, cell) => sum + cell.items.length, 0),
       }
     })
-  }, [bucketFilter, plans, weekDays])
+  }, [bucketFilter, cellMap, plans, weekDays])
 
   const progressStats = useMemo<{
     total: number
@@ -523,51 +613,62 @@ export default function ScheduleBoard() {
                         </div>
                         <Space direction="vertical" size={8} style={{ width: '100%' }}>
                           {cell.items.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无计划" />}
-                          {cell.items.map((item) => (
+                          {cell.items.map((item) => {
+                            const plan = item.plan
+                            return (
                             <div
-                              key={`${cell.dateKey}-${item.id}`}
+                              key={`${cell.dateKey}-${plan.id}`}
                               role="button"
                               tabIndex={0}
-                              onClick={() => setSelectedPlan(item)}
+                              onClick={() => setSelectedPlan(plan)}
                               onKeyDown={(event) => {
                                 if (event.key === 'Enter' || event.key === ' ') {
                                   event.preventDefault()
-                                  setSelectedPlan(item)
+                                  setSelectedPlan(plan)
                                 }
                               }}
                               style={{
                                 padding: 10,
                                 borderRadius: 10,
-                                border: Number(item.id) === focusedPlanId
+                                border: Number(plan.id) === focusedPlanId
                                   ? '2px solid #1677ff'
-                                  : `1px solid ${getDelayFlag(item) ? '#ffccc7' : '#d9d9d9'}`,
-                                background: Number(item.id) === focusedPlanId
+                                  : `1px solid ${getDelayFlag(plan) ? '#ffccc7' : '#d9d9d9'}`,
+                                background: Number(plan.id) === focusedPlanId
                                   ? '#e6f4ff'
-                                  : getDelayFlag(item) ? '#fff1f0' : '#fff',
-                                boxShadow: Number(item.id) === focusedPlanId ? '0 0 0 2px rgba(22,119,255,0.12)' : undefined,
+                                  : getDelayFlag(plan) ? '#fff1f0' : '#fff',
+                                boxShadow: Number(plan.id) === focusedPlanId ? '0 0 0 2px rgba(22,119,255,0.12)' : undefined,
                                 cursor: 'pointer',
                               }}
                             >
                               <Space direction="vertical" size={6} style={{ width: '100%' }}>
                                 <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-                                  <Tag color={BUCKET_META[getBucketKey(item)].color}>{item.schedule_bucket_label || BUCKET_META[getBucketKey(item)].label}</Tag>
-                                  {item.needs_reschedule ? <Tag color="orange">待重排</Tag> : null}
+                                  <Tag color={BUCKET_META[getBucketKey(plan)].color}>{plan.schedule_bucket_label || BUCKET_META[getBucketKey(plan)].label}</Tag>
+                                  {plan.needs_reschedule ? <Tag color="orange">待重排</Tag> : null}
                                 </Space>
-                                <div style={{ fontWeight: 600, color: '#1f1f1f' }}>{item.order_no || '-'} / {item.line_no || '-'}</div>
-                                <div style={{ color: '#595959' }}>{item.product_code || item.model_code || '-'}</div>
+                                <div style={{ fontWeight: 600, color: '#1f1f1f' }}>{plan.order_no || '-'} / {plan.line_no || '-'}</div>
+                                <div style={{ color: '#595959' }}>{plan.product_code || plan.model_code || '-'}</div>
                                 <Space size={8} wrap>
-                                  <span>数量 {item.quantity ?? '-'}</span>
-                                  <span>工时 {getDailyHours(item).toFixed(1)}h</span>
+                                  <span>数量 {plan.quantity ?? '-'}</span>
+                                  <span>当日 {item.slotHours.toFixed(2)}h</span>
                                 </Space>
                                 <Space size={6} wrap>
-                                  {Number(item.id) === focusedPlanId ? <Tag color="blue">当前定位</Tag> : null}
-                                  <Tag color={STATUS_COLOR_MAP[item.status || 'planned'] || 'default'}>{item.status || 'planned'}</Tag>
-                                  {getDelayFlag(item) ? <Tag color="red">延期</Tag> : null}
-                                  {RISK_CAPACITY_STATUS.has(item.capacity_load_status || '') ? <Tag color="gold">{item.capacity_load_status_label || '负荷紧张'}</Tag> : null}
+                                  <span style={{ color: '#595959' }}>
+                                    出货 {formatDate(plan.customer_due_date || plan.source_promised_date)}
+                                  </span>
+                                  {plan.delivery_status === 'delayed' && (
+                                    <Tag color="red">延期{plan.delay_days ? ` ${plan.delay_days}天` : ''}</Tag>
+                                  )}
+                                </Space>
+                                <Space size={6} wrap>
+                                  {Number(plan.id) === focusedPlanId ? <Tag color="blue">当前定位</Tag> : null}
+                                  <Tag color={STATUS_COLOR_MAP[plan.status || 'planned'] || 'default'}>{plan.status || 'planned'}</Tag>
+                                  {getDelayFlag(plan) ? <Tag color="red">延期</Tag> : null}
+                                  {RISK_CAPACITY_STATUS.has(plan.capacity_load_status || '') ? <Tag color="gold">{plan.capacity_load_status_label || '负荷紧张'}</Tag> : null}
                                 </Space>
                               </Space>
                             </div>
-                          ))}
+                            )
+                          })}
                         </Space>
                       </div>
                     ))}

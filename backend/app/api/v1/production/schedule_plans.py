@@ -61,6 +61,9 @@ from app.schemas.production.schemas import (
     MissingUpphProductOut,
     MissingUpphListOut,
     EmptyStateOut,
+    BoardCapacityItem,
+    BoardCapacityCell,
+    BoardCapacityResponse,
 )
 from app.services.production.config_service import ProductionScheduleConfigService
 from app.services.production.assembly_roll_schedule_service import AssemblyRollScheduleService
@@ -69,9 +72,20 @@ from app.services.production.production_change_service import ProductionChangeSe
 from app.services.production.schedule_simulation_service import ScheduleSimulationService
 from app.services.production.upph_calculation_service import UpphCalculationService
 from app.services.production.upph_formula_config_service import UpphFormulaConfigService
+from app.services.material.kit_analysis_service import get_kit_summary_by_orders
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# 超期前填的下限日期:
+#   date.today() = 上线默认, 不能排到过去(已过去的天数生产不了)
+#   每次排产时实时计算(动态读 date.today()), 无需手动改
+#   测试阶段若要往前排看效果, 临时改成 None(不限)
+def _get_earliest_fill_date() -> Optional[date]:
+    return date.today()
+
+
+_EARLIEST_FILL_DATE: Optional[date] = None  # 历史兼容; 实际用 _get_earliest_fill_date()
 
 READ_PERMISSION_CACHE_TTL_SECONDS = 5
 _production_schedule_read_permission_cache: dict[str, tuple[datetime, dict]] = {}
@@ -1143,6 +1157,7 @@ async def _build_order_scheduling_items(
     upph_service = UpphCalculationService(db)
     simulation_service = ScheduleSimulationService(db)
     schedule_context_cache: dict[tuple[Optional[str], Optional[str]], dict] = {}
+    kit_summary_map = await get_kit_summary_by_orders(db, order_nos)
     items: List[OrderForSchedulingOut] = []
     stats = {
         "ready": 0,
@@ -1245,6 +1260,10 @@ async def _build_order_scheduling_items(
             needs_move_earlier=lean_workhour_plan.get("needs_move_earlier"),
             move_earlier_days=lean_workhour_plan.get("move_earlier_days"),
             work_hour_summary=lean_workhour_plan.get("work_hour_summary"),
+            kit_rate=(kit_summary_map.get(order_line.order_no) or {}).get("kit_rate"),
+            kit_risk_level=(kit_summary_map.get(order_line.order_no) or {}).get("risk_level"),
+            shortage_material_count=(kit_summary_map.get(order_line.order_no) or {}).get("shortage_material_count"),
+            latest_material_eta=(kit_summary_map.get(order_line.order_no) or {}).get("latest_eta"),
         ))
     total = len(items)
     start = (page - 1) * page_size
@@ -1663,6 +1682,18 @@ async def _sync_month_scheduled_snapshot_flags(
     return updated_count
 
 
+def _snapshot_kit_fields(snapshot) -> dict:
+    """从排产快照提取齐套字段（供 TodoWorkbenchItemOut 使用）。"""
+    if snapshot is None:
+        return {}
+    return {
+        "kit_rate": float(snapshot.kit_rate) if snapshot.kit_rate is not None else None,
+        "kit_risk_level": snapshot.kit_risk_level,
+        "shortage_material_count": snapshot.shortage_material_count,
+        "latest_material_eta": snapshot.latest_material_eta,
+    }
+
+
 async def _refresh_order_schedule_snapshots(
     db: AsyncSession,
     rows: list,
@@ -1691,6 +1722,11 @@ async def _refresh_order_schedule_snapshots(
     upph_service = UpphCalculationService(db)
     simulation_service = ScheduleSimulationService(db)
     schedule_context_cache: dict[tuple[Optional[str], Optional[str]], dict] = {}
+
+    # 订单级齐套汇总：按 order_no 批量取数，写入快照齐套列
+    kit_order_nos = sorted({row.SaleOrderLine.order_no for row in stale_rows if row.SaleOrderLine.order_no})
+    kit_summary_map = await get_kit_summary_by_orders(db, kit_order_nos)
+    kit_snapshot_stamp = datetime.now()
 
     for row in stale_rows:
         order_line = row.SaleOrderLine
@@ -1767,6 +1803,14 @@ async def _refresh_order_schedule_snapshots(
             "work_hour_summary": lean_workhour_plan.get("work_hour_summary"),
             "snapshot_updated_at": datetime.now(),
         }
+
+        kit_summary = kit_summary_map.get(order_line.order_no)
+        if kit_summary:
+            payload["kit_rate"] = kit_summary.get("kit_rate")
+            payload["kit_risk_level"] = kit_summary.get("risk_level")
+            payload["shortage_material_count"] = kit_summary.get("shortage_material_count")
+            payload["latest_material_eta"] = kit_summary.get("latest_eta")
+            payload["kit_snapshot_at"] = kit_snapshot_stamp
 
         snapshot = snapshot_map.get((order_line.order_no, order_line.line_no))
         if snapshot:
@@ -3280,7 +3324,7 @@ async def _book_capacity_slots_for_plan(
         upph = float(plan.upph or 0)
         mp = int(plan.manpower or 10)
         bucket = str(plan.source_process_type or "").strip()
-        if not bucket or qty <= 0 or upph <= 0 or mp <= 0 or not plan.end_date:
+        if not bucket or qty <= 0 or upph <= 0 or mp <= 0 or not plan.plan_date:
             return
         total_hours = qty / (upph * mp)
         # 占槽的每日产能上限：从基础条件读取（按 bucket）
@@ -3293,6 +3337,12 @@ async def _book_capacity_slots_for_plan(
             daily_capacity = float(plan.daily_work_hours or 8.5)
         # daily_capacity 不能超过 MAX_DAILY_HOURS=12（车间物理上限），最小 1
         daily_capacity = max(1.0, min(daily_capacity, MAX_DAILY_HOURS))
+        # 超期判断基准: 用 source_promised_date(出货日快照, 稳定) 算 target_ready_date
+        # 不能用 plan.end_date —— 它会被占槽结果反复回写, 导致超期判断失真、前填误触发
+        from app.services.production.config_service import READY_OFFSET_DAYS
+        target_end_for_overrun = None
+        if plan.source_promised_date:
+            target_end_for_overrun = plan.source_promised_date - timedelta(days=READY_OFFSET_DAYS)
         bookings = await recompute_plan_slots(
             db,
             plan_id=plan.id,
@@ -3301,22 +3351,30 @@ async def _book_capacity_slots_for_plan(
             order_no=plan.order_no,
             line_no=plan.line_no,
             total_hours=total_hours,
-            target_end_date=plan.end_date,
+            target_start_date=plan.plan_date,
             daily_capacity=daily_capacity,
             include_sunday=resolved_include_sunday,
+            target_end_date=target_end_for_overrun,
+            # 超期前填下限: 上线=date.today()(不排过去); 测试要往前看效果改 _get_earliest_fill_date 返回 None
+            earliest_fill_date=_get_earliest_fill_date(),
         )
 
         # 用实际占槽结果回写 start_date / end_date
         # (排产模拟器算的日期可能跟实际占槽不一致, 以占槽为准)
+        # 新方向"从开工日往后占 + 超期前填":
+        #   - start_date = 占槽最早日(可能因前填早于 plan_date, 反映真实开工日)
+        #   - end_date = 占槽最晚日
+        #   - plan_date = 保留排产试算给的开工锚点, 不被前填覆盖
+        #     (前填是"借前面空位赶工", 不是改计划开工日; 上线切 earliest_fill_date=today 后前填自动停)
         # 注意：plan.daily_work_hours 保持用户输入，不被占槽结果覆盖
         if bookings:
             actual_start = min(b["date"] for b in bookings)
             actual_end = max(b["date"] for b in bookings)
             plan.start_date = actual_start
             plan.end_date = actual_end
-            plan.plan_date = actual_start
-            # 不再用占槽结果覆盖 plan.daily_work_hours —— 保持用户输入的工时
-            # 如果用户填 8.5，占槽按 8.5 占，plan.daily_work_hours 也保持 8.5
+            # plan_date 不覆盖: 保留试算开工日; 仅当占槽未前填(actual_start>=plan_date)时才同步
+            if actual_start >= plan.plan_date:
+                plan.plan_date = actual_start
             db.add(plan)
     except Exception as e:
         logger.warning(f"[capacity_slot] 占用失败 plan_id={plan.id}: {e}", exc_info=True)
@@ -6062,6 +6120,7 @@ async def list_todo_workbench(
     risk_level: Optional[str] = Query(None),
     schedule_bucket: Optional[str] = Query(None, pattern="^(lean|assembly|packaging|mixed|pending)$"),
     todo_status: Optional[str] = Query(None, pattern="^(ready|pending|reschedule)$"),
+    kit_risk_level: Optional[str] = Query(None, pattern="^(green|yellow|red)$"),
     skip_snapshot_reconcile: bool = Query(False),
     read_context: dict = Depends(_get_production_schedule_read_context),
 ):
@@ -6078,6 +6137,7 @@ async def list_todo_workbench(
         risk_level or "",
         schedule_bucket or "",
         todo_status or "",
+        kit_risk_level or "",
         int(skip_snapshot_reconcile),
     )
     stats = {
@@ -6158,6 +6218,8 @@ async def list_todo_workbench(
             )
             if snapshot_bucket_condition is not None:
                 snapshot_stats_base_conditions.append(snapshot_bucket_condition)
+        if kit_risk_level:
+            snapshot_stats_base_conditions.append(ProductionOrderScheduleSnapshot.kit_risk_level == kit_risk_level)
 
         snapshot_stats_stmt = (
             select(
@@ -6221,6 +6283,8 @@ async def list_todo_workbench(
                     )
                 )
             snapshot_conditions = list(snapshot_base_conditions)
+            if kit_risk_level:
+                snapshot_conditions.append(ProductionOrderScheduleSnapshot.kit_risk_level == kit_risk_level)
             if schedule_bucket:
                 snapshot_bucket_condition = _build_workspace_bucket_filter_condition(
                     ProductionOrderScheduleSnapshot.schedule_bucket_snapshot,
@@ -6292,6 +6356,10 @@ async def list_todo_workbench(
                 first_day=first_day,
                 last_day=last_day,
             )
+            and (
+                not kit_risk_level
+                or getattr(plan_snapshot_map.get((plan.order_no, plan.line_no)), "kit_risk_level", None) == kit_risk_level
+            )
         ]
         timings_ms["reschedule_supporting_queries"] = round((perf_counter() - step_started_at) * 1000, 2)
         stats["reschedule"] = len(effective_plan_rows)
@@ -6361,6 +6429,7 @@ async def list_todo_workbench(
                     impact_score=None,
                     impact_reason=plan.reschedule_reason,
                     reschedule_reason=plan.reschedule_reason,
+                    **_snapshot_kit_fields(plan_snapshot_map.get((plan.order_no, plan.line_no))),
                 )
                 for plan in effective_plan_rows
             ]
@@ -6444,6 +6513,7 @@ async def list_todo_workbench(
                         needs_move_earlier=snapshot.needs_move_earlier,
                         move_earlier_days=snapshot.move_earlier_days,
                         work_hour_summary=snapshot.work_hour_summary,
+                        **_snapshot_kit_fields(snapshot),
                     )
                     for snapshot in snapshot_rows
                 ]
@@ -6583,6 +6653,98 @@ async def get_base_conditions(
     items = await ProductionScheduleConfigService(db).get_base_conditions()
     _base_conditions_cache = (now, list(items))
     return ResponseModel(data=items)
+
+
+@router.get("/board-capacity", response_model=ResponseModel[BoardCapacityResponse])
+async def get_board_capacity(
+    start_date: date = Query(..., description="起始日期(包含)"),
+    end_date: date = Query(..., description="结束日期(包含)"),
+    department: Optional[str] = Query(None, description="车间/部门, 为空时不筛"),
+    schedule_bucket: Optional[str] = Query(None, pattern="^(lean|assembly|packaging|mixed|pending)$"),
+    current_user: dict = Depends(PermissionChecker("production.schedule_plans", "read")),
+    db: AsyncSession = Depends(get_read_only_db),
+):
+    """排产看板周视图专用接口。
+
+    数据源: production_capacity_slot 表(每个排产计划落库时真实写入的产能时间槽)。
+    口径: 只返回 active 槽位, 按 (date, department, schedule_bucket) 聚合求和。
+    行为: 跨天 long 单只在「它真实占槽的那一天」出现, 不会在中间日被区间相交误算;
+          实际未干活的工单也不会出现在面板上。
+
+    与旧版看板(读 production_schedule_plan 区间相交 + sum daily_work_hours)的区别:
+      - 旧版会出现「一天 40 多小时」, 因为 long 单 daily_work_hours 被算进每一天
+      - 新版只反映真实产能槽位, 是物理上当天真正在干活的部分
+    """
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="end_date 不能早于 start_date")
+    if (end_date - start_date).days > 92:
+        raise HTTPException(status_code=400, detail="日期范围最大 92 天")
+
+    from datetime import datetime, time as _time
+    slot_start = datetime.combine(start_date, _time.min)
+    slot_end = datetime.combine(end_date, _time.max)
+
+    from app.models.production.capacity_slot import CapacitySlot
+    conditions = [
+        CapacitySlot.is_active.is_(True),
+        CapacitySlot.slot_date >= slot_start,
+        CapacitySlot.slot_date <= slot_end,
+    ]
+    if department:
+        conditions.append(CapacitySlot.department == department)
+    if schedule_bucket:
+        conditions.append(CapacitySlot.schedule_bucket == schedule_bucket)
+
+    # 单条 SQL 一次查回, 然后内存按 (date, dept, bucket) 聚合, 避免 N+1
+    rows = await db.execute(
+        select(
+            func.date(CapacitySlot.slot_date).label("d"),
+            CapacitySlot.department,
+            CapacitySlot.schedule_bucket,
+            CapacitySlot.plan_id,
+            CapacitySlot.order_no,
+            CapacitySlot.line_no,
+            CapacitySlot.hours,
+        ).where(*conditions).order_by(
+            func.date(CapacitySlot.slot_date).asc(),
+            CapacitySlot.department.asc(),
+            CapacitySlot.schedule_bucket.asc(),
+        )
+    )
+    raw = rows.all()
+
+    grouped: dict[tuple[date, str, str], dict] = {}
+    for r in raw:
+        d = r[0]
+        if isinstance(d, str):
+            d = date.fromisoformat(d)
+        key = (d, r[1] or "", r[2] or "")
+        cell = grouped.setdefault(key, {"date": d, "department": r[1] or "", "schedule_bucket": r[2] or "", "items": [], "total": 0.0})
+        cell["items"].append({
+            "plan_id": int(r[3]) if r[3] is not None else 0,
+            "order_no": r[4],
+            "line_no": r[5],
+            "department": r[1],
+            "schedule_bucket": r[2],
+            "hours": float(r[6] or 0),
+        })
+        cell["total"] += float(r[6] or 0)
+
+    # 每天最大工时: 12h 上限(同 capacity_slot_service.MAX_DAILY_HOURS)
+    from app.services.production.capacity_slot_service import MAX_DAILY_HOURS
+
+    cells = [
+        BoardCapacityCell(
+            date=v["date"],
+            department=v["department"],
+            schedule_bucket=v["schedule_bucket"],
+            total_hours=round(v["total"], 2),
+            max_daily_hours=MAX_DAILY_HOURS,
+            items=[BoardCapacityItem(**it) for it in v["items"]],
+        )
+        for v in sorted(grouped.values(), key=lambda x: (x["date"], x["department"], x["schedule_bucket"]))
+    ]
+    return ResponseModel(data=BoardCapacityResponse(cells=cells))
 
 
 @router.post("/base-conditions", response_model=ResponseModel[list])

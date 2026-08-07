@@ -42,6 +42,27 @@ export default function PriceChangePending() {
     } catch { message.warning('下载失败') }
   }
 
+  // 预览：走带鉴权的 preview 接口
+  const openPreview = async (f: any) => {
+    try {
+      if (f.url && f.url.startsWith('blob:')) {
+        setPreviewFile({ url: f.url, name: f.name || '预览' })
+        return
+      }
+      if (!f.key) {
+        if (f.url) setPreviewFile({ url: f.url, name: f.name || '预览' })
+        return
+      }
+      const token = useAuthStore.getState().currentToken
+      const res = await axios.get(`/api/v1/files/preview/${f.key}`, {
+        responseType: 'blob',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      const url = window.URL.createObjectURL(new Blob([res.data]))
+      setPreviewFile({ url, name: f.name || '预览' })
+    } catch { message.warning('预览失败') }
+  }
+
   const [previewFile, setPreviewFile] = useState<{ url: string; name: string } | null>(null)
 
   const getEvidenceItems = (row: any): any[] => {
@@ -249,8 +270,8 @@ export default function PriceChangePending() {
                     {ev.slice(0, 3).map((f: any, i: number) => (
                       <Button key={i} size="small" type="link" icon={<DownloadOutlined />}
                         onClick={() => {
-                          if (f.url && f.url.match(/\.(png|jpg|jpeg|gif|webp)$/i)) {
-                            setPreviewFile({ url: f.url, name: f.name || '凭证' })
+                          if (f.url && (f.url.match(/\.(png|jpg|jpeg|gif|webp)$/i) || /\.pdf$/i.test(f.name || ''))) {
+                            openPreview(f)
                           } else if (f.key) {
                             downloadAtt(f.key, f.name || '凭证')
                           }
@@ -323,12 +344,17 @@ export default function PriceChangePending() {
       </div>
 
       {/* 凭证预览 */}
-      <Modal title={previewFile?.name || '凭证预览'} open={!!previewFile} onCancel={() => setPreviewFile(null)} width={700} footer={null}>
-        {previewFile?.url && (
-          <div style={{ textAlign: 'center' }}>
-            <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
-          </div>
-        )}
+      <Modal title={previewFile?.name || '凭证预览'} open={!!previewFile} onCancel={() => setPreviewFile(null)} width={800} footer={null}>
+        {previewFile?.url && (() => {
+          const isPdf = /\.pdf$/i.test(previewFile.name || '')
+          return isPdf ? (
+            <iframe src={previewFile.url} title={previewFile.name} style={{ width: '100%', height: '70vh', border: 'none' }} />
+          ) : (
+            <div style={{ textAlign: 'center' }}>
+              <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
+            </div>
+          )
+        })()}
       </Modal>
       <style>{`.pc-pending-risk-high > td{background:#fef2f2 !important}.pc-pending-risk-high:hover > td{background:#fee2e2 !important}`}</style>
     </div>

@@ -47,6 +47,8 @@ export default function PriceChangeDetail() {
   const [scActionNote, setScActionNote] = useState('')
   const [scSaving, setScSaving] = useState(false)
   const [previewFile, setPreviewFile] = useState<{ url: string; name: string } | null>(null)
+  const isAdmin = useAuthStore.getState().isAdmin()
+  const canArchiveDelete = isAdmin || useAuthStore.getState().hasPermission('purchase.price_change.archive_delete', 'delete')
 
   const load = async () => {
     if (!id) return
@@ -110,8 +112,8 @@ export default function PriceChangeDetail() {
     if (!id) return
     setRefreshingAi(true)
     try {
-      await purchaseApi.aiAnalyze(parseInt(id))
-      message.success('AI 分析已刷新')
+      const res: any = await purchaseApi.aiAnalyze(parseInt(id))
+      message.success(res?.message || 'AI 分析已刷新')
       load()
     } catch (e: any) {
       message.error(e.message || '刷新失败')
@@ -136,6 +138,27 @@ export default function PriceChangeDetail() {
     } catch (e: any) {
       message.error('下载失败: ' + (e.message || ''))
     }
+  }
+
+  // 预览：走带鉴权的 preview 接口（img/iframe 无法带 header，这里拉 blob 生成临时 URL）
+  const openPreview = async (f: any) => {
+    try {
+      if (f.url && f.url.startsWith('blob:')) {
+        setPreviewFile({ url: f.url, name: f.name || '预览' })
+        return
+      }
+      if (!f.key) {
+        if (f.url) setPreviewFile({ url: f.url, name: f.name || '预览' })
+        return
+      }
+      const token = useAuthStore.getState().currentToken
+      const res = await axios.get(`/api/v1/files/preview/${f.key}`, {
+        responseType: 'blob',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      const url = window.URL.createObjectURL(new Blob([res.data]))
+      setPreviewFile({ url, name: f.name || '预览' })
+    } catch { message.warning('预览失败') }
   }
 
   const uploadScEvidence = async (file: File): Promise<any> => {
@@ -353,7 +376,7 @@ export default function PriceChangeDetail() {
             </div>
           </div>
           <Space>
-            {(s === 'draft' || s === 'rejected' || s === 'recalled') && <Button danger icon={<DeleteOutlined />} onClick={del}>删除</Button>}
+            {(s === 'draft' || s === 'rejected' || s === 'recalled' || (s === 'approved' && canArchiveDelete)) && <Button danger icon={<DeleteOutlined />} onClick={del}>删除</Button>}
             {s === 'draft' && (
               <>
                 <Button onClick={() => navigate(`/purchase/price-change/new?edit=${id}`)}>编辑</Button>
@@ -458,12 +481,19 @@ export default function PriceChangeDetail() {
             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: '#0f172a' }}>附件与分析</div>
             {attachments.length > 0 ? (
               <div style={{ marginBottom: 12 }}>
-                {attachments.map((a: any, i: number) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
-                    <span style={{ fontSize: 13, color: '#334155' }}>{a.name}</span>
-                    <a onClick={(e) => { e.preventDefault(); downloadAtt(a.key, a.name) }} style={{ fontSize: 12, color: '#2563eb', cursor: 'pointer' }}>下载</a>
-                  </div>
-                ))}
+                {attachments.map((a: any, i: number) => {
+                  const isImg = (a.name || '').match(/\.(png|jpg|jpeg|gif|webp)$/i)
+                  const isPdf = /\.pdf$/i.test(a.name || '')
+                  return (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+                      <span style={{ fontSize: 13, color: '#334155' }}>{a.name}</span>
+                      {(isImg || isPdf) && (
+                        <a onClick={(e) => { e.preventDefault(); openPreview(a) }} style={{ fontSize: 12, color: '#2563eb', cursor: 'pointer' }}>预览</a>
+                      )}
+                      <a onClick={(e) => { e.preventDefault(); downloadAtt(a.key, a.name) }} style={{ fontSize: 12, color: '#2563eb', cursor: 'pointer' }}>下载</a>
+                    </div>
+                  )
+                })}
               </div>
             ) : (
               <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12 }}>暂无附件</div>
@@ -676,7 +706,7 @@ export default function PriceChangeDetail() {
               beforeUpload={() => false} multiple
               accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"
               showUploadList={{ showPreviewIcon: true, showRemoveIcon: true }}
-              onPreview={(file) => setPreviewFile({ url: file.url || URL.createObjectURL(file.originFileObj as File), name: file.name })}>
+              onPreview={(file) => openPreview(file)}>
               <Button icon={<UploadOutlined />}>选择文件</Button>
             </Upload>
             <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>支持 PDF、图片、Word、Excel，也可直接截图 Ctrl+V 粘贴上传</div>
@@ -694,12 +724,17 @@ export default function PriceChangeDetail() {
       </Modal>
 
       {/* 凭证预览弹窗 */}
-      <Modal title={previewFile?.name || '预览'} open={!!previewFile} onCancel={() => setPreviewFile(null)} width={700} footer={null}>
-        {previewFile?.url && (
-          <div style={{ textAlign: 'center' }}>
-            <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
-          </div>
-        )}
+      <Modal title={previewFile?.name || '预览'} open={!!previewFile} onCancel={() => setPreviewFile(null)} width={800} footer={null}>
+        {previewFile?.url && (() => {
+          const isPdf = /\.pdf$/i.test(previewFile.name || '')
+          return isPdf ? (
+            <iframe src={previewFile.url} title={previewFile.name} style={{ width: '100%', height: '70vh', border: 'none' }} />
+          ) : (
+            <div style={{ textAlign: 'center' }}>
+              <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
+            </div>
+          )
+        })()}
       </Modal>
     </div>
   )

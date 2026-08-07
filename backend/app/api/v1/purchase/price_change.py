@@ -623,14 +623,16 @@ async def store_evidence(
 async def rerun_ai_analysis(
     change_id: int,
     username: str = Depends(get_current_username),
-    _: dict = Depends(PermissionChecker("purchase.price_change", "update")),
+    _: dict = Depends(PermissionChecker("purchase.price_change", "read")),
     db: AsyncSession = Depends(get_db),
 ):
     service = PriceChangeService(db)
-    record = await service.rerun_ai_analysis(change_id)
+    record, ran = await service.rerun_ai_analysis(change_id)
     if not record:
         raise HTTPException(status_code=404, detail="调价单不存在")
     await db.commit()
+    if not ran:
+        return ResponseModel(data=record, message="已存在最新AI分析，无需重复生成")
     return ResponseModel(data=record, message="AI 分析已刷新")
 
 
@@ -721,15 +723,31 @@ async def revoke_approval(
 @router.delete("/{change_id}", response_model=ResponseModel)
 async def delete_price_change(
     change_id: int,
-    username: str = Depends(get_current_username),
+    user: dict = Depends(get_current_user_payload),
     _: dict = Depends(PermissionChecker("purchase.price_change", "delete")),
     db: AsyncSession = Depends(get_db),
 ):
+    # 已归档单删除：admin 或持有「调价单归档删除」权限者才可（实时查库，避免依赖 JWT 旧权限）
+    can_archive_delete = user["role"] == "admin"
+    if not can_archive_delete:
+        row = await db.execute(
+            text("""SELECT r.role_code, r.permissions
+                    FROM sys_role r JOIN sys_user u ON u.role_id = r.id
+                    WHERE u.username = :un LIMIT 1"""),
+            {"un": user["username"]},
+        )
+        r = row.fetchone()
+        if r:
+            perms = r[1] if isinstance(r[1], dict) else {}
+            from app.core.permissions import merge_role_permission_additions
+            perms = merge_role_permission_additions(r[0], perms)
+            can_archive_delete = "delete" in (perms.get("purchase.price_change.archive_delete") or [])
+
     service = PriceChangeService(db)
-    ok = await service.delete(change_id)
-    if not ok:
-        raise HTTPException(status_code=400, detail="仅草稿/已驳回/已撤回状态可删除")
+    result = await service.delete(change_id, can_archive_delete=can_archive_delete)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
     await db.commit()
-    return ResponseModel(message="已删除")
+    return ResponseModel(message=result["message"])
 
 

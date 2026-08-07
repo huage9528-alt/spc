@@ -405,6 +405,10 @@ class OrderForSchedulingOut(BaseModel):
     needs_move_earlier: Optional[bool] = None
     move_earlier_days: Optional[int] = None
     work_hour_summary: Optional[str] = None
+    kit_rate: Optional[float] = None
+    kit_risk_level: Optional[str] = None
+    shortage_material_count: Optional[int] = None
+    latest_material_eta: Optional[date] = None
 
 
 class TodoWorkbenchItemOut(BaseModel):
@@ -455,6 +459,10 @@ class TodoWorkbenchItemOut(BaseModel):
     needs_move_earlier: Optional[bool] = None
     move_earlier_days: Optional[int] = None
     work_hour_summary: Optional[str] = None
+    kit_rate: Optional[float] = None
+    kit_risk_level: Optional[str] = None
+    shortage_material_count: Optional[int] = None
+    latest_material_eta: Optional[date] = None
     plan_date: Optional[date] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
@@ -1046,3 +1054,33 @@ class UpphFormulaRecalculateResult(BaseModel):
     recalculated: int = 0
     updated: int = 0
     affected_schedule_plans_marked: int = 0
+
+
+class BoardCapacityItem(BaseModel):
+    """某计划在某日的真实产能占槽记录（看板周视图用）。"""
+    plan_id: int
+    order_no: Optional[str] = None
+    line_no: Optional[str] = None
+    department: Optional[str] = None
+    schedule_bucket: Optional[str] = None
+    hours: float
+
+
+class BoardCapacityCell(BaseModel):
+    """某 (date, department, schedule_bucket) 的真实日占用 + 占槽明细。
+
+    看板周视图泳道以此为唯一来源：
+      - total_hours = 该日该工段所有 active 占槽的 sum(hours)
+      - items      = 当天每个计划在该工段的占槽明细
+      - 不会出现「跨天 long 单在中间日被错误计入」的情况
+    """
+    date: date
+    department: str
+    schedule_bucket: str
+    total_hours: float
+    max_daily_hours: float
+    items: List[BoardCapacityItem] = []
+
+
+class BoardCapacityResponse(BaseModel):
+    cells: List[BoardCapacityCell] = []

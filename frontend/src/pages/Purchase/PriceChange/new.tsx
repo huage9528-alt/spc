@@ -6,6 +6,7 @@ import dayjs from 'dayjs'
 import { purchaseApi } from '../../../services/purchase'
 import { fileApi } from '../../../services/api'
 import { useAuthStore } from '../../../store/auth'
+import axios from 'axios'
 
 export default function PriceChangeNew() {
   const navigate = useNavigate()
@@ -364,6 +365,41 @@ export default function PriceChangeNew() {
     }
   }
 
+  const downloadAtt = async (key: string, name: string) => {
+    try {
+      const token = useAuthStore.getState().currentToken
+      const res = await axios.get(`/api/v1/files/download/${key}`, {
+        responseType: 'blob',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      const url = window.URL.createObjectURL(new Blob([res.data]))
+      const a = document.createElement('a')
+      a.href = url; a.download = name; a.click()
+      window.URL.revokeObjectURL(url)
+    } catch { message.warning('下载失败') }
+  }
+
+  // 预览：走带鉴权的 preview 接口（img/iframe 无法带 header，这里拉 blob 生成临时 URL）
+  const openPreview = async (f: any) => {
+    try {
+      if (f.url && f.url.startsWith('blob:')) {
+        setPreviewFile({ url: f.url, name: f.name || '预览' })
+        return
+      }
+      if (!f.key) {
+        if (f.url) setPreviewFile({ url: f.url, name: f.name || '预览' })
+        return
+      }
+      const token = useAuthStore.getState().currentToken
+      const res = await axios.get(`/api/v1/files/preview/${f.key}`, {
+        responseType: 'blob',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      const url = window.URL.createObjectURL(new Blob([res.data]))
+      setPreviewFile({ url, name: f.name || '预览' })
+    } catch { message.warning('预览失败') }
+  }
+
   const submitWithEvidence = async () => {
     setScSaving(true)
     try {
@@ -605,21 +641,38 @@ export default function PriceChangeNew() {
           {uploadedFiles.length > 0 && (
             <div style={{ marginBottom: 8, background: '#f0fdf4', borderRadius: 6, padding: '6px 12px' }}>
               <div style={{ fontSize: 12, color: '#16a34a', marginBottom: 4 }}>已上传附件（{uploadedFiles.length} 个）</div>
-              {uploadedFiles.map((f: any, i: number) => (
-                <span key={i} style={{ display: 'inline-block', fontSize: 12, color: '#334155', marginRight: 8, background: '#fff', padding: '2px 8px', borderRadius: 4, border: '1px solid #d9d9d9' }}>
-                  {f.name} <a onClick={(e) => { e.stopPropagation(); setUploadedFiles(uploadedFiles.filter((_: any, j: number) => j !== i)) }} style={{ color: '#ef4444', marginLeft: 4 }}>x</a>
-                </span>
-              ))}
+              {uploadedFiles.map((f: any, i: number) => {
+                const isImg = (f.name || '').match(/\.(png|jpg|jpeg|gif|webp)$/i)
+                const isPdf = /\.pdf$/i.test(f.name || '')
+                return (
+                  <span key={i} style={{ display: 'inline-block', fontSize: 12, color: '#334155', marginRight: 8, background: '#fff', padding: '2px 8px', borderRadius: 4, border: '1px solid #d9d9d9' }}>
+                    <a onClick={(e) => {
+                      e.stopPropagation()
+                      if (isImg || isPdf) openPreview(f)
+                      else if (f.key) downloadAtt(f.key, f.name || '附件')
+                    }} style={{ color: '#2563eb', cursor: 'pointer' }}>{f.name}</a>
+                    <a onClick={(e) => { e.stopPropagation(); setUploadedFiles(uploadedFiles.filter((_: any, j: number) => j !== i)) }} style={{ color: '#ef4444', marginLeft: 6 }}>x</a>
+                  </span>
+                )
+              })}
             </div>
           )}
           {fileList.length > 0 && (
             <div style={{ marginTop: 8, background: '#f8fafc', borderRadius: 6, padding: '8px 12px' }}>
-              {fileList.map((f: any, i: number) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0', borderBottom: i < fileList.length - 1 ? '1px solid #f1f5f9' : 'none' }}>
-                  <span style={{ fontSize: 13, color: '#334155' }}>{f.name}</span>
-                  <span style={{ fontSize: 11, color: '#94a3b8' }}>{f.size ? (f.size / 1024).toFixed(0) + 'KB' : ''}</span>
-                </div>
-              ))}
+              {fileList.map((f: any, i: number) => {
+                const isImg = (f.name || '').match(/\.(png|jpg|jpeg|gif|webp)$/i)
+                const isPdf = /\.pdf$/i.test(f.name || '')
+                return (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0', borderBottom: i < fileList.length - 1 ? '1px solid #f1f5f9' : 'none' }}>
+                    <span style={{ fontSize: 13, color: '#334155' }}>
+                      <a onClick={() => {
+                        if ((isImg || isPdf) && f.originFileObj) setPreviewFile({ url: URL.createObjectURL(f.originFileObj as File), name: f.name })
+                      }} style={{ color: (isImg || isPdf) ? '#2563eb' : '#334155', cursor: (isImg || isPdf) ? 'pointer' : 'default' }}>{f.name}</a>
+                    </span>
+                    <span style={{ fontSize: 11, color: '#94a3b8' }}>{f.size ? (f.size / 1024).toFixed(0) + 'KB' : ''}</span>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>
@@ -765,7 +818,7 @@ export default function PriceChangeNew() {
               beforeUpload={() => false} multiple
               accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"
               showUploadList={{ showPreviewIcon: true, showRemoveIcon: true }}
-              onPreview={(file) => setPreviewFile({ url: file.url || URL.createObjectURL(file.originFileObj as File), name: file.name })}>
+              onPreview={(file) => openPreview(file)}>
               <Button icon={<UploadOutlined />}>选择文件</Button>
             </Upload>
             <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>支持 PDF、图片、Word、Excel，也可直接截图 Ctrl+V 粘贴上传</div>
@@ -786,12 +839,17 @@ export default function PriceChangeNew() {
       </Modal>
 
       {/* 凭证预览弹窗 */}
-      <Modal title={previewFile?.name || '预览'} open={!!previewFile} onCancel={() => setPreviewFile(null)} width={700} footer={null}>
-        {previewFile?.url && (
-          <div style={{ textAlign: 'center' }}>
-            <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
-          </div>
-        )}
+      <Modal title={previewFile?.name || '预览'} open={!!previewFile} onCancel={() => setPreviewFile(null)} width={800} footer={null}>
+        {previewFile?.url && (() => {
+          const isPdf = /\.pdf$/i.test(previewFile.name || '')
+          return isPdf ? (
+            <iframe src={previewFile.url} title={previewFile.name} style={{ width: '100%', height: '70vh', border: 'none' }} />
+          ) : (
+            <div style={{ textAlign: 'center' }}>
+              <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
+            </div>
+          )
+        })()}
       </Modal>
 
       {/* 物料选择弹窗 */}

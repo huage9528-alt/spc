@@ -37,6 +37,10 @@ interface TodoRow {
   scheduling_reason_code: string | null
   scheduling_reason: string | null
   upph: number | null
+  kit_rate: number | null
+  kit_risk_level: string | null
+  shortage_material_count: number | null
+  latest_material_eta: string | null
 }
 
 export default function TodoWorkbench() {
@@ -71,6 +75,7 @@ export default function TodoWorkbench() {
   const [month, setMonth] = useState(dayjs().month() + 1)
   const [todoStatusFilter, setTodoStatusFilter] = useState('all')
   const [bucketFilter, setBucketFilter] = useState('all')
+  const [kitRiskFilter, setKitRiskFilter] = useState('all')
   const [stats, setStats] = useState<{ ready: number; pending: number; reschedule: number; missing_upph: number; bucket_counts?: Record<string, number> }>({ ready: 0, pending: 0, reschedule: 0, missing_upph: 0 })
 
   const load = useCallback(async () => {
@@ -85,6 +90,7 @@ export default function TodoWorkbench() {
       if (keyword.trim()) params.keyword = keyword.trim()
       if (todoStatusFilter !== 'all') params.todo_status = todoStatusFilter
       if (bucketFilter !== 'all') params.schedule_bucket = bucketFilter
+      if (kitRiskFilter !== 'all') params.kit_risk_level = kitRiskFilter
 
       const res: any = await productionApi.getTodoWorkbench(params)
       setData(res.data?.items || [])
@@ -101,7 +107,7 @@ export default function TodoWorkbench() {
     } finally {
       setLoading(false)
     }
-  }, [page, pageSize, keyword, year, month, todoStatusFilter, bucketFilter])
+  }, [page, pageSize, keyword, year, month, todoStatusFilter, bucketFilter, kitRiskFilter])
 
   useEffect(() => { load() }, [load])
 
@@ -131,6 +137,24 @@ export default function TodoWorkbench() {
     { title: 'BOM编码', dataIndex: 'bom_no', width: 160, ellipsis: true, render: (v: string) => renderCopyableText(v, 'BOM编码') },
     { title: '数量', width: 90, render: (_: any, row: TodoRow) => row.order_qty ?? row.quantity ?? '-' },
     { title: '出货计划', width: 110, render: (_: any, row: TodoRow) => formatDate(row.promised_date || row.source_promised_date) },
+    {
+      title: '齐套',
+      width: 110,
+      render: (_: any, row: TodoRow) => {
+        if (row.kit_rate == null) return <span style={{ color: '#bfbfbf' }}>-</span>
+        const riskColor = row.kit_risk_level === 'red' ? '#e11d48' : row.kit_risk_level === 'yellow' ? '#f59e0b' : '#16a34a'
+        const riskLabel = row.kit_risk_level === 'red' ? '缺料严重' : row.kit_risk_level === 'yellow' ? '部分齐套' : '齐套'
+        return (
+          <Tooltip title={`订单级齐套率（与齐套中心口径一致）${row.shortage_material_count ? ` · 缺料 ${row.shortage_material_count} 项` : ''}`}>
+            <Space size={6}>
+              <span style={{ color: riskColor, fontWeight: 600 }}>{Math.round((row.kit_rate || 0) * 100)}%</span>
+              <Tag color={row.kit_risk_level || 'default'}>{riskLabel}</Tag>
+            </Space>
+          </Tooltip>
+        )
+      },
+    },
+    { title: '最晚ETA', width: 100, render: (_: any, row: TodoRow) => row.latest_material_eta ? formatDate(row.latest_material_eta) : '-' },
     { title: '排产段', width: 110, render: (_: any, row: TodoRow) => renderBucketTag(row) },
     {
       title: '状态',
@@ -268,6 +292,19 @@ export default function TodoWorkbench() {
             <Col>
               <Select value={todoStatusFilter} onChange={(v) => { setTodoStatusFilter(v); setPage(1) }} style={{ width: 130 }} options={TODO_FILTER_OPTIONS} />
             </Col>
+            <Col>
+              <Select
+                value={kitRiskFilter}
+                onChange={(v) => { setKitRiskFilter(v); setPage(1) }}
+                style={{ width: 130 }}
+                options={[
+                  { value: 'all', label: '齐套风险：全部' },
+                  { value: 'red', label: '缺料严重 🔴' },
+                  { value: 'yellow', label: '部分齐套 🟡' },
+                  { value: 'green', label: '已齐套 🟢' },
+                ]}
+              />
+            </Col>
             <Col flex="auto" />
             <Col>
               <Space>
@@ -302,7 +339,7 @@ export default function TodoWorkbench() {
           columns={columns}
           loading={loading}
           size="small"
-          scroll={{ x: 1680, y: 600 }}
+          scroll={{ x: 1900, y: 600 }}
           pagination={{
             total,
             current: page,

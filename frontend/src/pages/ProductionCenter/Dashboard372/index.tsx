@@ -415,13 +415,6 @@ export default function Dashboard372() {
               {renderZoneStat('缺料', material.shortageCount, ' 单', (material.shortageCount || 0) > 0)}
               {renderZoneStat('ETA延期', material.etaDelayCount, ' 单', (material.etaDelayCount || 0) > 0)}
             </div>
-            <Alert
-              type="info"
-              showIcon
-              message="齐套率暂为占位（假设全部齐套）"
-              description="齐套中心完善后接入真实缺料/ETA 数据（v2 阶段 3）。当前「待备料」为配料区真实计划数。"
-              style={{ marginBottom: 8 }}
-            />
             <div style={{ maxHeight: 480, overflowY: 'auto' }}>
               {filteredMaterialCards.length === 0
                 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="配料区暂无备料计划" />
@@ -450,7 +443,7 @@ export default function Dashboard372() {
       </Row>
 
       <div style={{ color: '#94a3b8', fontSize: 11, textAlign: 'center', padding: '8px 0' }}>
-        当前日期：{dateLabel} · 今日/冷冻/配料/待排均来自真实接口 · 配料的物料齐套率等指标待阶段 3 接通
+        当前日期：{dateLabel} · 今日/冷冻/配料/待排均来自真实接口 · 配料齐套率/缺料/ETA 数据来源物料齐套中心
       </div>
     </div>
   )

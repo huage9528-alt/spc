@@ -225,3 +225,38 @@ async def download_file(
     encoded_name = quote(safe_name)
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"}
     return StreamingResponse(_iter(), media_type=asset.mime or "application/octet-stream", headers=headers)
+
+
+@router.get("/preview/{key:path}")
+async def preview_file(
+    key: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """内联预览（不带 attachment 头），供图片/PDF 在浏览器内展示。"""
+    storage = get_storage()
+    asset = (await db.execute(
+        select(FileAsset).where(FileAsset.key == key, FileAsset.deleted_at.is_(None))
+    )).scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    try:
+        fh = storage.open(key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="文件已被清理")
+
+    def _iter():
+        try:
+            while True:
+                chunk = fh.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            fh.close()
+
+    mime = asset.mime or "application/octet-stream"
+    # 仅图片/PDF 走内联，其余强制下载
+    inline = mime.startswith("image/") or mime == "application/pdf"
+    headers = {} if inline else {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(asset.name or 'download')}"}
+    return StreamingResponse(_iter(), media_type=mime, headers=headers)

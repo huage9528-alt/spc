@@ -271,6 +271,7 @@ declare_permission("purchase", "采购中心", module="purchase", sort_order=11)
 declare_permission("purchase.price_change", "调价单管理", module="purchase", parent_code="purchase", route_path="/purchase/price-change", sort_order=1)
 declare_permission("purchase.price_change.pending", "待我审批", module="purchase", parent_code="purchase", route_path="/purchase/price-change/pending", sort_order=2)
 declare_permission("purchase.price_change.config", "审批配置", module="purchase", parent_code="purchase", route_path="/purchase/price-change/config", sort_order=3)
+declare_permission("purchase.price_change.archive_delete", "调价单归档删除", module="purchase", parent_code="purchase", actions=["delete"], sort_order=4)
 
 # 财务数据
 declare_permission("finance", "财务数据", module="finance", sort_order=12)

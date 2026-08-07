@@ -49,6 +49,12 @@ class ProductionOrderScheduleSnapshot(Base):
     move_earlier_days = Column(Integer, nullable=True)
     work_hour_summary = Column(Text, nullable=True)
 
+    kit_rate = Column(Numeric(5, 2), nullable=True, comment="订单级齐套率0-1(来自kit_analysis)")
+    kit_risk_level = Column(String(16), nullable=True, comment="齐套风险 green/yellow/red")
+    shortage_material_count = Column(Integer, nullable=True, comment="缺料物料数")
+    latest_material_eta = Column(Date, nullable=True, comment="缺料最晚ETA")
+    kit_snapshot_at = Column(DateTime, nullable=True, comment="齐套快照刷新时间")
+
     snapshot_updated_at = Column(DateTime, server_default=func.now(), nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)

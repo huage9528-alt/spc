@@ -51,6 +51,8 @@ export const productionApi = {
     api.get('/production/schedule-plans/history', { params }),
   // 订单池用于排产
   getOrdersForScheduling: (params: Record<string, any>) => api.get('/production/schedule-plans/orders-for-scheduling', { params }),
+  // 排产看板周视图专用：返回真实占槽表(生产_capacity_slot)按日聚合, 不再被 long 单区间相交误导
+  getBoardCapacity: (params: Record<string, any>) => api.get('/production/schedule-plans/board-capacity', { params }),
   getTodoWorkbench: (params: Record<string, any>) => api.get('/production/schedule-plans/todo-workbench', { params }),
   refreshTodoSnapshots: (data: Record<string, any>) => api.post('/production/schedule-plans/todo-workbench/refresh-snapshots', data),
   // 获取工作时间配置

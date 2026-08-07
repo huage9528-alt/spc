@@ -1553,3 +1553,430 @@ async def get_order_product_bom_flat(
         bom_id=resolved_bom_id,
         items=flat_items,
     ).model_dump()
+
+
+async def get_kit_summary_by_orders(
+    db: AsyncSession,
+    order_nos: list[str],
+) -> dict[str, dict]:
+    """按 order_no 集合批量返回订单级齐套汇总。
+
+    口径与 get_kit_analysis / 齐套中心页面完全一致：
+      - 跨订单库存分配覆盖「所有用到这些物料的未关闭订单」，可用库存不因本函数只查询部分订单而偏高
+      - 状态推导复用 _status_for_plan / _kit_met_for_plan，齐套率规则复用 _kit_risk_level
+    （注意：本函数镜像 get_kit_analysis 的聚合逻辑，若齐套口径变更需同步两处。）
+
+    返回 {order_no: {
+        "kit_rate": float,               # 齐套率 0~1
+        "risk_level": str,               # green/yellow/red
+        "total_materials": int,          # 参与齐套统计的物料数
+        "shortage_material_count": int,  # 缺料物料数（参与统计且未齐套）
+        "latest_eta": date | None,       # 缺料物料的最晚 ETA
+    }}
+    """
+    targets = [o for o in (order_nos or []) if o]
+    if not targets:
+        return {}
+    target_set = set(targets)
+
+    # 1. 目标订单的物料清单（base_plan_qty>0）
+    plan_query = select(
+        MrpPlanOrder.sale_order_no,
+        MrpPlanOrder.sale_order_id,
+        MrpPlanOrder.material_code,
+        MrpPlanOrder.base_plan_qty,
+        MrpPlanOrder.bill_type,
+        MrpPlanOrder.material_property,
+        MrpPlanOrder.need_date,
+        MrpPlanOrder.is_closed,
+        MrpPlanOrder.stock_qty,
+    ).where(MrpPlanOrder.sale_order_no.in_(targets))
+    plan_rows = (await db.execute(plan_query)).all()
+
+    target_materials: dict[tuple[str, str], dict] = {}
+    plan_sid_to_order_no: dict[int, str] = {}
+    for row in plan_rows:
+        if not row.sale_order_no or not row.material_code:
+            continue
+        if row.base_plan_qty is None or row.base_plan_qty == 0:
+            continue
+        if row.sale_order_id is not None:
+            plan_sid_to_order_no.setdefault(row.sale_order_id, row.sale_order_no)
+        key = (row.sale_order_no, row.material_code)
+        target_materials.setdefault(key, {
+            "base_plan_qty": row.base_plan_qty or Decimal("0"),
+            "bill_type": row.bill_type,
+            "material_property": row.material_property,
+            "need_date": row.need_date,
+            "is_closed": row.is_closed,
+        })
+
+    if not target_materials:
+        return {}
+
+    involved_material_codes = sorted({mc for _, mc in target_materials})
+
+    # 2. 所有用到这些物料的订单（含非目标订单），用于与齐套中心一致的库存分配
+    involved_result = await db.execute(
+        select(MrpPlanOrder.sale_order_no)
+        .where(MrpPlanOrder.material_code.in_(involved_material_codes))
+        .distinct()
+    )
+    involved_orders = sorted({r.sale_order_no for r in involved_result if r.sale_order_no})
+
+    all_plan_result = await db.execute(
+        select(
+            MrpPlanOrder.sale_order_no,
+            MrpPlanOrder.sale_order_id,
+            MrpPlanOrder.material_code,
+            MrpPlanOrder.base_plan_qty,
+            MrpPlanOrder.bill_type,
+            MrpPlanOrder.material_property,
+            MrpPlanOrder.need_date,
+            MrpPlanOrder.is_closed,
+            MrpPlanOrder.stock_qty,
+        ).where(
+            MrpPlanOrder.sale_order_no.in_(involved_orders),
+            MrpPlanOrder.material_code.in_(involved_material_codes),
+        )
+    )
+    all_plan_rows = all_plan_result.all()
+
+    plan_materials: dict[tuple[str, str], dict] = {}
+    plan_stock_by_material: dict[str, Decimal] = {}
+    for row in all_plan_rows:
+        if not row.sale_order_no or not row.material_code:
+            continue
+        if row.base_plan_qty is None or row.base_plan_qty == 0:
+            continue
+        if row.sale_order_id is not None:
+            plan_sid_to_order_no.setdefault(row.sale_order_id, row.sale_order_no)
+        if row.stock_qty is not None:
+            prev = plan_stock_by_material.get(row.material_code)
+            if prev is None or row.stock_qty > prev:
+                plan_stock_by_material[row.material_code] = row.stock_qty
+        key = (row.sale_order_no, row.material_code)
+        if key not in plan_materials:
+            plan_materials[key] = {
+                "base_plan_qty": Decimal("0"),
+                "bill_type": row.bill_type,
+                "material_property": row.material_property,
+                "need_date": row.need_date,
+                "is_closed": row.is_closed,
+            }
+        if row.base_plan_qty is not None:
+            plan_materials[key]["base_plan_qty"] += row.base_plan_qty
+
+    material_codes = sorted({mc for _, mc in plan_materials})
+
+    # 3. 库存：Inventory 实时优先，缺失回退 MRP 快照
+    inv_stock = await _get_stock_by_material(db, material_codes)
+    stock_by_material = dict(inv_stock)
+    for mat_code, snapshot_qty in plan_stock_by_material.items():
+        if mat_code not in inv_stock:
+            stock_by_material[mat_code] = snapshot_qty
+    in_stock_qty_by_material = {
+        mat_code: (inv_stock.get(mat_code) or plan_stock_by_material.get(mat_code) or Decimal("0"))
+        for mat_code in material_codes
+    }
+
+    # 4. 合同交期与订单优先级（覆盖全部涉及订单，保证分配一致）
+    so_result = await db.execute(
+        select(SaleOrder.order_no, SaleOrder.promised_date)
+        .where(SaleOrder.order_no.in_(involved_orders), SaleOrder.is_closed == 0)
+        .distinct()
+    )
+    promised_dates: dict[str, Optional[date]] = {}
+    open_orders: set[str] = set()
+    for r in so_result:
+        promised_dates.setdefault(r.order_no, r.promised_date)
+        open_orders.add(r.order_no)
+    order_priority = sorted(
+        involved_orders,
+        key=lambda o: _order_priority_sort_key(o, promised_dates),
+    )
+
+    # 5. 采购收料聚合（覆盖全部涉及订单，供净需求扣减）
+    sync_filters = await get_purchase_order_sync_filters(db)
+    po_groups: dict[tuple[str, str], dict] = {}
+    if involved_orders and material_codes:
+        po_result = await db.execute(
+            select(
+                PurchaseOrder.order_no,
+                PurchaseOrder.material_code,
+                PurchaseOrder.po_qty,
+                PurchaseOrder.received_qty,
+                PurchaseOrder.eta,
+                PurchaseOrder.actual_arrival_date,
+                PurchaseOrder.inspection_date,
+                PurchaseOrder.is_closed,
+            ).where(
+                PurchaseOrder.order_no.in_(involved_orders),
+                PurchaseOrder.material_code.in_(material_codes),
+                *sync_filters,
+            )
+        )
+        for row in po_result:
+            if not row.order_no or not row.material_code:
+                continue
+            key = (row.order_no, row.material_code)
+            group = po_groups.setdefault(
+                key,
+                {
+                    "po_qty": Decimal("0"),
+                    "has_po_qty": False,
+                    "received_qty": Decimal("0"),
+                    "has_received_qty": False,
+                    "eta": None,
+                    "actual_arrival_date": None,
+                    "inspection_date": None,
+                    "is_closed": 0,
+                    "po_count": 0,
+                },
+            )
+            group["po_count"] += 1
+            if row.po_qty is not None:
+                group["po_qty"] += row.po_qty
+                group["has_po_qty"] = True
+            if row.received_qty is not None:
+                group["received_qty"] += row.received_qty
+                group["has_received_qty"] = True
+            if row.eta and (group["eta"] is None or row.eta < group["eta"]):
+                group["eta"] = row.eta
+            if row.actual_arrival_date and (
+                group["actual_arrival_date"] is None
+                or row.actual_arrival_date > group["actual_arrival_date"]
+            ):
+                group["actual_arrival_date"] = row.actual_arrival_date
+            if row.inspection_date and (
+                group["inspection_date"] is None
+                or row.inspection_date > group["inspection_date"]
+            ):
+                group["inspection_date"] = row.inspection_date
+            if row.is_closed and row.is_closed == 1:
+                group["is_closed"] = 1
+
+    # 6. 委外 / 自制收料聚合（仅目标订单需要）
+    sub_groups: dict[tuple[str, str], dict] = {}
+    if targets and material_codes:
+        sub_query = (
+            select(
+                SubcontractOrderDetail.sale_order_no,
+                Material.material_code.label("material_code"),
+                SubcontractOrderDetail.qty,
+                SubcontractOrderDetail.received_qty,
+                SubcontractOrder.bill_no,
+                SubcontractOrder.audit_date.label("eta"),
+                SubcontractOrder.closed_flag,
+            )
+            .join(
+                Material,
+                Material.erp_material_id == SubcontractOrderDetail.material_id,
+            )
+            .join(
+                SubcontractOrder,
+                SubcontractOrder.erp_order_id == SubcontractOrderDetail.erp_order_id,
+            )
+            .where(
+                SubcontractOrderDetail.sale_order_no.in_(targets),
+                Material.material_code.in_(material_codes),
+                SubcontractOrder.voided_flag != 1,
+            )
+        )
+        for row in await db.execute(sub_query):
+            if not row.sale_order_no or not row.material_code:
+                continue
+            key = (row.sale_order_no, row.material_code)
+            entry = sub_groups.setdefault(key, {})
+            entry["qty"] = (entry.get("qty") or Decimal("0")) + (row.qty or Decimal("0"))
+            entry["received_qty"] = (entry.get("received_qty") or Decimal("0")) + (row.received_qty or Decimal("0"))
+            if "po_no" not in entry:
+                entry["po_no"] = row.bill_no
+            if "eta" not in entry or (entry["eta"] is not None and row.eta and row.eta < entry["eta"]):
+                entry["eta"] = row.eta
+            entry["is_closed"] = 1 if row.closed_flag == 1 else entry.get("is_closed", 0)
+
+    task_groups: dict[tuple[str, str], dict] = {}
+    if material_codes and targets:
+        relevant_sale_order_ids = [sid for sid in plan_sid_to_order_no if plan_sid_to_order_no[sid] in target_set]
+        task_query = (
+            select(
+                ProductionTaskOrder.sale_order_no,
+                ProductionTaskOrder.material_code,
+                ProductionTaskOrder.sale_order_id,
+                ProductionTaskOrder.task_qty,
+                ProductionTaskOrder.actual_qty,
+                ProductionTaskOrder.task_no,
+                ProductionTaskOrder.planned_start_date,
+                ProductionTaskOrder.planned_end_date,
+                ProductionTaskOrder.actual_end_date,
+                ProductionTaskOrder.is_closed,
+            )
+            .where(
+                ProductionTaskOrder.material_code.in_(material_codes),
+                or_(
+                    ProductionTaskOrder.sale_order_no.in_(targets) if targets else False,
+                    ProductionTaskOrder.sale_order_id.in_(relevant_sale_order_ids) if relevant_sale_order_ids else False,
+                ),
+            )
+        )
+        for row in (await db.execute(task_query)).all():
+            mapped_order_no = plan_sid_to_order_no.get(row.sale_order_id)
+            if mapped_order_no is None:
+                continue
+            if mapped_order_no not in target_set:
+                continue
+            if row.sale_order_no is not None and row.sale_order_no != mapped_order_no:
+                continue
+            if not row.material_code:
+                continue
+            key = (mapped_order_no, row.material_code)
+            entry = task_groups.setdefault(key, {})
+            entry["qty"] = (entry.get("qty") or Decimal("0")) + (row.task_qty or Decimal("0"))
+            entry["received_qty"] = (entry.get("received_qty") or Decimal("0")) + (row.actual_qty or Decimal("0"))
+            if row.task_no:
+                existing_tns = entry.get("po_no") or ""
+                tn_set = set(filter(None, existing_tns.split(", ") + [row.task_no]))
+                entry["po_no"] = ", ".join(dict.fromkeys(tn_set))
+            if row.planned_start_date is not None:
+                cur_first_eta = entry.get("first_eta")
+                if cur_first_eta is None or row.planned_start_date < cur_first_eta:
+                    entry["first_eta"] = row.planned_start_date
+            if row.planned_end_date is not None:
+                cur_eta = entry.get("eta")
+                if cur_eta is None or row.planned_end_date > cur_eta:
+                    entry["eta"] = row.planned_end_date
+            if row.actual_end_date is not None:
+                cur_arr = entry.get("actual_arrival_date")
+                if cur_arr is None or row.actual_end_date > cur_arr:
+                    entry["actual_arrival_date"] = row.actual_end_date
+            entry["is_closed"] = 1 if row.is_closed == 1 else entry.get("is_closed", 0)
+            entry["po_count"] = entry.get("po_count", 0) + 1
+
+    # 7. 分配库存（与齐套中心一致）
+    available_map = _allocate_stock(order_priority, plan_materials, po_groups, stock_by_material)
+
+    # 8. 逐目标订单汇总
+    per_order_materials: dict[str, list[tuple[str, dict]]] = {}
+    for (sale_order_no, material_code), plan_info in plan_materials.items():
+        per_order_materials.setdefault(sale_order_no, []).append((material_code, plan_info))
+
+    result: dict[str, dict] = {}
+    for current_order_no in targets:
+        if current_order_no not in per_order_materials:
+            result[current_order_no] = {
+                "kit_rate": 0.0,
+                "risk_level": "red",
+                "total_materials": 0,
+                "shortage_material_count": 0,
+                "latest_eta": None,
+            }
+            continue
+
+        order_mat_list = per_order_materials[current_order_no]
+        total = len(order_mat_list)
+        received_count = 0
+        shortage_count = 0
+        latest_eta: Optional[date] = None
+
+        for material_code, plan_info in order_mat_list:
+            po_info = po_groups.get((current_order_no, material_code))
+            bill_type = plan_info.get("bill_type")
+            material_property = plan_info.get("material_property")
+            po_summary = None
+            if po_info:
+                po_summary = SimpleNamespace(
+                    po_qty=po_info["po_qty"] if po_info["has_po_qty"] else None,
+                    received_qty=po_info["received_qty"] if po_info["has_received_qty"] else None,
+                    eta=po_info["eta"],
+                    actual_arrival_date=po_info["actual_arrival_date"],
+                    inspection_date=po_info["inspection_date"],
+                    is_closed=po_info.get("is_closed", 0),
+                    material_property=material_property,
+                    supplier_name=None,
+                    po_no=None,
+                    po_count=po_info.get("po_count", 0),
+                    first_eta=None,
+                    latest_eta=None,
+                )
+
+            status = _status_for_plan(bill_type, po_summary)
+
+            sub_info: dict = {}
+            task_info: dict = {}
+            if bill_type == 11012:
+                sub_info = sub_groups.get((current_order_no, material_code), {})
+                sub_summary = MaterialSubSummary(
+                    po_no=sub_info.get("po_no"),
+                    po_qty=sub_info.get("qty"),
+                    received_qty=sub_info.get("received_qty"),
+                    po_count=1 if sub_info.get("qty") is not None else 0,
+                    first_eta=sub_info.get("eta"),
+                    latest_eta=sub_info.get("eta"),
+                    is_closed=sub_info.get("is_closed", 0),
+                )
+                status = _status_for_plan(bill_type, None, sub_summary=sub_summary)
+                po_info = {}
+                received_qty_val = sub_info.get("received_qty")
+            elif bill_type == 11011:
+                task_info = task_groups.get((current_order_no, material_code), {})
+                if task_info:
+                    task_summary = MaterialTaskSummary(
+                        po_no=task_info.get("po_no"),
+                        po_qty=task_info.get("qty"),
+                        received_qty=task_info.get("received_qty"),
+                        first_eta=task_info.get("first_eta"),
+                        latest_eta=task_info.get("eta"),
+                        actual_arrival_date=task_info.get("actual_arrival_date"),
+                        po_count=task_info.get("po_count") or 0,
+                        is_closed=task_info.get("is_closed", 0),
+                    )
+                else:
+                    task_summary = None
+                status = _status_for_plan(bill_type, None, sub_summary=None, task_summary=task_summary)
+                po_info = {}
+                received_qty_val = task_info.get("received_qty") if task_info else Decimal("0")
+            else:
+                received_qty_val = po_info.get("received_qty") if po_info else None
+
+            kit_met = _kit_met_for_plan(status, bill_type)
+
+            has_po = po_info and po_info["has_po_qty"] and po_info["po_qty"] > 0
+            has_received = po_info and po_info["has_received_qty"] and po_info["received_qty"] > 0
+            fully_received = has_po and has_received and po_info["received_qty"] >= po_info["po_qty"]
+            partial_received = has_received and (not has_po or po_info["received_qty"] < po_info["po_qty"])
+
+            base_qty = plan_info.get("base_plan_qty") or Decimal("0")
+            received_for_net = received_qty_val if received_qty_val is not None else Decimal("0")
+            net_demand = base_qty - received_for_net
+            if net_demand < 0:
+                net_demand = Decimal("0")
+            available = available_map.get((current_order_no, material_code), Decimal("0"))
+            stock_met = net_demand > 0 and available >= net_demand
+
+            stock_qty_for_mat = in_stock_qty_by_material.get(material_code) or Decimal("0")
+            in_stock = stock_qty_for_mat >= base_qty and not po_info
+
+            material_prop = material_property if material_property is not None else BILL_TYPE_TO_MATERIAL_PROPERTY.get(bill_type)
+            kit_met_now = (
+                (material_prop not in (2, 7) and (kit_met or fully_received or stock_met)) or in_stock
+            )
+            if kit_met_now:
+                received_count += 1
+            elif material_prop not in (2, 7):
+                # 参与齐套统计且未齐套 → 计入缺料；ET A 取这些物料中最晚
+                shortage_count += 1
+                eta_to_check = (po_info or {}).get("eta") or sub_info.get("eta") or task_info.get("eta")
+                if eta_to_check and (latest_eta is None or eta_to_check > latest_eta):
+                    latest_eta = eta_to_check
+
+        kit_rate = round(received_count / total, 4) if total else 0
+        result[current_order_no] = {
+            "kit_rate": kit_rate,
+            "risk_level": _kit_risk_level(kit_rate),
+            "total_materials": total,
+            "shortage_material_count": shortage_count,
+            "latest_eta": latest_eta,
+        }
+
+    return result

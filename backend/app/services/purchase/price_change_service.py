@@ -449,14 +449,20 @@ class PriceChangeService:
         await self._add_approval_log(change_id, record.get("approval_level"), "recall", applicant or record.get("applicant", ""), "申请人撤回")
         return True
 
-    async def delete(self, change_id: int):
+    async def delete(self, change_id: int, *, can_archive_delete: bool = False):
         record = await self.get_price_change(change_id)
-        if not record or record.get("approval_status") in ("pending", "approved"):
-            return False
+        if not record:
+            return {"success": False, "message": "调价单不存在"}
+        status = record.get("approval_status")
+        if status == "pending":
+            return {"success": False, "message": "审批中的调价单不可删除，请先撤回"}
+        if status == "approved" and not can_archive_delete:
+            return {"success": False, "message": "已归档的调价单需「调价单归档删除」权限（当前仅管理员可删）"}
         await self.db.execute(text("DELETE FROM purchase_price_change_item WHERE change_id = :cid"), {"cid": change_id})
         await self.db.execute(text("DELETE FROM purchase_price_change_approval_log WHERE change_id = :cid"), {"cid": change_id})
+        await self.db.execute(text("DELETE FROM purchase_price_change_ai_analysis WHERE change_id = :cid"), {"cid": change_id})
         await self.db.execute(text("DELETE FROM purchase_price_change WHERE id = :cid"), {"cid": change_id})
-        return True
+        return {"success": True, "message": "已删除"}
 
     async def pending_approvals(self, *, approver_username: str = "", approver_role: str = ""):
         """待审批列表。传入 approver_username/role 时只返回当前用户有权审批的（admin 看全部）。"""
@@ -516,12 +522,29 @@ class PriceChangeService:
             items.append(d)
         return items
 
-    async def rerun_ai_analysis(self, change_id: int):
+    async def _latest_ai_analysis(self, change_id: int) -> Optional[dict]:
+        """查询最新一条 AI 分析记录（用于判断是否已生成，避免重复调用浪费 token）。"""
+        row = await self.db.execute(
+            text("SELECT id, ai_status FROM purchase_price_change_ai_analysis WHERE change_id = :cid ORDER BY id DESC LIMIT 1"),
+            {"cid": change_id},
+        )
+        r = row.fetchone()
+        if not r:
+            return None
+        return {"id": r[0], "ai_status": r[1]}
+
+    async def rerun_ai_analysis(self, change_id: int) -> tuple[Optional[dict], bool]:
+        """重新生成 AI 分析。返回 (record, ran)。
+        ran=False 表示已有完成的分析（ai_status=done），跳过重复生成以节省 token。
+        """
         record = await self.get_price_change(change_id)
         if not record:
-            return None
+            return None, False
+        latest = await self._latest_ai_analysis(change_id)
+        if latest and latest.get("ai_status") == "done":
+            return record, False
         await self._run_ai_analysis(change_id)
-        return await self.get_price_change(change_id)
+        return await self.get_price_change(change_id), True
 
     async def get_approval_logs(self, change_id: int):
         rows = await self.db.execute(text("SELECT * FROM purchase_price_change_approval_log WHERE change_id=:cid ORDER BY operated_at"), {"cid": change_id})

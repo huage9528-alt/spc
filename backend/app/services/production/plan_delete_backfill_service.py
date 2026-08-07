@@ -433,6 +433,7 @@ class PlanDeleteAndBackfillService:
                         order_no=new_record.order_no,
                         line_no=new_record.line_no,
                         total_hours=total_hours,
+                        target_start_date=new_record.plan_date or new_record.start_date or new_record.end_date,
                         target_end_date=new_record.end_date,
                         # 固定用车间最大上限 12h, 防止跨订单累加超载
                         daily_capacity=12.0,

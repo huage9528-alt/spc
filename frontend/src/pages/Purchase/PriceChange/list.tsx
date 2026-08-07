@@ -17,6 +17,8 @@ const STATUS_MAP: Record<string, { text: string; color: string }> = {
 export default function PriceChangeList() {
   const navigate = useNavigate()
   const actionRef = useRef<ActionType>()
+  const isAdmin = useAuthStore.getState().isAdmin()
+  const canArchiveDelete = isAdmin || useAuthStore.getState().hasPermission('purchase.price_change.archive_delete', 'delete')
 
   const columns: ProColumns<any>[] = [
     { title: '调价单号', dataIndex: 'change_no', width: 180, fixed: 'left',
@@ -49,7 +51,7 @@ export default function PriceChangeList() {
       render: (_, r) => (
         <Space>
           <Button size="small" type="link" icon={<EyeOutlined />} onClick={() => navigate(`/purchase/price-change/${r.id}`)}>查看</Button>
-          {(r.approval_status === 'draft' || r.approval_status === 'rejected' || r.approval_status === 'recalled') && (
+          {(r.approval_status === 'draft' || r.approval_status === 'rejected' || r.approval_status === 'recalled' || (r.approval_status === 'approved' && canArchiveDelete)) && (
             <Popconfirm title="确认删除？" onConfirm={async () => { try { await purchaseApi.delete(r.id); message.success('已删除'); actionRef.current?.reload() } catch (e: any) { message.error(e.message || '删除失败') } }}>
               <Button size="small" type="link" danger icon={<DeleteOutlined />} />
             </Popconfirm>

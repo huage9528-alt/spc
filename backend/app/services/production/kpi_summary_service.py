@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.production.schedule_plan import ProductionSchedulePlan
+from app.services.material.kit_analysis_service import get_kit_summary_by_orders
 
 
 # 进程内缓存（不依赖 Redis，TTL 30 秒）
@@ -111,9 +112,7 @@ async def get_kpi_summary(db: AsyncSession) -> dict[str, Any]:
     frozen_locked_count = (await db.execute(frozen_locked_stmt)).scalar() or 0
 
     # === 🟢 配料栏（plan_date 归属 4-10 天） ===
-    # v2 阶段 3：齐套数据暂用占位（kit_ready_rate=1.0 假设全部齐套），
-    # 等 kit_analysis_service 完善后接入真实数据。
-    # 待备料单数（配料区计划数）用真实查询。
+    # v2 阶段 3：接入 kit_analysis_service 真实齐套数据。
     material_start = today + timedelta(days=4)
     material_end = today + timedelta(days=10)
     material_pending_stmt = select(func.count()).select_from(ProductionSchedulePlan).where(
@@ -121,6 +120,33 @@ async def get_kpi_summary(db: AsyncSession) -> dict[str, Any]:
         ProductionSchedulePlan.plan_date.between(material_start, material_end),
     )
     material_pending_count = (await db.execute(material_pending_stmt)).scalar() or 0
+
+    material_order_stmt = (
+        select(ProductionSchedulePlan.order_no)
+        .where(
+            ProductionSchedulePlan.is_active.is_(True),
+            ProductionSchedulePlan.plan_date.between(material_start, material_end),
+            ProductionSchedulePlan.order_no.is_not(None),
+        )
+        .distinct()
+    )
+    material_order_nos = [
+        row.order_no
+        for row in (await db.execute(material_order_stmt)).all()
+        if row.order_no
+    ]
+    kit_summary_map = await get_kit_summary_by_orders(db, material_order_nos)
+    kit_summaries = [v for v in kit_summary_map.values() if v]
+    kit_ready_rate = (
+        round(sum(s.get("kit_rate") or 0 for s in kit_summaries) / len(kit_summaries), 4)
+        if kit_summaries
+        else 1.0
+    )
+    shortage_count = sum(s.get("shortage_material_count") or 0 for s in kit_summaries)
+    eta_delay_count = sum(
+        1 for s in kit_summaries
+        if (s.get("latest_eta") or date.max) < today
+    )
 
     result = {
         "today": {
@@ -134,10 +160,10 @@ async def get_kpi_summary(db: AsyncSession) -> dict[str, Any]:
             "frozen_break_count": 0,
         },
         "material": {
-            "kit_ready_rate": 1.0,  # 阶段 3 占位：假设全部齐套，等 kit_analysis 接入
-            "shortage_count": 0,    # 阶段 3 占位
-            "eta_delay_count": 0,   # 阶段 3 占位
-            "pending_kit_count": material_pending_count,  # 真实：待备料单数（配料区计划数）
+            "kit_ready_rate": kit_ready_rate,
+            "shortage_count": shortage_count,
+            "eta_delay_count": eta_delay_count,
+            "pending_kit_count": material_pending_count,
         },
         "pending": {
             "todo_count": todo_count,
