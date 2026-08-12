@@ -8,6 +8,7 @@ FULL_ACTIONS = ["create", "read", "update", "delete"]
 ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
     "admin": {
         "production.schedule_plans": FULL_ACTIONS,
+        "production.daily_report": FULL_ACTIONS,
         "exceptions.product_samples": FULL_ACTIONS,
         "rules.order_standards": FULL_ACTIONS,
         "rules.work_instructions": FULL_ACTIONS,

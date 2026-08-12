@@ -35,6 +35,12 @@ from app.models.production.schedule_plan import ProductionSchedulePlan
 from app.models.production.production_task_order import ProductionTaskOrder
 from app.models.production.front_process_record import FrontProcessRecord
 from app.models.production.production_daily_report import ProductionDailyReport  # noqa: F401
+from app.models.production.workshop_daily_report import (  # noqa: F401
+    WorkshopDailyReport,
+    WorkshopDailyReportLeave,
+    WorkshopDailyReportWork,
+    WorkshopDailyReportTask,
+)
 from app.models.exception.risk_issue import RiskIssue
 from app.models.exception.issue_log import IssueLog
 from app.models.exception.change_log import ChangeLog
@@ -349,6 +355,28 @@ class DatabaseInitializer:
             },
             "production_daily_report": {
                 "oa_detail_id": "INTEGER",
+            },
+            "workshop_daily_report": {
+                "report_type": "VARCHAR(32) DEFAULT '计件'",
+                "group_name": "VARCHAR(128)",
+                "temp_personnel": "VARCHAR(255)",
+                "temp_people_count": "INTEGER",
+                "attendance_actual": "INTEGER",
+            },
+            "workshop_daily_report_task": {
+                "public_material": "VARCHAR(255)",
+                "color": "VARCHAR(64)",
+                "color_temp": "VARCHAR(64)",
+                "product_unit_price": "NUMERIC(12,2)",
+                "unit_price": "NUMERIC(12,2)",
+                "completed_qty": "NUMERIC(15,2)",
+                "amount": "NUMERIC(12,2)",
+                "exception_amount": "NUMERIC(12,2)",
+                "allocated_unit_price": "NUMERIC(12,2)",
+                "allocated_amount": "NUMERIC(12,2)",
+            },
+            "workshop_daily_report_work": {
+                "daily_attendance": "VARCHAR(255)",
             },
             "business_document": {
                 "is_deleted": "INTEGER NOT NULL DEFAULT 0",
@@ -853,6 +881,7 @@ class DatabaseInitializer:
                             "production.packaging": ["create", "read", "update", "delete", "import"],
                             "production.exceptions": ["create", "read", "update", "delete", "import"],
                             "production.schedule_plans": ["create", "read", "update", "delete"],
+                            "production.daily_report": ["create", "read", "update", "delete"],
                             "exceptions.pool": ["create", "read", "update", "delete", "import"],
                             "exceptions.issue_log": ["create", "read", "update", "delete", "import"],
                             "exceptions.change_log": ["create", "read", "update", "delete", "import"],

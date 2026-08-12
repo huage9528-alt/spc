@@ -155,6 +155,20 @@ export const productionApi = {
   createUpphFormulaConfig: (data: Record<string, any>) => api.post('/production/upph-formula-configs', data),
   updateUpphFormulaConfig: (id: number, data: Record<string, any>) => api.put(`/production/upph-formula-configs/${id}`, data),
   deleteUpphFormulaConfig: (id: number) => api.delete(`/production/upph-formula-configs/${id}`),
-  // 生产日报表（ERP/OA 同步，只读）
+  // 生产日报表（ERP/OA 同步只读 + 手工录入）
   listDailyReports: (params: Record<string, any>) => api.get('/production/daily-reports', { params }),
+  createDailyReport: (data: Record<string, any>) => api.post('/production/daily-reports', data),
+  createDailyReportsBatch: (data: Record<string, any>[]) => api.post('/production/daily-reports/batch', data),
+  updateDailyReport: (id: number, data: Record<string, any>) => api.put(`/production/daily-reports/${id}`, data),
+  deleteDailyReport: (id: number) => api.delete(`/production/daily-reports/${id}`),
+  // 车间日报表单据（泛微OA样式）
+  listWorkshopDailyReports: (params: Record<string, any>) => api.get('/production/workshop-daily-reports', { params }),
+  getWorkshopDailyReport: (id: number) => api.get(`/production/workshop-daily-reports/${id}`),
+  createWorkshopDailyReport: (data: Record<string, any>) => api.post('/production/workshop-daily-reports', data),
+  updateWorkshopDailyReport: (id: number, data: Record<string, any>) => api.put(`/production/workshop-daily-reports/${id}`, data),
+  deleteWorkshopDailyReport: (id: number) => api.delete(`/production/workshop-daily-reports/${id}`),
+  workshopDailyReportOrgOptions: () => api.get('/production/workshop-daily-reports/org-options'),
+  workshopDailyReportPeopleOptions: (orgId: number) => api.get('/production/workshop-daily-reports/people-options', { params: { org_id: orgId } }),
+  workshopDailyReportAttendanceOptions: (orgId: number, reportDate?: string) => api.get('/production/workshop-daily-reports/attendance-options', { params: { org_id: orgId, report_date: reportDate } }),
+  workshopDailyReportLeaveOptions: (orgId: number, reportDate: string) => api.get('/production/workshop-daily-reports/leave-options', { params: { org_id: orgId, report_date: reportDate } }),
 }

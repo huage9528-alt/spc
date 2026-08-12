@@ -193,6 +193,38 @@ class FrontProcessRecordUpdate(BaseModel):
 
 # ============ 生产日报表（ERP/OA 同步，只读） ============
 
+class ProductionDailyReportCreate(BaseModel):
+    """生产日报表手工录入字段（data_source 固定为 manual）"""
+    report_date: date
+    workshop: str = Field(..., min_length=1, max_length=128, description="车间")
+    sale_order_no: Optional[str] = Field(None, max_length=64)
+    production_order_no: Optional[str] = Field(None, max_length=64)
+    specification: Optional[str] = Field(None, max_length=128)
+    bom_no: Optional[str] = Field(None, max_length=64)
+    material_code: Optional[str] = Field(None, max_length=64)
+    process: Optional[str] = Field(None, max_length=64)
+    color: Optional[str] = Field(None, max_length=64)
+    completed_qty: Optional[float] = Field(None, ge=0)
+    work_hours: Optional[float] = Field(None, ge=0)
+    total_wages: Optional[float] = Field(None, ge=0)
+
+
+class ProductionDailyReportUpdate(BaseModel):
+    """生产日报表手工录入更新（仅 manual 行允许）"""
+    report_date: Optional[date] = None
+    workshop: Optional[str] = Field(None, min_length=1, max_length=128)
+    sale_order_no: Optional[str] = Field(None, max_length=64)
+    production_order_no: Optional[str] = Field(None, max_length=64)
+    specification: Optional[str] = Field(None, max_length=128)
+    bom_no: Optional[str] = Field(None, max_length=64)
+    material_code: Optional[str] = Field(None, max_length=64)
+    process: Optional[str] = Field(None, max_length=64)
+    color: Optional[str] = Field(None, max_length=64)
+    completed_qty: Optional[float] = Field(None, ge=0)
+    work_hours: Optional[float] = Field(None, ge=0)
+    total_wages: Optional[float] = Field(None, ge=0)
+
+
 class ProductionDailyReportOut(BaseModel):
     """生产日报表列表行"""
     id: Optional[int] = None
@@ -212,6 +244,195 @@ class ProductionDailyReportOut(BaseModel):
     total_wages: Optional[float] = None
     data_source: Optional[str] = None
     erp_updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ============ 车间日报表单据（泛微OA样式，主表+3子表） ============
+
+class WorkshopDailyReportLeaveIn(BaseModel):
+    """请假人员明细（录入）"""
+    leave_date: Optional[date] = None
+    employee_name: Optional[str] = Field(None, max_length=64)
+    emp_code: Optional[str] = Field(None, max_length=32)
+    leave_hours: Optional[float] = Field(None, ge=0)
+
+
+class WorkshopDailyReportWorkIn(BaseModel):
+    """出勤人员·工时明细（录入，实际工时=正班+加班 自动算）"""
+    work_date: Optional[date] = None
+    employee_name: Optional[str] = Field(None, max_length=64)
+    emp_code: Optional[str] = Field(None, max_length=32)
+    total_hours: Optional[float] = Field(None, ge=0)
+    leave_hours: Optional[float] = Field(None, ge=0)
+    normal_hours: Optional[float] = Field(None, ge=0)
+    overtime_hours: Optional[float] = Field(None, ge=0)
+    hourly_wage: Optional[float] = Field(None, ge=0)
+    amount: Optional[float] = Field(None, ge=0)
+    modulus: Optional[int] = Field(None, ge=1)
+    daily_attendance: Optional[str] = Field(None, max_length=255)
+
+
+class WorkshopDailyReportTaskIn(BaseModel):
+    """选择K3任务单明细（录入）"""
+    sale_order_no: Optional[str] = Field(None, max_length=64)
+    production_order_no: Optional[str] = Field(None, max_length=64)
+    public_material: Optional[str] = Field(None, max_length=255)
+    specification: Optional[str] = Field(None, max_length=128)
+    batch_qty: Optional[float] = Field(None, ge=0)
+    bom_no: Optional[str] = Field(None, max_length=64)
+    material_code: Optional[str] = Field(None, max_length=64)
+    process: Optional[str] = Field(None, max_length=64)
+    process_remark: Optional[str] = Field(None, max_length=255)
+    color: Optional[str] = Field(None, max_length=64)
+    color_temp: Optional[str] = Field(None, max_length=64)
+    product_unit_price: Optional[float] = Field(None, ge=0)
+    unit_price: Optional[float] = Field(None, ge=0)
+    completed_qty: Optional[float] = Field(None, ge=0)
+    amount: Optional[float] = Field(None, ge=0)
+    exception_amount: Optional[float] = Field(None, ge=0)
+    allocated_unit_price: Optional[float] = Field(None, ge=0)
+    allocated_amount: Optional[float] = Field(None, ge=0)
+
+
+class WorkshopDailyReportCreate(BaseModel):
+    """车间日报表 新建"""
+    report_date: date
+    report_type: Optional[str] = Field(None, max_length=32)
+    department: Optional[str] = Field(None, max_length=128)
+    group_name: Optional[str] = Field(None, max_length=128)
+    workshop: Optional[str] = Field(None, max_length=128)
+    plan_qty: Optional[float] = Field(None, ge=0)
+    work_hours: Optional[float] = Field(None, ge=0)
+    leader: Optional[str] = Field(None, max_length=64)
+    repairer: Optional[str] = Field(None, max_length=64)
+    material_handler: Optional[str] = Field(None, max_length=64)
+    completed_qty: Optional[float] = Field(None, ge=0)
+    temp_personnel: Optional[str] = Field(None, max_length=255)
+    temp_people_count: Optional[int] = Field(None, ge=0)
+    temp_count: Optional[int] = Field(None, ge=0)
+    temp_amount: Optional[float] = Field(None, ge=0)
+    remark: Optional[str] = Field(None, max_length=2000)
+    leave_items: Optional[List[WorkshopDailyReportLeaveIn]] = Field(default_factory=list)
+    work_items: Optional[List[WorkshopDailyReportWorkIn]] = Field(default_factory=list)
+    task_items: Optional[List[WorkshopDailyReportTaskIn]] = Field(default_factory=list)
+
+
+class WorkshopDailyReportUpdate(BaseModel):
+    """车间日报表 更新"""
+    report_date: Optional[date] = None
+    report_type: Optional[str] = Field(None, max_length=32)
+    department: Optional[str] = Field(None, max_length=128)
+    group_name: Optional[str] = Field(None, max_length=128)
+    workshop: Optional[str] = Field(None, max_length=128)
+    plan_qty: Optional[float] = Field(None, ge=0)
+    work_hours: Optional[float] = Field(None, ge=0)
+    leader: Optional[str] = Field(None, max_length=64)
+    repairer: Optional[str] = Field(None, max_length=64)
+    material_handler: Optional[str] = Field(None, max_length=64)
+    completed_qty: Optional[float] = Field(None, ge=0)
+    temp_personnel: Optional[str] = Field(None, max_length=255)
+    temp_people_count: Optional[int] = Field(None, ge=0)
+    temp_count: Optional[int] = Field(None, ge=0)
+    temp_amount: Optional[float] = Field(None, ge=0)
+    remark: Optional[str] = Field(None, max_length=2000)
+    leave_items: Optional[List[WorkshopDailyReportLeaveIn]] = None
+    work_items: Optional[List[WorkshopDailyReportWorkIn]] = None
+    task_items: Optional[List[WorkshopDailyReportTaskIn]] = None
+
+
+class WorkshopDailyReportLeaveOut(BaseModel):
+    id: Optional[int] = None
+    report_id: Optional[int] = None
+    leave_date: Optional[date] = None
+    employee_name: Optional[str] = None
+    emp_code: Optional[str] = None
+    leave_hours: Optional[float] = None
+
+    model_config = {"from_attributes": True}
+
+
+class WorkshopDailyReportWorkOut(BaseModel):
+    id: Optional[int] = None
+    report_id: Optional[int] = None
+    work_date: Optional[date] = None
+    employee_name: Optional[str] = None
+    emp_code: Optional[str] = None
+    total_hours: Optional[float] = None
+    leave_hours: Optional[float] = None
+    normal_hours: Optional[float] = None
+    overtime_hours: Optional[float] = None
+    actual_hours: Optional[float] = None
+    hourly_wage: Optional[float] = None
+    amount: Optional[float] = None
+    modulus: Optional[int] = None
+    daily_attendance: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class WorkshopDailyReportTaskOut(BaseModel):
+    id: Optional[int] = None
+    report_id: Optional[int] = None
+    seq: Optional[int] = None
+    sale_order_no: Optional[str] = None
+    production_order_no: Optional[str] = None
+    public_material: Optional[str] = None
+    specification: Optional[str] = None
+    batch_qty: Optional[float] = None
+    bom_no: Optional[str] = None
+    material_code: Optional[str] = None
+    process: Optional[str] = None
+    process_remark: Optional[str] = None
+    color: Optional[str] = None
+    color_temp: Optional[str] = None
+    product_unit_price: Optional[float] = None
+    unit_price: Optional[float] = None
+    completed_qty: Optional[float] = None
+    amount: Optional[float] = None
+    exception_amount: Optional[float] = None
+    allocated_unit_price: Optional[float] = None
+    allocated_amount: Optional[float] = None
+
+    model_config = {"from_attributes": True}
+
+
+class WorkshopDailyReportOut(BaseModel):
+    """车间日报表 完整单据（含子表明细）"""
+    id: Optional[int] = None
+    report_no: Optional[str] = None
+    title: Optional[str] = None
+    report_type: Optional[str] = None
+    department: Optional[str] = None
+    group_name: Optional[str] = None
+    workshop: Optional[str] = None
+    report_date: Optional[date] = None
+    plan_qty: Optional[float] = None
+    work_hours: Optional[float] = None
+    leader: Optional[str] = None
+    repairer: Optional[str] = None
+    material_handler: Optional[str] = None
+    completed_qty: Optional[float] = None
+    temp_personnel: Optional[str] = None
+    temp_people_count: Optional[int] = None
+    temp_count: Optional[int] = None
+    temp_amount: Optional[float] = None
+    remark: Optional[str] = None
+    reporter: Optional[str] = None
+    attendance_count: Optional[int] = None
+    attendance_actual: Optional[int] = None
+    leave_count: Optional[int] = None
+    leave_hours_total: Optional[float] = None
+    work_wages_total: Optional[float] = None
+    grand_total_wages: Optional[float] = None
+    modulus_total: Optional[int] = None
+    data_source: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    leave_items: Optional[List[WorkshopDailyReportLeaveOut]] = Field(default_factory=list)
+    work_items: Optional[List[WorkshopDailyReportWorkOut]] = Field(default_factory=list)
+    task_items: Optional[List[WorkshopDailyReportTaskOut]] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 

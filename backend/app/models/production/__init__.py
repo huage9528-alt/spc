@@ -11,3 +11,9 @@ from app.models.production.front_process_record import FrontProcessRecord  # noq
 from app.models.production.production_daily_report import ProductionDailyReport  # noqa: F401
 from app.models.production.labor_price_audit import ProductionLaborPriceAudit  # noqa: F401
 from app.models.production.base_condition import ProductionBaseCondition  # noqa: F401
+from app.models.production.workshop_daily_report import (  # noqa: F401
+    WorkshopDailyReport,
+    WorkshopDailyReportLeave,
+    WorkshopDailyReportWork,
+    WorkshopDailyReportTask,
+)
