@@ -916,6 +916,25 @@ async def list_material_candidates(
     return int(total), items
 
 
+async def list_counted_warehouses(db: AsyncSession) -> List[Dict]:
+    """已盘点物料台账中涉及的仓库列表（去重），供前端仓库筛选下拉使用。
+
+    只统计 actual_qty 非空 且盘点单未取消 的盘点行涉及的仓库，
+    与 list_counted_materials_ledger 的基础过滤口径保持一致。
+    """
+    stmt = (
+        select(StockCheckItem.wh_id, StockCheckItem.wh_name)
+        .join(StockCheck, StockCheck.id == StockCheckItem.check_id)
+        .where(StockCheckItem.actual_qty.is_not(None))
+        .where(StockCheck.status != 'cancelled')
+        .where(StockCheckItem.wh_id.is_not(None))
+        .group_by(StockCheckItem.wh_id, StockCheckItem.wh_name)
+        .order_by(StockCheckItem.wh_name)
+    )
+    rows = (await db.execute(stmt)).all()
+    return [{"wh_id": r[0], "wh_name": r[1] or ''} for r in rows]
+
+
 async def list_counted_materials_ledger(
     db: AsyncSession,
     page: int = 1,

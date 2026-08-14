@@ -558,8 +558,6 @@ export default function MainLayout() {
   const [notifLoading, setNotifLoading] = useState(false)
   const [unreadTotal, setUnreadTotal] = useState(0)
   const [unreadByType, setUnreadByType] = useState<Record<string, number>>({})
-  const [pwdModalOpen, setPwdModalOpen] = useState(false)
-  const [pwdForm] = Form.useForm()
   const [forcePwdModalOpen, setForcePwdModalOpen] = useState(false)
   const [forcePwdForm] = Form.useForm()
   const [forcePwdDismissable, setForcePwdDismissable] = useState(false)
@@ -794,22 +792,6 @@ export default function MainLayout() {
     fetchUnreadCount()
   }
 
-  const handleChangePassword = async () => {
-    try {
-      const values = await pwdForm.validateFields()
-      await authApi.changePassword(values.old_password, values.new_password)
-      message.success('密码修改成功')
-      setPwdModalOpen(false)
-      pwdForm.resetFields()
-      const user = useAuthStore.getState().currentUser
-      if (user && 'is_default_password' in user) {
-        useAuthStore.getState().setAuth(useAuthStore.getState().originalToken!, { ...user, is_default_password: false } as any)
-      }
-    } catch (e: any) {
-      // 错误已由全局拦截器提示
-    }
-  }
-
   const handleForceChangePassword = async () => {
     try {
       const values = await forcePwdForm.validateFields()
@@ -947,7 +929,13 @@ export default function MainLayout() {
                         <List.Item
                           key={item.id}
                           style={{ cursor: 'pointer', padding: '10px 4px', opacity: item.is_read ? 0.55 : 1 }}
-                          onClick={() => { if (!item.is_read) handleMarkRead(item.id) }}
+                          onClick={() => {
+                            if (!item.is_read) handleMarkRead(item.id)
+                            if (item.type === 'feedback' && item.ref_id) {
+                              setBellOpen(false)
+                              navigate(`/basicdata/feedback?id=${item.ref_id}`)
+                            }
+                          }}
                         >
                           <List.Item.Meta
                             title={
@@ -958,7 +946,19 @@ export default function MainLayout() {
                                 {item.priority === 'important' && <Tag color="gold" style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', lineHeight: '18px' }}>重要</Tag>}
                               </Space>
                             }
-                            description={<Typography.Text type="secondary" style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))' }}>{item.created_at}</Typography.Text>}
+                            description={
+                              <>
+                                {item.content && (
+                                  <Typography.Paragraph
+                                    ellipsis={{ rows: 2 }}
+                                    style={{ margin: 0, fontSize: 'calc(0.8125rem * var(--font-size-scale))', color: 'rgba(0,0,0,0.65)' }}
+                                  >
+                                    {item.content}
+                                  </Typography.Paragraph>
+                                )}
+                                <Typography.Text type="secondary" style={{ fontSize: 'calc(0.8125rem * var(--font-size-scale))' }}>{item.created_at}</Typography.Text>
+                              </>
+                            }
                           />
                         </List.Item>
                       )}
@@ -987,13 +987,13 @@ export default function MainLayout() {
               <Dropdown
                 menu={{
                   items: [
-                    { key: 'change-pwd', icon: <KeyOutlined />, label: '修改密码' },
+                    { key: 'profile', icon: <IdcardOutlined />, label: '个人中心' },
                     { type: 'divider' as const },
                     { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', danger: true },
                   ],
                   onClick: ({ key }) => {
+                    if (key === 'profile') { navigate('/profile') }
                     if (key === 'logout') { logout(); navigate('/login') }
-                    if (key === 'change-pwd') { pwdForm.resetFields(); setPwdModalOpen(true) }
                   },
                 }}
               >
@@ -1016,40 +1016,6 @@ export default function MainLayout() {
             )}
           </Space>
         </div>
-
-        <Modal
-          title="修改密码"
-          open={pwdModalOpen}
-          onOk={handleChangePassword}
-          onCancel={() => setPwdModalOpen(false)}
-          width={420}
-          okText="确认修改"
-        >
-          <Form form={pwdForm} layout="vertical" style={{ marginTop: 16 }}>
-            <Form.Item name="old_password" label="原密码" rules={[{ required: true, message: '请输入原密码' }]}>
-              <Input.Password placeholder="输入当前密码" />
-            </Form.Item>
-            <Form.Item name="new_password" label="新密码" rules={[{ required: true, message: '请输入新密码' }, { min: 6, message: '密码至少6位' }]}>
-              <Input.Password placeholder="至少6位" />
-            </Form.Item>
-            <Form.Item
-              name="confirm_password"
-              label="确认新密码"
-              dependencies={['new_password']}
-              rules={[
-                { required: true, message: '请确认新密码' },
-                ({ getFieldValue }) => ({
-                  validator(_, value) {
-                    if (!value || getFieldValue('new_password') === value) return Promise.resolve()
-                    return Promise.reject(new Error('两次密码不一致'))
-                  },
-                }),
-              ]}
-            >
-              <Input.Password placeholder="再次输入新密码" />
-            </Form.Item>
-          </Form>
-        </Modal>
 
         <Modal
           title="安全提醒 — 请修改默认密码"

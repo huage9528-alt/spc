@@ -38,6 +38,7 @@ from app.services.material.stock_check_service import (
     create_stock_check_from_materials,
     list_material_candidates,
     list_counted_materials_ledger,
+    list_counted_warehouses,
     update_stock_check_item,
     batch_update_items,
     complete_stock_check,
@@ -182,6 +183,16 @@ async def list_material_candidates_view(
         page_size=page_size,
         items=[MaterialCandidateOut(**it) for it in items],
     ))
+
+
+@router.get("/stock-check/counted-warehouses", response_model=ResponseModel[List[dict]])
+async def list_counted_warehouses_view(
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """已盘点物料台账涉及的仓库列表（去重），用于仓库列下拉筛选。"""
+    items = await list_counted_warehouses(db)
+    return ResponseModel(data=items)
 
 
 @router.get("/stock-check/counted-ledger", response_model=ResponseModel[PageResult[StockCheckCountedItemOut]])

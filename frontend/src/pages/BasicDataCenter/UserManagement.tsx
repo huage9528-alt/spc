@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Table, Tag, Button, Modal, Form, Input, Select, Space, message, Popconfirm, Switch, Row, Col } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, KeyOutlined, ReloadOutlined, ExportOutlined, SyncOutlined, UserAddOutlined, SearchOutlined, TeamOutlined, LinkOutlined } from '@ant-design/icons'
 import api, { userApi, wecomApi, type WecomUser } from '../../services/api'
@@ -86,6 +87,7 @@ const USER_EXPORT_COLUMNS: ExportColumnOption[] = [
 ]
 
 export default function UserManagement() {
+  const navigate = useNavigate()
   const { exporting, exportData } = useExport()
   const isAdmin = useAuthStore(s => s.isAdmin())
   const hasPermission = useAuthStore(s => s.hasPermission)
@@ -743,7 +745,14 @@ export default function UserManagement() {
       title: '角色', dataIndex: 'role_code', key: 'role_code', width: 100, sorter: true,
       filters: roles.map(r => ({ text: r.role_name, value: r.role_code })),
       render: (code: string, record: UserItem) => (
-        <Tag color={roleColorMap[code] || 'default'}>{record.role_name}</Tag>
+        <Tag
+          color={roleColorMap[code] || 'default'}
+          title="点击查看该角色"
+          style={{ cursor: 'pointer' }}
+          onClick={() => navigate(`/roles?role_code=${encodeURIComponent(code)}`)}
+        >
+          {record.role_name}
+        </Tag>
       ),
     },
     {

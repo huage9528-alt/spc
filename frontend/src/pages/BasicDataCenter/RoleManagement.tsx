@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Table, Tag, Button, Modal, Form, Input, Space, message, Popconfirm, Row, Col, Checkbox, Tree, Radio, Divider, Alert } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, SafetyOutlined, ThunderboltOutlined, SearchOutlined } from '@ant-design/icons'
 import { userApi } from '../../services/api'
@@ -206,12 +207,21 @@ interface RoleItem {
 function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<string, string[]>; onChange: (v: Record<string, string[]>) => void; permissionTree: PermTreeNode[] }) {
   const currentAllPermKeys = useMemo(() => flattenAll(permissionTree), [permissionTree])
   const currentAllLeafKeys = useMemo(() => flattenLeaves(permissionTree), [permissionTree])
+  // 结构判断：该父节点下挂的是「专属动作」子节点（如 users→重置密码、问题反馈→处理）→ 属于自带动作父节点，
+  // 勾选应写自身 key；与运行时值无关，避免首次勾选被误判为纯分组父节点而写入子节点 key
+  const isOwnActionParent = (node: PermTreeNode): boolean => {
+    const kids = node.children
+    if (!kids || kids.length === 0) return false
+    if ((value[node.key] || []).length > 0) return true
+    return kids.every(c => (c.actions || []).some(a => !PERMISSION_ACTION_KEYS.includes(a)))
+  }
+
   // 父节点且自身持有动作（如 users、basicdata.feedback：既有自身动作又有子权限）→ 可独立勾选
   const ownParentKeys = useMemo(() => {
     const keys = new Set<string>()
     const walk = (nodes: PermTreeNode[]) => {
       for (const n of nodes) {
-        if (n.children && n.children.length > 0 && (value[n.key] || []).length > 0) keys.add(n.key)
+        if (n.children && n.children.length > 0 && isOwnActionParent(n)) keys.add(n.key)
         if (n.children) walk(n.children)
       }
     }
@@ -230,10 +240,11 @@ function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<s
 
   const toggleExpand = (key: string) => setExpanded(prev => ({ ...prev, [key]: !prev[key] }))
 
-  const getActions = (key: string, children?: PermTreeNode[]): string[] => {
+  const getActions = (key: string, children?: PermTreeNode[], node?: PermTreeNode): string[] => {
     if (!children || children.length === 0) return value[key] || []
     // 父节点自带动作：显示/编辑自身动作（不再由子节点派生）
     if ((value[key] || []).length > 0) return value[key] || []
+    if (node && isOwnActionParent(node)) return value[key] || []
     return PERMISSION_ACTIONS.filter(a => children.every(c => (value[c.key] || []).includes(a.key))).map(a => a.key)
   }
   const getIndeterminate = (action: string, children?: PermTreeNode[]): boolean => {
@@ -259,7 +270,7 @@ function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<s
   const toggleRow = (key: string, checked: boolean, children?: PermTreeNode[], node?: PermTreeNode) => {
     const next = { ...value }
     const allActs = PERMISSION_ACTIONS.map(a => a.key)
-    const isOwnParent = Boolean(children && children.length > 0 && (value[key] || []).length > 0)
+    const isOwnParent = Boolean(node && isOwnActionParent(node))
     if (children && children.length > 0 && !isOwnParent) {
       // 纯分组父节点：全选/全不选所有子节点
       children.forEach(c => { next[c.key] = checked ? [...allActs] : [] })
@@ -286,8 +297,8 @@ function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<s
   const renderRow = (node: PermTreeNode, depth: number) => {
     const hasChildren = node.children && node.children.length > 0
     const isExpanded = expanded[node.key]
-    const isOwnParent = Boolean(hasChildren && (value[node.key] || []).length > 0)
-    const actions = getActions(node.key, node.children)
+    const isOwnParent = Boolean(node && isOwnActionParent(node))
+    const actions = getActions(node.key, node.children, node)
     // 页面专属子权限（如 重置密码、处理）：不占用通用操作列，合并单元格单独展示
     const specialActs = !hasChildren ? (node.actions || []).filter(a => !PERMISSION_ACTION_KEYS.includes(a)) : []
     const allChecked = specialActs.length > 0
@@ -365,6 +376,8 @@ function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<s
 }
 
 export default function RoleManagement() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const urlSearchAppliedRef = useRef(false)
   const isAdmin = useAuthStore(s => s.isAdmin())
   const hasRolesRead = useAuthStore(s => s.hasPermission('roles', 'read'))
   const hasRolesCreate = useAuthStore(s => s.hasPermission('roles', 'create'))
@@ -408,6 +421,7 @@ export default function RoleManagement() {
   const [bgRoleIds, setBgRoleIds] = useState<number[]>([])
   const [bgMode, setBgMode] = useState<'grant' | 'revoke' | 'replace'>('grant')
   const [bgSubmitting, setBgSubmitting] = useState(false)
+  const [bgRoles, setBgRoles] = useState<RoleItem[]>([])
 
   const fetchRoles = async (opts?: { page?: number; pageSize?: number; sortBy?: string; sortOrder?: string; filters?: Record<string, string[]>; keyword?: string }) => {
     const p = opts?.page ?? rolePage
@@ -445,6 +459,20 @@ export default function RoleManagement() {
   useEffect(() => {
     fetchRoles()
   }, [])
+
+  // 从用户管理点击角色跳转而来：读取 URL 参数并自动按角色过滤
+  useEffect(() => {
+    if (urlSearchAppliedRef.current) return
+    const roleCode = searchParams.get('role_code')
+    if (roleCode) {
+      urlSearchAppliedRef.current = true
+      setKeyword(roleCode)
+      fetchRoles({ page: 1, keyword: roleCode })
+      const newParams = new URLSearchParams(searchParams)
+      newParams.delete('role_code')
+      setSearchParams(newParams, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
 
   const openAddRole = () => {
     setEditingRole(null)
@@ -492,7 +520,12 @@ export default function RoleManagement() {
     setBgActions(['read'])
     setBgRoleIds([])
     setBgMode('grant')
+    setBgRoles([])
     setBgOpen(true)
+    userApi.roles({ page: 1, page_size: 500 }).then((res: any) => {
+      const payload = res?.data
+      setBgRoles(Array.isArray(payload) ? payload : payload?.items || [])
+    }).catch(() => { /* 错误已由全局拦截器提示 */ })
   }
 
   const handleBatchGrant = async () => {
@@ -713,7 +746,7 @@ export default function RoleManagement() {
                 size="small"
                 type="link"
                 onClick={() => {
-                  const allIds = roles.filter(r => r.role_code !== 'admin').map(r => r.id)
+                  const allIds = bgRoles.filter(r => r.role_code !== 'admin').map(r => r.id)
                   setBgRoleIds(bgRoleIds.length === allIds.length ? [] : allIds)
                 }}
               >
@@ -726,7 +759,7 @@ export default function RoleManagement() {
                 onChange={(v) => setBgRoleIds(v as number[])}
                 style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
               >
-                {roles.map(r => (
+                {bgRoles.map(r => (
                   <Checkbox key={r.id} value={r.id} disabled={r.role_code === 'admin'}>
                     <Tag color={roleColorMap[r.role_code] || 'default'} style={{ marginRight: 4 }}>{r.role_code}</Tag>
                     {r.role_name}

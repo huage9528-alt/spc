@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 _FEEDBACK_TYPE_LABELS = {"issue": "问题", "suggestion": "建议", "inquiry": "咨询"}
 _SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
+_STATUS_LABELS = {"pending": "待处理", "processing": "处理中", "resolved": "已解决", "closed": "已关闭"}
 
 router = APIRouter()
 
@@ -146,10 +147,32 @@ async def _insert_handler_notifications(db: AsyncSession, fb: Feedback) -> list[
             ref_id=fb.id,
             priority=priority,
             is_read=False,
-            created_at=datetime.utcnow(),
         ))
     await db.flush()
     return handler_ids
+
+
+async def _insert_submitter_progress_notification(
+    db: AsyncSession, fb: Feedback, actor_user: dict, action_desc: str
+) -> Optional[int]:
+    """处理进度变化时通知提交人;提交人=操作人本人时跳过。返回提交人 user_id 或 None。"""
+    if not fb.submitter_id:
+        return None
+    if int(fb.submitter_id) == _get_user_id(actor_user):
+        return None
+    priority = "important" if fb.severity == "high" else "normal"
+    db.add(Notification(
+        user_id=fb.submitter_id,
+        type="feedback",
+        title=f"[问题反馈]您的反馈「{fb.title}」处理进度有更新",
+        content=action_desc,
+        ref_type="feedback",
+        ref_id=fb.id,
+        priority=priority,
+        is_read=False,
+    ))
+    await db.flush()
+    return fb.submitter_id
 
 
 # ---------- 列表 ----------
@@ -394,8 +417,29 @@ async def reply_feedback(
     elif body.reply and fb.status == "pending":
         fb.status = "resolved"
 
+    # 通知提交人处理进度(失败只记日志,不影响回复)
+    notified_uid: Optional[int] = None
+    try:
+        parts = []
+        if body.reply:
+            parts.append(f"处理人 {current_user.get('username')} 回复:{body.reply}")
+        if body.status:
+            parts.append(f"状态更新为「{_STATUS_LABELS.get(body.status, body.status)}」")
+        if not parts:
+            parts.append("处理进度有更新")
+        notified_uid = await _insert_submitter_progress_notification(
+            db, fb, current_user, ";".join(parts)
+        )
+    except Exception as e:
+        logger.warning(f"[feedback] 插入提交人进度通知失败 feedback_id={fb.id}: {e}")
+
     await db.commit()
     await db.refresh(fb)
+    if notified_uid:
+        try:
+            await publish_unread_update(db, notified_uid)
+        except Exception as e:
+            logger.warning(f"[feedback] SSE 推送失败 feedback_id={fb.id}: {e}")
     return ResponseModel(data=FeedbackOut.model_validate(fb))
 
 
@@ -431,8 +475,24 @@ async def update_status(
             raise HTTPException(status_code=403, detail="无权变更为该状态")
         fb.status = body.status
 
+    # 通知提交人处理进度(仅处理人操作时;提交人自己 close/重开不通知)
+    notified_uid: Optional[int] = None
+    if _can_handle(current_user):
+        try:
+            notified_uid = await _insert_submitter_progress_notification(
+                db, fb, current_user,
+                f"处理人 {current_user.get('username')} 将状态更新为「{_STATUS_LABELS.get(body.status, body.status)}」",
+            )
+        except Exception as e:
+            logger.warning(f"[feedback] 插入提交人进度通知失败 feedback_id={fb.id}: {e}")
+
     await db.commit()
     await db.refresh(fb)
+    if notified_uid:
+        try:
+            await publish_unread_update(db, notified_uid)
+        except Exception as e:
+            logger.warning(f"[feedback] SSE 推送失败 feedback_id={fb.id}: {e}")
     return ResponseModel(data=FeedbackOut.model_validate(fb))
 
 

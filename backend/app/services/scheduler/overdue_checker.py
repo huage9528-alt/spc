@@ -57,7 +57,6 @@ class OverdueCheckerScheduler:
                         ref_type='purchase_order',
                         priority='important',
                         is_read=False,
-                        created_at=datetime.utcnow(),
                     )
                     db.add(notification)
                     notification_count += 1

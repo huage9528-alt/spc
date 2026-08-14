@@ -148,7 +148,7 @@ if (-not $SkipUpload) {
 } else {
     Write-Host "[3/5] 跳过上传 (SkipUpload=$SkipUpload) ..."
     Write-Host "[4/5] 仅远程启动 ..."
-    Invoke-Remote "export PATH=/opt/homebrew/bin:/usr/local/bin:`$PATH; cd $REMOTE_PATH && docker compose -f docker-compose-prod.yml up -d && docker compose -f docker-compose-prod.yml ps"
+    Invoke-Remote "export PATH=/opt/homebrew/bin:/usr/local/bin:`$PATH; cd $REMOTE_PATH && docker compose -f docker-compose-prod.yml down && docker compose -f docker-compose-prod.yml up -d && docker compose -f docker-compose-prod.yml ps"
 }
 Show-StepElapsed "4/5"
 

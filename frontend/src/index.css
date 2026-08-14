@@ -150,6 +150,7 @@ body {
   bottom: -10%; left: -5%;
 }
 .login-card {
+  position: relative;
   width: 400px; padding: 44px 38px; border-radius: 20px; z-index: 1;
   background: rgba(255,255,255,.72);
   backdrop-filter: blur(20px) saturate(1.6);
@@ -298,6 +299,57 @@ body {
   .login-role-desc {
     font-size: 10px;
   }
+}
+
+/* ===== Login · 扫码双栏 ===== */
+.login-card.has-qr {
+  width: min(760px, calc(100vw - 40px));
+  display: grid;
+  grid-template-columns: 1fr 1px 1fr;
+  gap: 0;
+}
+.login-card .login-col.left { padding-right: 30px; }
+.login-card .login-col.right {
+  padding-left: 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.login-card .login-divider {
+  width: 1px;
+  align-self: stretch;
+  background: linear-gradient(180deg, transparent, rgba(148,163,184,.35), transparent);
+}
+.qr-title { font-size: 15px; font-weight: 700; margin: 0 0 4px; color: #0f172a; }
+.qr-sub { font-size: 12px; color: #94a3b8; margin: 0 0 14px; text-align: center; }
+#wecom-qr-container { min-height: 400px; display: flex; align-items: center; justify-content: center; width: 100%; }
+#wecom-qr-container iframe { width: 300px; height: 400px; max-width: 100%; border: 0; display: block; background: transparent; }
+.qr-hint { margin-top: 12px; font-size: 12px; color: #475569; text-align: center; }
+.qr-tag { margin-top: 6px; font-size: 11px; color: #94a3b8; text-align: center; }
+.inapp-hint { margin-top: 14px; text-align: center; font-size: 12px; color: #94a3b8; }
+.login-logging-mask {
+  position: absolute; inset: 0; z-index: 5;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  background: rgba(255,255,255,.55);
+  backdrop-filter: blur(3px);
+  border-radius: 22px;
+}
+.login-logging-text { font-size: 13px; color: #475569; }
+@media (max-width: 560px) {
+  .login-card.has-qr {
+    width: calc(100vw - 32px);
+    grid-template-columns: 1fr;
+    padding: 30px 22px;
+  }
+  .login-card.has-qr .login-divider {
+    width: auto;
+    height: 1px;
+    margin: 24px 0;
+    background: linear-gradient(90deg, transparent, rgba(148,163,184,.35), transparent);
+  }
+  .login-card .login-col.left,
+  .login-card .login-col.right { padding: 0; }
 }
 
 /* ===== Dashboard Tabs ===== */

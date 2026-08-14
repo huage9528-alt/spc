@@ -1,7 +1,6 @@
 """通用通知 API — 当前用户的消息中心"""
 
 from typing import Optional
-from datetime import datetime
 
 import json
 
@@ -47,7 +46,6 @@ async def create_notification(
         type=request.type,
         priority=request.priority,
         is_read=False,
-        created_at=datetime.utcnow(),
     )
     db.add(notification)
     await db.commit()
@@ -132,7 +130,7 @@ async def mark_read(
         raise HTTPException(status_code=404, detail="通知不存在")
     if not notif.is_read:
         notif.is_read = True
-        notif.read_at = datetime.utcnow()
+        notif.read_at = func.now()
         await db.commit()
     await publish_unread_update(db, uid)
     return ResponseModel(data={"id": notif_id})
@@ -149,11 +147,10 @@ async def mark_all_read(
     conditions = [Notification.user_id == uid, Notification.is_read == False]  # noqa: E712
     if type:
         conditions.append(Notification.type == type)
-    now = datetime.utcnow()
     await db.execute(
         update(Notification)
         .where(and_(*conditions))
-        .values(is_read=True, read_at=now)
+        .values(is_read=True, read_at=func.now())
     )
     await db.commit()
     await publish_unread_update(db, uid)

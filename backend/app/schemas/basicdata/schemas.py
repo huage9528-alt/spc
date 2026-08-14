@@ -27,6 +27,7 @@ class UserInfo(BaseModel):
     is_default_password: bool = True
     login_version: int = 0
     position_name: Optional[str] = None
+    wecom_user_id: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

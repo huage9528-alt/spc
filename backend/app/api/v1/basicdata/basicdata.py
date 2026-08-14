@@ -1,15 +1,17 @@
 """基础数据与集成中心 — 基础数据CRUD API"""
 
 import logging
-from typing import List, Optional
+from datetime import date, timedelta
+from typing import List, Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, cast, String
+from sqlalchemy import select, func, or_, cast, String, not_
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
 from app.core.security import PermissionChecker
 from app.core.audit import log_audit
+from app.core.config import get_settings
 from app.schemas.common import ResponseModel
 from app.schemas.basicdata.schemas import (
     CustomerCreate, CustomerUpdate, CustomerOut,
@@ -31,6 +33,7 @@ from app.models.basicdata import (
 )
 from app.models.material.inventory_check import StockCheck, StockCheckItem
 from app.services.basicdata.position_role_service import sync_user_role_from_employee
+from app.services.material.stock_check_service import _get_recent_checked_by_warehouse
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,61 @@ def _inventory_checked_exists():
             StockCheckItem.material_id == Inventory.material_id,
             StockCheckItem.actual_qty.isnot(None),
             StockCheck.status != "cancelled",
+        )
+        .exists()
+    )
+
+
+async def _enrich_recent_checked(db: AsyncSession, keys):
+    """对 (material_id, wh_id) 列表，返回 {(mid, wh_id): {"checked","date","check_no"}}。
+
+    "近期已盘" 口径与盘点建单预填补一致：最近一条 actual_qty 非空且未取消的盘点行，
+    且 check_date 距今天不超过 STOCK_CHECK_RECENT_SKIP_DAYS（默认 7 天）。
+    """
+    if not keys:
+        return {}
+    skip_days = int(get_settings().STOCK_CHECK_RECENT_SKIP_DAYS)
+    today = date.today()
+    raw = await _get_recent_checked_by_warehouse(db, keys)
+    out: Dict = {}
+    for k, v in raw.items():
+        rd = v.get("check_date")
+        out[k] = {
+            "checked": rd is not None and (today - rd).days <= skip_days,
+            "date": rd.isoformat() if rd else None,
+            "check_no": v.get("check_no"),
+        }
+    return out
+
+
+def _recent_checked_exists_cond():
+    """EXISTS 条件：该 (material_id, wh_id) 近 STOCK_CHECK_RECENT_SKIP_DAYS 天内
+    存在 actual_qty 非空且未取消的盘点行。与 _enrich_recent_checked 的「近期已盘」口径一致。"""
+    skip_days = int(get_settings().STOCK_CHECK_RECENT_SKIP_DAYS)
+    cutoff = date.today() - timedelta(days=skip_days)
+    return (
+        select(1)
+        .select_from(StockCheckItem)
+        .join(StockCheck, StockCheck.id == StockCheckItem.check_id)
+        .where(
+            StockCheckItem.material_id == Inventory.material_id,
+            StockCheckItem.wh_id == Inventory.wh_id,
+            StockCheckItem.actual_qty.isnot(None),
+            StockCheck.status != "cancelled",
+            StockCheck.check_date >= cutoff,
+        )
+        .exists()
+    )
+
+
+def _inventory_material_active_cond():
+    """库存行排除已删除物料：不存在 is_deleted=1 的物料主数据行（逻辑删除）。"""
+    return not_(
+        select(1)
+        .select_from(Material)
+        .where(
+            Material.erp_material_id == Inventory.material_id,
+            Material.is_deleted == 1,
         )
         .exists()
     )
@@ -1353,12 +1411,15 @@ async def get_organization_employees(
 # ── Inventory ──
 SORTABLE_INVENTORY = {
     "material_code": Inventory.material_code,
+    "material_name": Inventory.material_name,
     "wh_code": Inventory.wh_code,
     "qty_on_hand": Inventory.qty_on_hand,
     "locked_qty": Inventory.locked_qty,
     "balance_qty": Inventory.balance_qty,
+    "qty_in_transit": Inventory.qty_in_transit,
     "unit_price": Inventory.unit_price,
     "ending_balance": Inventory.ending_balance,
+    "batch_no": Inventory.batch_no,
     "updated_at": Inventory.updated_at,
 }
 
@@ -1370,7 +1431,9 @@ async def list_inventory(
     keyword: Optional[str] = Query(None, description="模糊搜索物料编码/名称/仓库名称"),
     material_code: Optional[str] = Query(None, description="物料编码精确筛选"),
     wh_code: Optional[str] = Query(None, description="仓库编码精确筛选"),
+    wh_name: Optional[str] = Query(None, description="仓库名称精确筛选"),
     batch_no: Optional[str] = Query(None, description="批次号精确筛选"),
+    recent_checked: Optional[str] = Query(None, description="近期已盘筛选:true=仅近期已盘,false=仅未盘"),
     sort_by: Optional[str] = Query(None),
     sort_order: Optional[str] = Query("asc"),
     db: AsyncSession = Depends(get_db),
@@ -1388,6 +1451,13 @@ async def list_inventory(
     total_materials_query = select(func.count(func.distinct(Inventory.material_id)))
     counted_materials_query = select(func.count(func.distinct(Inventory.material_id))).where(_inventory_checked_exists())
 
+    active_cond = _inventory_material_active_cond()
+    query = query.where(active_cond)
+    count_query = count_query.where(active_cond)
+    sums_query = sums_query.where(active_cond)
+    total_materials_query = total_materials_query.where(active_cond)
+    counted_materials_query = counted_materials_query.where(active_cond)
+
     if keyword:
         like = f"%{keyword}%"
         filter_cond = or_(
@@ -1401,23 +1471,45 @@ async def list_inventory(
         total_materials_query = total_materials_query.where(filter_cond)
         counted_materials_query = counted_materials_query.where(filter_cond)
     if material_code:
-        query = query.where(Inventory.material_code == material_code)
-        count_query = count_query.where(Inventory.material_code == material_code)
-        sums_query = sums_query.where(Inventory.material_code == material_code)
-        total_materials_query = total_materials_query.where(Inventory.material_code == material_code)
-        counted_materials_query = counted_materials_query.where(Inventory.material_code == material_code)
+        vals = [v.strip() for v in material_code.split(",") if v.strip()]
+        cond = Inventory.material_code.in_(vals)
+        query = query.where(cond)
+        count_query = count_query.where(cond)
+        sums_query = sums_query.where(cond)
+        total_materials_query = total_materials_query.where(cond)
+        counted_materials_query = counted_materials_query.where(cond)
     if wh_code:
-        query = query.where(Inventory.wh_code == wh_code)
-        count_query = count_query.where(Inventory.wh_code == wh_code)
-        sums_query = sums_query.where(Inventory.wh_code == wh_code)
-        total_materials_query = total_materials_query.where(Inventory.wh_code == wh_code)
-        counted_materials_query = counted_materials_query.where(Inventory.wh_code == wh_code)
+        vals = [v.strip() for v in wh_code.split(",") if v.strip()]
+        cond = Inventory.wh_code.in_(vals)
+        query = query.where(cond)
+        count_query = count_query.where(cond)
+        sums_query = sums_query.where(cond)
+        total_materials_query = total_materials_query.where(cond)
+        counted_materials_query = counted_materials_query.where(cond)
+    if wh_name:
+        vals = [v.strip() for v in wh_name.split(",") if v.strip()]
+        cond = Inventory.wh_name.in_(vals)
+        query = query.where(cond)
+        count_query = count_query.where(cond)
+        sums_query = sums_query.where(cond)
+        total_materials_query = total_materials_query.where(cond)
+        counted_materials_query = counted_materials_query.where(cond)
     if batch_no:
-        query = query.where(Inventory.batch_no == batch_no)
-        count_query = count_query.where(Inventory.batch_no == batch_no)
-        sums_query = sums_query.where(Inventory.batch_no == batch_no)
-        total_materials_query = total_materials_query.where(Inventory.batch_no == batch_no)
-        counted_materials_query = counted_materials_query.where(Inventory.batch_no == batch_no)
+        vals = [v.strip() for v in batch_no.split(",") if v.strip()]
+        cond = Inventory.batch_no.in_(vals)
+        query = query.where(cond)
+        count_query = count_query.where(cond)
+        sums_query = sums_query.where(cond)
+        total_materials_query = total_materials_query.where(cond)
+        counted_materials_query = counted_materials_query.where(cond)
+    if recent_checked is not None and recent_checked.strip().lower() in ("true", "1", "yes", "false", "0", "no"):
+        rc_exists = _recent_checked_exists_cond()
+        rc_cond = rc_exists if recent_checked.strip().lower() in ("true", "1", "yes") else not_(rc_exists)
+        query = query.where(rc_cond)
+        count_query = count_query.where(rc_cond)
+        sums_query = sums_query.where(rc_cond)
+        total_materials_query = total_materials_query.where(rc_cond)
+        counted_materials_query = counted_materials_query.where(rc_cond)
 
     total = (await db.execute(count_query)).scalar() or 0
     sum_on_hand, sum_locked, sum_balance, sum_in_transit, sum_ending = (await db.execute(sums_query)).one()
@@ -1429,30 +1521,37 @@ async def list_inventory(
     result = await db.execute(query)
     items = result.scalars().all()
 
+    recent_meta = await _enrich_recent_checked(db, [(inv.material_id, inv.wh_id) for inv in items])
+
+    out_items = []
+    for inv in items:
+        rc = recent_meta.get((inv.material_id, inv.wh_id)) or {}
+        out_items.append({
+            "id": inv.id,
+            "material_id": inv.material_id,
+            "material_code": inv.material_code,
+            "material_name": inv.material_name,
+            "wh_id": inv.wh_id,
+            "wh_code": inv.wh_code,
+            "wh_name": inv.wh_name,
+            "location_id": inv.location_id,
+            "location_name": inv.location_name,
+            "qty_on_hand": float(inv.qty_on_hand) if inv.qty_on_hand else 0,
+            "locked_qty": float(inv.locked_qty) if inv.locked_qty else 0,
+            "balance_qty": float(inv.balance_qty) if inv.balance_qty else 0,
+            "qty_in_transit": float(inv.qty_in_transit) if inv.qty_in_transit else 0,
+            "unit_price": float(inv.unit_price) if inv.unit_price else 0,
+            "ending_balance": float(inv.ending_balance) if inv.ending_balance else 0,
+            "batch_no": inv.batch_no,
+            "created_at": inv.created_at.isoformat() if inv.created_at else None,
+            "updated_at": inv.updated_at.isoformat() if inv.updated_at else None,
+            "recent_checked": bool(rc.get("checked")),
+            "recent_checked_date": rc.get("date"),
+            "recent_checked_check_no": rc.get("check_no"),
+        })
+
     return ResponseModel(data={
-        "items": [
-            {
-                "id": inv.id,
-                "material_id": inv.material_id,
-                "material_code": inv.material_code,
-                "material_name": inv.material_name,
-                "wh_id": inv.wh_id,
-                "wh_code": inv.wh_code,
-                "wh_name": inv.wh_name,
-                "location_id": inv.location_id,
-                "location_name": inv.location_name,
-                "qty_on_hand": float(inv.qty_on_hand) if inv.qty_on_hand else 0,
-                "locked_qty": float(inv.locked_qty) if inv.locked_qty else 0,
-                "balance_qty": float(inv.balance_qty) if inv.balance_qty else 0,
-                "qty_in_transit": float(inv.qty_in_transit) if inv.qty_in_transit else 0,
-                "unit_price": float(inv.unit_price) if inv.unit_price else 0,
-                "ending_balance": float(inv.ending_balance) if inv.ending_balance else 0,
-                "batch_no": inv.batch_no,
-                "created_at": inv.created_at.isoformat() if inv.created_at else None,
-                "updated_at": inv.updated_at.isoformat() if inv.updated_at else None,
-            }
-            for inv in items
-        ],
+        "items": out_items,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -1477,13 +1576,15 @@ async def list_inventory_by_warehouse(
     keyword: Optional[str] = Query(None, description="模糊搜索物料编码/名称/仓库名称"),
     material_code: Optional[str] = Query(None, description="物料编码精确筛选"),
     wh_code: Optional[str] = Query(None, description="仓库编码精确筛选"),
+    wh_name: Optional[str] = Query(None, description="仓库名称精确筛选"),
+    recent_checked: Optional[str] = Query(None, description="近期已盘筛选:true=仅近期已盘,false=仅未盘"),
     sort_by: Optional[str] = Query(None),
     sort_order: Optional[str] = Query("asc"),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(PermissionChecker("basicdata.data.inventory", "read")),
 ):
     """按 物料 x 仓库 聚合的即时库存视图（合并库位维度）。"""
-    filters = []
+    filters = [_inventory_material_active_cond()]
     if keyword:
         like = f"%{keyword}%"
         filters.append(or_(
@@ -1492,9 +1593,17 @@ async def list_inventory_by_warehouse(
             Inventory.wh_name.ilike(like),
         ))
     if material_code:
-        filters.append(Inventory.material_code == material_code)
+        vals = [v.strip() for v in material_code.split(",") if v.strip()]
+        filters.append(Inventory.material_code.in_(vals))
     if wh_code:
-        filters.append(Inventory.wh_code == wh_code)
+        vals = [v.strip() for v in wh_code.split(",") if v.strip()]
+        filters.append(Inventory.wh_code.in_(vals))
+    if wh_name:
+        vals = [v.strip() for v in wh_name.split(",") if v.strip()]
+        filters.append(Inventory.wh_name.in_(vals))
+    if recent_checked is not None and recent_checked.strip().lower() in ("true", "1", "yes", "false", "0", "no"):
+        rc_exists = _recent_checked_exists_cond()
+        filters.append(rc_exists if recent_checked.strip().lower() in ("true", "1", "yes") else not_(rc_exists))
 
     sum_qty = func.coalesce(func.sum(Inventory.qty_on_hand), 0).label("qty_on_hand")
     sum_locked = func.coalesce(func.sum(Inventory.locked_qty), 0).label("locked_qty")
@@ -1514,6 +1623,7 @@ async def list_inventory_by_warehouse(
 
     sortable = {
         "material_code": Inventory.material_code,
+        "material_name": Inventory.material_name,
         "wh_code": Inventory.wh_code,
         "qty_on_hand": sum_qty,
         "locked_qty": sum_locked,
@@ -1556,12 +1666,15 @@ async def list_inventory_by_warehouse(
     result = await db.execute(query)
     rows = result.all()
 
+    recent_meta = await _enrich_recent_checked(db, [(r[0], r[3]) for r in rows])  # (material_id, wh_id)
+
     items = []
     for row in rows:
         (mat_id, mat_code, mat_name, wh_id, w_code, w_name,
          qty, locked, balance, transit, ending, loc_cnt) = row
         qty_f = float(qty or 0)
         ending_f = float(ending or 0)
+        rc = recent_meta.get((mat_id, wh_id)) or {}
         items.append({
             "material_id": mat_id,
             "material_code": mat_code,
@@ -1576,6 +1689,9 @@ async def list_inventory_by_warehouse(
             "unit_price": (ending_f / qty_f) if qty_f else 0,
             "ending_balance": ending_f,
             "location_count": int(loc_cnt or 0),
+            "recent_checked": bool(rc.get("checked")),
+            "recent_checked_date": rc.get("date"),
+            "recent_checked_check_no": rc.get("check_no"),
         })
 
     return ResponseModel(data={
@@ -1594,4 +1710,35 @@ async def list_inventory_by_warehouse(
             "total_materials": int(total_materials or 0),
             "counted_materials": int(counted_materials or 0),
         },
+    })
+
+
+@router.get("/inventory/filter-options", response_model=ResponseModel[dict])
+async def inventory_filter_options(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(PermissionChecker("basicdata.data.inventory", "read")),
+):
+    """库存列筛选选项：全量去重值（仓库编码/名称全量；物料编码/批次号上限 3000 条）。"""
+    active_cond = _inventory_material_active_cond()
+    material_codes = (await db.execute(
+        select(Inventory.material_code).where(Inventory.material_code.isnot(None), active_cond)
+        .distinct().order_by(Inventory.material_code).limit(3000)
+    )).scalars().all()
+    wh_codes = (await db.execute(
+        select(Inventory.wh_code).where(Inventory.wh_code.isnot(None), active_cond)
+        .distinct().order_by(Inventory.wh_code)
+    )).scalars().all()
+    wh_names = (await db.execute(
+        select(Inventory.wh_name).where(Inventory.wh_name.isnot(None), active_cond)
+        .distinct().order_by(Inventory.wh_name)
+    )).scalars().all()
+    batch_nos = (await db.execute(
+        select(Inventory.batch_no).where(Inventory.batch_no.isnot(None), active_cond)
+        .distinct().order_by(Inventory.batch_no).limit(3000)
+    )).scalars().all()
+    return ResponseModel(data={
+        "material_codes": list(material_codes),
+        "wh_codes": list(wh_codes),
+        "wh_names": list(wh_names),
+        "batch_nos": list(batch_nos),
     })

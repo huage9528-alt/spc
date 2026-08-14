@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Table, Tag, Button, Space, Input, Select, Row, Col, Card, Drawer, Form,
   message, Popconfirm, Descriptions, List, Image,
@@ -6,6 +6,7 @@ import {
 import { ReloadOutlined, SearchOutlined, EyeOutlined, DeleteOutlined, MessageOutlined } from '@ant-design/icons'
 import { feedbackApi } from '../../../services/api'
 import { useAuthStore } from '../../../store/auth'
+import { useSearchParams } from 'react-router-dom'
 
 const typeMap: Record<string, { label: string; color: string }> = {
   issue: { label: '问题', color: 'red' },
@@ -85,6 +86,25 @@ export default function FeedbackManagement() {
     replyForm.setFieldsValue({ reply: record.reply || '', status: record.status })
     setDetailOpen(true)
   }
+
+  const [searchParams, setSearchParams] = useSearchParams()
+  const urlSearchAppliedRef = useRef(false)
+
+  // 从通知中心跳转而来:读取 ?id= 并自动打开该条反馈详情
+  useEffect(() => {
+    if (urlSearchAppliedRef.current) return
+    const idParam = searchParams.get('id')
+    if (!idParam) return
+    urlSearchAppliedRef.current = true
+    const newParams = new URLSearchParams(searchParams)
+    newParams.delete('id')
+    setSearchParams(newParams, { replace: true })
+    feedbackApi.get(Number(idParam)).then((res: any) => {
+      if (res?.data) openDetail(res.data)
+    }).catch(() => {
+      // 错误已由全局拦截器提示
+    })
+  }, [searchParams, setSearchParams])
 
   const handleReply = async () => {
     try {

@@ -40,6 +40,10 @@ class UpdatePreferencesRequest(BaseModel):
     ui_preferences: Optional[dict] = None
 
 
+class UpdateProfileRequest(BaseModel):
+    display_name: str
+
+
 class WecomLoginRequest(BaseModel):
     code: str
 
@@ -126,28 +130,44 @@ async def login(
     return ResponseModel(data=TokenResponse(access_token=token))
 
 
-def _build_wecom_oauth_url() -> str:
-    """构造企业微信静默授权 URL，回跳 /login?code=xxx"""
+@router.get("/wecom-qr-config", response_model=ResponseModel[dict])
+async def wecom_qr_config():
+    """返回企业微信 Web 扫码登录 SDK 初始化所需的非敏感配置（公开，登录前调用）。
+    enabled=False 时前端隐藏二维码面板，回退纯账密登录。"""
+    settings = get_settings()
+    corp_id = settings.wecom_corp_id or ""
+    agent_id = settings.wecom_agent_id or ""
+    return ResponseModel(data={
+        "enabled": bool(corp_id and agent_id),
+        "corp_id": corp_id,
+        "agent_id": agent_id,
+        "state": "sso",
+    })
+
+
+def _build_wecom_oauth_url(redirect_path: str = "/login", state: str = "sso") -> str:
+    """构造企业微信静默授权 URL，回跳 {redirect_path}?code=xxx&state={state}"""
     settings = get_settings()
     corp_id = settings.wecom_corp_id
     if not corp_id:
         raise HTTPException(status_code=501, detail="企业微信未配置")
     base_url = (settings.frontend_base_url or "http://localhost:3000").rstrip("/")
-    redirect_uri = quote(f"{base_url}/login", safe="")
+    redirect_uri = quote(f"{base_url}{redirect_path}", safe="")
     return (
         f"https://open.weixin.qq.com/connect/oauth2/authorize"
         f"?appid={corp_id}"
         f"&redirect_uri={redirect_uri}"
         f"&response_type=code"
         f"&scope=snsapi_base"
-        f"&state=sso#wechat_redirect"
+        f"&state={state}#wechat_redirect"
     )
 
 
 @router.get("/wecom-oauth-url", response_model=ResponseModel[dict])
-async def wecom_oauth_url():
-    """返回企业微信静默授权跳转地址（公开，登录前调用）。"""
-    return ResponseModel(data={"oauth_url": _build_wecom_oauth_url()})
+async def wecom_oauth_url(state: Optional[str] = None):
+    """返回企业微信静默授权跳转地址（公开，登录前调用）。
+    state 可由前端传入随机 nonce，回跳时原样带回以校验 CSRF。"""
+    return ResponseModel(data={"oauth_url": _build_wecom_oauth_url(state=state or "sso")})
 
 
 @router.post("/wecom-login", response_model=ResponseModel[TokenResponse])
@@ -214,6 +234,78 @@ async def wecom_login(body: WecomLoginRequest, db: AsyncSession = Depends(get_db
     return ResponseModel(data=TokenResponse(access_token=token))
 
 
+@router.get("/wecom-bind-url", response_model=ResponseModel[dict])
+async def wecom_bind_url():
+    """返回绑定企业微信的 OAuth 跳转地址（需登录，回跳 /profile?code=xxx&state=bind）。"""
+    return ResponseModel(data={"oauth_url": _build_wecom_oauth_url(redirect_path="/profile", state="bind")})
+
+
+@router.post("/wecom-bind", response_model=ResponseModel[dict])
+async def wecom_bind(
+        body: WecomLoginRequest,
+        current_user: dict = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+):
+    """企业微信绑定/换绑：OAuth code → userid → 写回当前用户（供应商账号禁止）。"""
+    result = await db.execute(
+        select(SysUser, SysRole)
+        .join(SysRole, SysUser.role_id == SysRole.id)
+        .where(SysUser.id == current_user["user_id"])
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    user, role = row
+    if role.role_code == "supplier":
+        raise HTTPException(status_code=403, detail="供应商账号不支持绑定企业微信")
+
+    client = get_wecom_client()
+    try:
+        userinfo = await client.get_userinfo_by_code(body.code)
+    except WecomNotConfiguredError as e:
+        raise HTTPException(status_code=501, detail=str(e)) from e
+    except WecomAPIError as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"企业微信授权失败（code 无效或已过期，errcode={e.errcode}）",
+        ) from e
+
+    wecom_userid = userinfo.get("UserId") or userinfo.get("userid")
+    if not wecom_userid:
+        raise HTTPException(status_code=400, detail="无法获取企业微信身份")
+
+    # 唯一性：该企微账号至多绑定一个系统用户
+    dup_result = await db.execute(
+        select(SysUser.id).where(
+            SysUser.wecom_user_id == wecom_userid,
+            SysUser.id != user.id,
+        )
+    )
+    if dup_result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=400, detail="该企业微信账号已绑定其他系统用户，请联系管理员处理")
+
+    user.wecom_user_id = wecom_userid
+    await log_audit(db, "sys_user", user.id, "update", field_name="wecom_user_id", operator=current_user["username"])
+    await db.commit()
+    return ResponseModel(data={"wecom_user_id": wecom_userid, "message": "企业微信绑定成功"})
+
+
+@router.delete("/wecom-bind", response_model=ResponseModel[dict])
+async def wecom_unbind(
+        current_user: dict = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(SysUser).where(SysUser.id == current_user["user_id"]))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    user.wecom_user_id = None
+    await log_audit(db, "sys_user", user.id, "update", field_name="wecom_user_id", operator=current_user["username"])
+    await db.commit()
+    return ResponseModel(data={"message": "企业微信已解绑"})
+
+
 @router.get("/me", response_model=ResponseModel[UserInfo])
 async def get_me(current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
@@ -265,6 +357,7 @@ async def get_me(current_user: dict = Depends(get_current_user), db: AsyncSessio
         is_default_password=is_default,
         login_version=user.login_version,
         position_name=position_name,
+        wecom_user_id=user.wecom_user_id,
     ))
 
 
@@ -312,3 +405,24 @@ async def update_preferences(
         user.ui_preferences = body.ui_preferences
     await db.commit()
     return ResponseModel(data={"id": user.id, "message": "偏好设置已更新"})
+
+
+@router.put("/profile", response_model=ResponseModel[dict])
+async def update_profile(
+        body: UpdateProfileRequest,
+        current_user: dict = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+):
+    name = (body.display_name or "").strip()
+    if not name or len(name) > 50:
+        raise HTTPException(status_code=400, detail="显示姓名不能为空且不超过50个字符")
+
+    result = await db.execute(select(SysUser).where(SysUser.id == current_user["user_id"]))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    user.display_name = name
+    await log_audit(db, "sys_user", user.id, "update", field_name="display_name", operator=current_user["username"])
+    await db.commit()
+    return ResponseModel(data={"id": user.id, "display_name": name, "message": "个人资料已更新"})

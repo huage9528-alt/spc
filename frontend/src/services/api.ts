@@ -110,12 +110,18 @@ export const authApi = {
     })
   },
   getMe: () => api.get('/basicdata/auth/me'),
-  wecomOauthUrl: () => api.get('/basicdata/auth/wecom-oauth-url'),
+  wecomOauthUrl: (state?: string) => api.get('/basicdata/auth/wecom-oauth-url', { params: state ? { state } : {} }),
   wecomLogin: (code: string) => api.post('/basicdata/auth/wecom-login', { code }),
+  wecomQrConfig: () => api.get('/basicdata/auth/wecom-qr-config'),
   changePassword: (old_password: string, new_password: string) =>
     api.put('/basicdata/auth/change-password', { old_password, new_password }),
   updatePreferences: (data: { font_size_scale?: string; ui_preferences?: Record<string, any> }) =>
     api.put('/basicdata/auth/preferences', data),
+  updateProfile: (display_name: string) =>
+    api.put('/basicdata/auth/profile', { display_name }),
+  wecomBindUrl: () => api.get('/basicdata/auth/wecom-bind-url'),
+  wecomBind: (code: string) => api.post('/basicdata/auth/wecom-bind', { code }),
+  wecomUnbind: () => api.delete('/basicdata/auth/wecom-bind'),
 }
 
 export const permissionApi = {
@@ -294,6 +300,7 @@ export const materialApi = {
     page?: number
     page_size?: number
   } = {}) => api.get('/materials/stock-check/counted-ledger', { params }),
+  listCountedWarehouses: () => api.get('/materials/stock-check/counted-warehouses'),
   createStockCheckFromMaterials: (data: {
     material_ids?: number[]
     items?: Array<{ material_id: number; wh_id?: number | null }>

@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Space, Select, DatePicker, Table, Tag, Typography, Button } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { materialApi } from '@/services/api'
 import { useAntTableQuery } from '@/hooks/useAntTableQuery'
 import { textColumnFilter, textFilterIcon } from './TextColumnFilter'
+import { selectColumnFilter } from './SelectColumnFilter'
 
 const { RangePicker } = DatePicker
 
@@ -61,6 +62,24 @@ export default function CountedLedgerPanel() {
   const navigate = useNavigate()
   const [checkType, setCheckType] = useState<string>()
   const [dateRange, setDateRange] = useState<[string, string] | undefined>()
+  const [whOptions, setWhOptions] = useState<{ label: string; value: number }[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    materialApi
+      .listCountedWarehouses()
+      .then((res: any) => {
+        if (cancelled) return
+        const list = (res?.data || []) as Array<{ wh_id: number; wh_name: string }>
+        setWhOptions(
+          list.map((w) => ({ label: w.wh_name || `仓库#${w.wh_id}`, value: w.wh_id })),
+        )
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const { searchInput, tableProps, reload, filters } = useAntTableQuery({
     fetchData: async (params) => {
@@ -111,7 +130,7 @@ export default function CountedLedgerPanel() {
     {
       title: '仓库', dataIndex: 'wh_name', key: 'wh_name', width: 130, sorter: true,
       render: (v: string | null | undefined) => v || '—',
-      filterDropdown: textColumnFilter({ placeholder: '输入仓库名称或ID' }),
+      filterDropdown: selectColumnFilter({ placeholder: '选择仓库', options: whOptions }),
       filterIcon: textFilterIcon,
       filteredValue: (filters.wh_name as string[] | undefined) ?? null,
     },
