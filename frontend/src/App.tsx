@@ -43,7 +43,8 @@ import {
     AnnouncementManagement,
     RoleManagement,
     PermissionManagement,
-    DataSupply
+    DataSupply,
+    ShareManagement
 } from './pages/BasicDataCenter'
 import WritebackConfig from './pages/BasicDataCenter/WritebackConfig'
 import WritebackMonitor from './pages/WritebackMonitor/index'
@@ -75,6 +76,7 @@ import ProcessExceptions from './pages/ProductionCenter/ProcessExceptions/index'
 import ProductProcessCapacity from './pages/ProductionCenter/ProductProcessCapacity/index'
 import DailyReports from './pages/ProductionCenter/DailyReports/index'
 import WorkshopDailyReportForm from './pages/ProductionCenter/DailyReports/ReportForm'
+import ProductionReports from './pages/ProductionCenter/ProductionReports/index'
 import MeetingCenter from './pages/MeetingCenter/index'
 import NPICenter from './pages/NPICenter/index'
 import Login from './pages/Login'
@@ -213,6 +215,7 @@ export default function App() {
                             <Route path="product-process-capacities" element={<ProductProcessCapacity/>}/>
                             <Route path="process-exceptions" element={<ProcessExceptions/>}/>
                             <Route path="daily-reports" element={<DailyReports/>}/>
+                            <Route path="production-reports" element={<ProductionReports/>}/>
                             <Route path="daily-reports/new" element={<WorkshopDailyReportForm mode="create"/>}/>
                             <Route path="daily-reports/:id/edit" element={<WorkshopDailyReportForm mode="edit"/>}/>
                             <Route path="daily-reports/:id/view" element={<WorkshopDailyReportForm mode="view"/>}/>
@@ -230,6 +233,7 @@ export default function App() {
                             <Route path="roles" element={<RoleManagement/>}/>
                             <Route path="permissions" element={<PermissionManagement/>}/>
                             <Route path="audit" element={<AuditLog/>}/>
+                            <Route path="share-management" element={<ShareManagement/>}/>
                             <Route path="sync-config" element={<SyncSqlConfig/>}/>
                             <Route path="writeback-config" element={<WritebackConfig/>}/>
                             <Route path="writeback-monitor" element={<WritebackMonitor/>}/>

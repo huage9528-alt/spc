@@ -44,6 +44,7 @@ class ProductionSchedulePlan(Base):
     frozen_locked_at = Column(DateTime, nullable=True, comment="冷冻锁定时间")
     confirmed_by = Column(String(64), nullable=True, comment="确认人")
     confirmed_at = Column(DateTime, nullable=True, comment="确认时间")
+    completed_qty = Column(Numeric(15, 2), nullable=True, default=0, comment="已报工累计完工数量(报工累计)")
     remark = Column(Text, nullable=True)
     created_by = Column(String(64), nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)

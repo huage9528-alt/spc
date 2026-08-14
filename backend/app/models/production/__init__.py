@@ -17,3 +17,4 @@ from app.models.production.workshop_daily_report import (  # noqa: F401
     WorkshopDailyReportWork,
     WorkshopDailyReportTask,
 )
+from app.models.production.production_report import ProductionReport  # noqa: F401

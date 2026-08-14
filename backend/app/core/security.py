@@ -145,6 +145,7 @@ _SHARE_PATH_TO_RESOURCE: dict[str, str] = {
     "/basicdata/employees": "basicdata.data",
     "/basicdata/feedback": "basicdata.feedback",
     "/basicdata/files": "basicdata.files",
+    "/share-management": "basicdata.share_management",
     "/announcements": "announcements",
     "/purchase/price-change": "purchase.price_change",
     "/purchase/price-change/pending": "purchase.price_change.pending",

@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 _rule_cache: dict[str, str] = {}
 
 
+def _get_settings():
+    from app.core.config import get_settings
+    return get_settings()
+
+
+def _get_wecom_client():
+    from app.services.basicdata.wecom.client import get_wecom_client
+    return get_wecom_client()
+
+
 def clear_rule_cache() -> None:
     """清除规则阈值缓存（配置更新后调用）。"""
     _rule_cache.clear()
@@ -1226,6 +1236,55 @@ class PriceChangeService:
         content = f"调价单 {no}（供应商：{supplier}，申请人：{applicant}）需要您{label}。"
         for uid in target_uids:
             await self._notify_user(uid, title, content, ref_id=change_id, priority="high")
+
+        await self._notify_approvers_wecom(target_uids, change_id, no, supplier, applicant, label)
+
+    async def _notify_approvers_wecom(self, user_ids: list[int], change_id: int, no: str, supplier: str, applicant: str, label: str):
+        """企业微信推送调价单待审批消息卡片给审批人。未配置企微/推送失败时优雅降级，不影响审批流程。"""
+        if not user_ids:
+            return
+        try:
+            settings = _get_settings()
+            if not (settings.wecom_corp_id and settings.wecom_corp_secret and settings.wecom_agent_id):
+                logger.info("[price_change][wecom] 企业微信未配置，跳过审批推送")
+                return
+            # 查审批人的企微 userid（sys_user.wecom_user_id 已绑定）
+            rows = await self.db.execute(text(
+                "SELECT wecom_user_id FROM sys_user WHERE id = ANY(:uids) AND wecom_user_id IS NOT NULL AND wecom_user_id != ''"
+            ), {"uids": user_ids})
+            wecom_ids = [r[0] for r in rows if r[0]]
+            if not wecom_ids:
+                return
+            base = settings.frontend_base_url or "http://localhost:3000"
+            if base and not base.startswith(("http://", "https://")):
+                base = "http://" + base
+            url = f"{base}/purchase/price-change/{change_id}"
+            desc = f"调价单 {no}\n供应商：{supplier}\n申请人：{applicant}\n审批节点：{label}\n点击查看详情并处理审批。"
+            agent_id = settings.wecom_agent_id
+            try:
+                agent_id = int(agent_id)
+            except (TypeError, ValueError):
+                logger.warning(f"[price_change][wecom] agent_id 配置非法: {settings.wecom_agent_id}")
+                return
+            payload = {
+                "touser": "|".join(wecom_ids),
+                "msgtype": "textcard",
+                "agentid": agent_id,
+                "textcard": {
+                    "title": f"调价单待审批 - {label}",
+                    "description": desc,
+                    "url": url,
+                    "btntxt": "查看详情",
+                },
+            }
+            resp = await _get_wecom_client().send_app_message(payload)
+            errcode = resp.get("errcode", 0)
+            if errcode != 0:
+                logger.warning(f"[price_change][wecom] 推送审批消息失败 errcode={errcode} errmsg={resp.get('errmsg')}")
+            else:
+                logger.info(f"[price_change][wecom] 已推送 {len(wecom_ids)} 位审批人 change_id={change_id}")
+        except Exception as e:
+            logger.warning(f"[price_change][wecom] 审批企微推送异常（已降级）: {e}")
 
     async def _notify_applicant(self, change_id: int, title: str, content: str):
         """通知申请人"""

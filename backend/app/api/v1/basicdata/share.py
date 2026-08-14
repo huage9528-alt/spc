@@ -93,6 +93,8 @@ def _build_oauth_url(share: ShareLink) -> str:
     settings = get_settings()
     corp_id = settings.wecom_corp_id
     base_url = settings.frontend_base_url or "http://localhost:3000"
+    if base_url and not base_url.startswith(("http://", "https://")):
+        base_url = "http://" + base_url
     redirect_uri = quote(f"{base_url}/share/{share.token}", safe="")
     return (
         f"https://open.weixin.qq.com/connect/oauth2/authorize"
@@ -161,6 +163,8 @@ async def create_share_link(
     if body.auto_send_wecom and body.recipient:
         client = get_wecom_client()
         base_url = client._settings.frontend_base_url or "http://localhost:3000"
+        if base_url and not base_url.startswith(("http://", "https://")):
+            base_url = "http://" + base_url
         share_url = f"{base_url}/share/{token}"
         user_recs = [RecipientSpec(id=uid) for uid in body.recipient.user_ids]
         aggregated = WecomPushResult()

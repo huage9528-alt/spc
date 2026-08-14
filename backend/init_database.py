@@ -35,6 +35,7 @@ from app.models.production.schedule_plan import ProductionSchedulePlan
 from app.models.production.production_task_order import ProductionTaskOrder
 from app.models.production.front_process_record import FrontProcessRecord
 from app.models.production.production_daily_report import ProductionDailyReport  # noqa: F401
+from app.models.production.production_report import ProductionReport  # noqa: F401
 from app.models.production.workshop_daily_report import (  # noqa: F401
     WorkshopDailyReport,
     WorkshopDailyReportLeave,
@@ -355,6 +356,9 @@ class DatabaseInitializer:
             },
             "production_daily_report": {
                 "oa_detail_id": "INTEGER",
+            },
+            "production_schedule_plan": {
+                "completed_qty": "NUMERIC(15,2) DEFAULT 0",
             },
             "workshop_daily_report": {
                 "report_type": "VARCHAR(32) DEFAULT '计件'",
@@ -903,6 +907,7 @@ class DatabaseInitializer:
                             "basicdata.feedback.handle": ["handle"],
                             "basicdata.files": ["read", "delete"],
                             "basicdata.data_supply": ["create", "read", "update", "delete"],
+                            "basicdata.share_management": ["create", "read", "update", "delete"],
                             "announcements": ["create", "read", "update", "delete"],
                             "users": ["create", "read", "update", "delete"],
                             "users.reset_password": ["reset_password"],

@@ -106,6 +106,8 @@ async def send_share_to_wecom(
 
     settings = get_wecom_client()._settings
     base_url = getattr(settings, "frontend_base_url", None) or "http://localhost:3000"
+    if base_url and not base_url.startswith(("http://", "https://")):
+        base_url = "http://" + base_url
     share_url = f"{base_url}/share/{link.token}"
 
     user_recipients = [RecipientSpec(id=uid) for uid in payload.user_ids]

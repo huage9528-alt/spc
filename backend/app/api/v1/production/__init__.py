@@ -13,6 +13,7 @@ from app.api.v1.production.product_process_capacities import router as product_p
 from app.api.v1.production.upph_formula_configs import router as upph_formula_configs_router
 from app.api.v1.production.production_daily_report import router as daily_report_router
 from app.api.v1.production.workshop_daily_report import router as workshop_daily_report_router
+from app.api.v1.production.reports import router as reports_router
 from app.api.v1.production.labor_price_audit import router as labor_price_audit_router
 
 router = APIRouter()
@@ -30,4 +31,5 @@ router.include_router(packaging_router, prefix="/packaging", tags=["包装管理
 router.include_router(exceptions_router, prefix="/exceptions", tags=["工序异常池"])
 router.include_router(daily_report_router, prefix="/daily-reports", tags=["生产日报表"])
 router.include_router(workshop_daily_report_router, prefix="/workshop-daily-reports", tags=["车间日报表"])
+router.include_router(reports_router, prefix="/reports", tags=["报工"])
 router.include_router(labor_price_audit_router, prefix="/labor-price-audits", tags=["工价审核"])

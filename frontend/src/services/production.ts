@@ -171,4 +171,10 @@ export const productionApi = {
   workshopDailyReportPeopleOptions: (orgId: number) => api.get('/production/workshop-daily-reports/people-options', { params: { org_id: orgId } }),
   workshopDailyReportAttendanceOptions: (orgId: number, reportDate?: string) => api.get('/production/workshop-daily-reports/attendance-options', { params: { org_id: orgId, report_date: reportDate } }),
   workshopDailyReportLeaveOptions: (orgId: number, reportDate: string) => api.get('/production/workshop-daily-reports/leave-options', { params: { org_id: orgId, report_date: reportDate } }),
+  // 报工（针对排产计划）
+  reportVirtualWarehouses: () => api.get('/production/reports/virtual-warehouses'),
+  reportablePlans: (params: Record<string, any>) => api.get('/production/reports/plans', { params }),
+  createReport: (data: Record<string, any>) => api.post('/production/reports', data),
+  listReports: (params: Record<string, any>) => api.get('/production/reports', { params }),
+  dailyReportDraft: (params: Record<string, any>) => api.get('/production/reports/daily-report-draft', { params }),
 }
