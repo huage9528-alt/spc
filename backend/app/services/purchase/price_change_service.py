@@ -185,6 +185,7 @@ class PriceChangeService:
 
             await self._add_approval_log(cid, None, "submit", applicant, "提交审批")
             await self._init_approval_snapshot(cid)
+            await self._notify_approvers_of_level(cid, 1)
             self._run_ai_analysis_background(cid)
 
         record = await self.get_price_change(cid)
@@ -261,8 +262,8 @@ class PriceChangeService:
         )
         await self._add_approval_log(change_id, None, "submit", applicant, "提交审批")
         await self._init_approval_snapshot(change_id)
-        self._run_ai_analysis_background(change_id)
         await self._notify_approvers_of_level(change_id, 1)
+        self._run_ai_analysis_background(change_id)
         return await self.get_price_change(change_id)
 
     def _check_node_permission(self, node: dict, approver: str, approver_role: str) -> tuple[bool, str]:
