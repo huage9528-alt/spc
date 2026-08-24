@@ -33,6 +33,9 @@ class StockCheck(Base):
     co_checker_user_ids = Column(JSONB, nullable=True, comment="共同盘点人 sys_user.id 列表")
     created_by_user_id = Column(BigInteger, nullable=True, comment="创建人 sys_user.id（用于修改权限判定）")
     version = Column(Integer, nullable=False, default=0, comment="乐观锁版本号,每次更新+1")
+    source = Column(String(16), nullable=False, default="manual", server_default="manual", comment="数据来源 manual/k3")
+    erp_bill_no = Column(String(64), nullable=True, comment="K3 盘盈盘亏单号(YADJ/KADJ),幂等键")
+    erp_inter_id = Column(BigInteger, nullable=True, comment="K3 ICStockBill.FInterID")
 
     __table_args__ = (
         Index("ix_scm_inventory_check_order_date", "order_no", "check_date"),

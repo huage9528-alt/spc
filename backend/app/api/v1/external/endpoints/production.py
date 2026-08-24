@@ -5,116 +5,128 @@
 默认只返回当前生效版本（is_active = True）。
 """
 
-from datetime import datetime
-from typing import Optional
+from datetime import date, datetime
+from typing import Annotated, Optional
 
+from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_db
+from app.models.basicdata.data_supply import DataSupplyApiKey
 from app.models.production.schedule_plan import ProductionSchedulePlan
+from app.schemas.common import ResponseModel
 
-from ..registry import register_external, ExternalCallContext
+from ..common import ExternalPage, PageParamsMixin
+from ..deps import external_auth
+from ..log_wrap import log_external_call
+from ..registry import register_external
 
-
-def _parse_date(s: Optional[str]):
-    if not s:
-        return None
-    try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except (ValueError, TypeError):
-        return None
+router = APIRouter(prefix="/schedule-plans", tags=["生产"])
 
 
-def _parse_dt(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError):
-        return None
+class SchedulePlansListQuery(PageParamsMixin):
+    keyword: Optional[str] = Field(None, description="关键字（订单号 / 产品编码 / 型号 模糊匹配）")
+    department: Optional[str] = Field(None, description="部门精确匹配")
+    status: Optional[str] = Field(None, description="计划状态，多选逗号分隔，如 planned,confirmed")
+    order_no: Optional[str] = Field(None, description="订单号精确匹配")
+    product_code: Optional[str] = Field(None, description="产品编码精确匹配")
+    plan_date_start: Optional[date] = Field(None, description="排产日期范围起 YYYY-MM-DD")
+    plan_date_end: Optional[date] = Field(None, description="排产日期范围止 YYYY-MM-DD")
+    include_inactive: Optional[str] = Field(None, description="是否包含历史版本，1/true 为是；默认只返回生效版本")
+    updated_after: Optional[datetime] = Field(None, description="增量同步，仅返回 updated_at >= 此时间的记录（ISO 8601）")
 
 
+class SchedulePlanOut(BaseModel):
+    """生产排产计划（对外精简字段集）"""
+    id: int = Field(..., description="主键")
+    department: Optional[str] = Field(None, description="部门/车间")
+    plan_date: Optional[date] = Field(None, description="排产日期")
+    order_no: Optional[str] = Field(None, description="订单号")
+    line_no: Optional[str] = Field(None, description="行号")
+    product_code: Optional[str] = Field(None, description="产品编码")
+    model_code: Optional[str] = Field(None, description="产品型号")
+    quantity: Optional[float] = Field(None, description="排产数量")
+    owner: Optional[str] = Field(None, description="负责人")
+    start_date: Optional[date] = Field(None, description="计划开始日期")
+    end_date: Optional[date] = Field(None, description="计划结束日期")
+    priority: Optional[str] = Field(None, description="优先级")
+    status: Optional[str] = Field(None, description="计划状态")
+    upph: Optional[float] = Field(None, description="UPPH 人均时产量")
+    plan_version: Optional[int] = Field(None, description="计划版本")
+    is_active: Optional[bool] = Field(None, description="是否当前生效版本")
+    confirmed_by: Optional[str] = Field(None, description="确认人")
+    confirmed_at: Optional[datetime] = Field(None, description="确认时间")
+    updated_at: Optional[datetime] = Field(None, description="更新时间（增量同步锚点）")
+
+
+@router.get("/list", response_model=ResponseModel[ExternalPage[SchedulePlanOut]],
+            summary="生产排产计划列表", description="endpoint_code: schedule_plans.list")
 @register_external(
-    "schedule_plans.list",
-    "生产排产计划列表",
-    method="GET",
-    path="/schedule-plans/list",
+    "schedule_plans.list", "生产排产计划列表", method="GET", path="/schedule-plans/list",
     description="生产排产计划列表查询，支持关键字、部门、状态、订单号、排产日期范围、增量同步（默认只返回生效版本）",
     tags=["生产"],
 )
-async def schedule_plans_list(ctx: ExternalCallContext) -> dict:
-    """生产排产计划列表（外部定制版）
+@log_external_call("schedule_plans.list")
+async def schedule_plans_list(
+    request: Request,
+    q: Annotated[SchedulePlansListQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    key: DataSupplyApiKey = Depends(external_auth("schedule_plans.list")),
+):
+    page = max(q.page or 1, 1)
+    page_size = min(max(q.page_size if q.page_size is not None else 20, 1), 200)
 
-    参数（query）：
-        page, page_size: 分页
-        keyword: 关键字（订单号 / 产品编码 模糊匹配）
-        department: 部门精确匹配
-        status: 计划状态，多选逗号分隔 (planned/confirmed/locked/in_progress/done/...)
-        order_no: 订单号精确匹配
-        product_code: 产品编码精确匹配
-        plan_date_start, plan_date_end: 排产日期范围 YYYY-MM-DD
-        include_inactive: 是否包含历史版本 (1-是 0-否，默认 0 只返回 is_active=True)
-        updated_after: 增量同步 (ISO 8601)
-    """
-    params = ctx.params
-    db = ctx.db
-
-    page = max(int(params.get("page", 1) or 1), 1)
-    page_size = min(max(int(params.get("page_size", 20) or 20), 1), 200)
-    keyword = params.get("keyword")
-    department = params.get("department")
-    status = params.get("status")
-    order_no = params.get("order_no")
-    product_code = params.get("product_code")
-    plan_date_start = _parse_date(params.get("plan_date_start"))
-    plan_date_end = _parse_date(params.get("plan_date_end"))
-    include_inactive = str(params.get("include_inactive", "0")) in ("1", "true", "True")
-    updated_after = _parse_dt(params.get("updated_after"))
+    include_inactive = q.include_inactive in ("1", "true", "True")
 
     query = select(ProductionSchedulePlan)
+    count_query = select(func.count()).select_from(ProductionSchedulePlan)
     if not include_inactive:
         query = query.where(ProductionSchedulePlan.is_active == True)
-    count_query = select(func.count()).select_from(query.subquery())
+        count_query = count_query.where(ProductionSchedulePlan.is_active == True)
 
-    if keyword:
-        like_expr = f"%{keyword}%"
+    if q.keyword:
+        like_expr = f"%{q.keyword}%"
         kw_cond = or_(
             ProductionSchedulePlan.order_no.ilike(like_expr),
             ProductionSchedulePlan.product_code.ilike(like_expr),
             ProductionSchedulePlan.model_code.ilike(like_expr),
         )
         query = query.where(kw_cond)
-        count_query = select(func.count()).select_from(query.subquery())
+        count_query = count_query.where(kw_cond)
 
-    if department:
-        query = query.where(ProductionSchedulePlan.department == department)
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.department:
+        query = query.where(ProductionSchedulePlan.department == q.department)
+        count_query = count_query.where(ProductionSchedulePlan.department == q.department)
 
-    if status:
-        statuses = [s.strip() for s in status.split(",") if s.strip()]
+    if q.status:
+        statuses = [s.strip() for s in q.status.split(",") if s.strip()]
         if len(statuses) == 1:
             query = query.where(ProductionSchedulePlan.status == statuses[0])
+            count_query = count_query.where(ProductionSchedulePlan.status == statuses[0])
         elif statuses:
             query = query.where(ProductionSchedulePlan.status.in_(statuses))
-        count_query = select(func.count()).select_from(query.subquery())
+            count_query = count_query.where(ProductionSchedulePlan.status.in_(statuses))
 
-    if order_no:
-        query = query.where(ProductionSchedulePlan.order_no == order_no)
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.order_no:
+        query = query.where(ProductionSchedulePlan.order_no == q.order_no)
+        count_query = count_query.where(ProductionSchedulePlan.order_no == q.order_no)
 
-    if product_code:
-        query = query.where(ProductionSchedulePlan.product_code == product_code)
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.product_code:
+        query = query.where(ProductionSchedulePlan.product_code == q.product_code)
+        count_query = count_query.where(ProductionSchedulePlan.product_code == q.product_code)
 
-    if plan_date_start:
-        query = query.where(ProductionSchedulePlan.plan_date >= plan_date_start)
-        count_query = select(func.count()).select_from(query.subquery())
-    if plan_date_end:
-        query = query.where(ProductionSchedulePlan.plan_date <= plan_date_end)
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.plan_date_start:
+        query = query.where(ProductionSchedulePlan.plan_date >= q.plan_date_start)
+        count_query = count_query.where(ProductionSchedulePlan.plan_date >= q.plan_date_start)
+    if q.plan_date_end:
+        query = query.where(ProductionSchedulePlan.plan_date <= q.plan_date_end)
+        count_query = count_query.where(ProductionSchedulePlan.plan_date <= q.plan_date_end)
 
-    if updated_after:
-        query = query.where(ProductionSchedulePlan.updated_at >= updated_after)
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.updated_after:
+        query = query.where(ProductionSchedulePlan.updated_at >= q.updated_after)
+        count_query = count_query.where(ProductionSchedulePlan.updated_at >= q.updated_after)
 
     total = (await db.execute(count_query)).scalar() or 0
 

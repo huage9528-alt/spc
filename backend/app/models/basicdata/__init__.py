@@ -1,6 +1,5 @@
 from app.models.basicdata.user import SysUser, SysRole  # noqa: F401
 from app.models.basicdata.audit_log import AuditLog  # noqa: F401
-from app.models.basicdata.field_mapping import FieldMapping  # noqa: F401
 from app.models.basicdata.sync_sql_config import SyncSqlConfig  # noqa: F401
 from app.models.basicdata.sync_log import SyncLog  # noqa: F401
 from app.models.basicdata.customer import Customer  # noqa: F401
@@ -22,7 +21,7 @@ from app.models.basicdata.user_org_scope import UserOrgScope  # noqa: F401
 from app.models.basicdata.file_asset import FileAsset  # noqa: F401
 from app.models.basicdata.feedback import Feedback  # noqa: F401
 from app.models.basicdata.permission import SysPermission  # noqa: F401
-from app.models.basicdata.data_supply import DataSupplyConfig, DataSupplyApiKey, DataSupplyCallLog  # noqa: F401
+from app.models.basicdata.data_supply import DataSupplyApiKey, DataSupplyCallLog  # noqa: F401
 from app.models.basicdata.share_link import ShareLink  # noqa: F401
 from app.models.basicdata.share_link_recipient import ShareLinkRecipient  # noqa: F401
 from app.models.basicdata.writeback_sql_config import WritebackSqlConfig  # noqa: F401

@@ -1,5 +1,4 @@
-"""对外接口模块"""
+from .routes import external_router
+from .docs import docs_router
 
-from .router import router as external_router
-
-__all__ = ["external_router"]
+__all__ = ["external_router", "docs_router"]

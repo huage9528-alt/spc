@@ -11,6 +11,9 @@ engine = create_async_engine(
     pool_size=50,
     max_overflow=50,
     pool_timeout=30,
+    # 空闲池连接可能被防火墙/NAT 静默丢弃:pre_ping 挡"已关闭",recycle 挡"静默死"
+    pool_pre_ping=True,
+    pool_recycle=settings.DB_POOL_RECYCLE,
 )
 
 AsyncSessionLocal = async_sessionmaker(

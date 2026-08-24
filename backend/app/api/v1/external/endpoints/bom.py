@@ -4,25 +4,56 @@
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Annotated, Optional
 
-from sqlalchemy import select, func, or_
+from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel, Field
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_db
 from app.models.basicdata.bom import Bom
+from app.models.basicdata.data_supply import DataSupplyApiKey
 from app.models.basicdata.material import Material
+from app.schemas.common import ResponseModel
 
-from ..registry import register_external, ExternalCallContext
+from ..common import ExternalPage, PageParamsMixin
+from ..deps import external_auth
+from ..log_wrap import log_external_call
+from ..registry import register_external
 
-
-def _parse_dt(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError):
-        return None
+router = APIRouter(prefix="/boms", tags=["主数据"])
 
 
+class BomsListQuery(PageParamsMixin):
+    material_code: Optional[str] = Field(None, description="物料代码精确匹配（关联 scm_material 表）")
+    bom_no: Optional[str] = Field(None, description="BOM编号模糊匹配")
+    bom_version: Optional[str] = Field(None, description="BOM版本号精确匹配")
+    bom_type: Optional[str] = Field(None, description="BOM类型精确匹配")
+    use_status: Optional[str] = Field(None, description="使用状态精确匹配")
+    updated_after: Optional[datetime] = Field(None, description="增量同步，仅返回 update_time >= 此时间的记录（ISO 8601）")
+
+
+class BomOut(BaseModel):
+    """BOM（对外精简字段集）"""
+    bom_id: Optional[str] = Field(None, description="BOM ID")
+    bom_no: Optional[str] = Field(None, description="BOM 编号")
+    material_id: Optional[int] = Field(None, description="物料 ID")
+    material_code: Optional[str] = Field(None, description="物料编码（未按物料筛选时为 null）")
+    material_name: Optional[str] = Field(None, description="物料名称（未按物料筛选时为 null）")
+    parent_bom_id: Optional[str] = Field(None, description="父 BOM ID")
+    bom_version: Optional[str] = Field(None, description="BOM 版本号")
+    bom_type: Optional[str] = Field(None, description="BOM 类型")
+    base_qty: Optional[float] = Field(None, description="BOM 基础用量")
+    unit_id: Optional[str] = Field(None, description="单位 ID")
+    use_status: Optional[str] = Field(None, description="使用状态")
+    disabled_status: Optional[int] = Field(None, description="禁用状态（0-否 1-是）")
+    void_flag: Optional[int] = Field(None, description="作废标志（0-否 1-是）")
+    update_time: Optional[datetime] = Field(None, description="更新时间（增量同步锚点）")
+
+
+@router.get("/list", response_model=ResponseModel[ExternalPage[BomOut]],
+            summary="BOM列表", description="endpoint_code: boms.list")
 @register_external(
     "boms.list",
     "BOM列表",
@@ -31,34 +62,20 @@ def _parse_dt(s: Optional[str]) -> Optional[datetime]:
     description="BOM列表查询，支持按物料代码、BOM编号、版本号、类型、使用状态、增量同步",
     tags=["主数据"],
 )
-async def boms_list(ctx: ExternalCallContext) -> dict:
-    """BOM列表（外部定制版）
-
-    参数（query）：
-        page, page_size: 分页
-        material_code: 物料代码精确匹配（关联 scm_material 表）
-        bom_no: BOM编号模糊匹配
-        bom_version: BOM版本号精确匹配
-        bom_type: BOM类型精确匹配
-        use_status: 使用状态精确匹配
-        updated_after: 增量同步 (ISO 8601)
-    """
-    params = ctx.params
-    db = ctx.db
-
-    page = max(int(params.get("page", 1) or 1), 1)
-    page_size = min(max(int(params.get("page_size", 20) or 20), 1), 200)
-    material_code = params.get("material_code")
-    bom_no = params.get("bom_no")
-    bom_version = params.get("bom_version")
-    bom_type = params.get("bom_type")
-    use_status = params.get("use_status")
-    updated_after = _parse_dt(params.get("updated_after"))
+@log_external_call("boms.list")
+async def boms_list(
+    request: Request,
+    q: Annotated[BomsListQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    key: DataSupplyApiKey = Depends(external_auth("boms.list")),
+):
+    page = max(q.page or 1, 1)
+    page_size = min(max(q.page_size if q.page_size is not None else 20, 1), 200)
 
     query = select(Bom)
     need_join_material = False
 
-    if material_code:
+    if q.material_code:
         need_join_material = True
 
     if need_join_material:
@@ -66,28 +83,28 @@ async def boms_list(ctx: ExternalCallContext) -> dict:
 
     count_query = select(func.count()).select_from(query.subquery())
 
-    if material_code:
-        query = query.where(Material.material_code == material_code)
+    if q.material_code:
+        query = query.where(Material.material_code == q.material_code)
         count_query = select(func.count()).select_from(query.subquery())
 
-    if bom_no:
-        query = query.where(Bom.bom_no.ilike(f"%{bom_no}%"))
+    if q.bom_no:
+        query = query.where(Bom.bom_no.ilike(f"%{q.bom_no}%"))
         count_query = select(func.count()).select_from(query.subquery())
 
-    if bom_version:
-        query = query.where(Bom.bom_version == bom_version)
+    if q.bom_version:
+        query = query.where(Bom.bom_version == q.bom_version)
         count_query = select(func.count()).select_from(query.subquery())
 
-    if bom_type:
-        query = query.where(Bom.bom_type == bom_type)
+    if q.bom_type:
+        query = query.where(Bom.bom_type == q.bom_type)
         count_query = select(func.count()).select_from(query.subquery())
 
-    if use_status:
-        query = query.where(Bom.use_status == use_status)
+    if q.use_status:
+        query = query.where(Bom.use_status == q.use_status)
         count_query = select(func.count()).select_from(query.subquery())
 
-    if updated_after:
-        query = query.where(Bom.update_time >= updated_after)
+    if q.updated_after:
+        query = query.where(Bom.update_time >= q.updated_after)
         count_query = select(func.count()).select_from(query.subquery())
 
     total = (await db.execute(count_query)).scalar() or 0

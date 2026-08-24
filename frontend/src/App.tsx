@@ -104,7 +104,8 @@ function AntdMessageBridge() {
 
 function PrivateRoute({children}: { children: React.ReactNode }) {
     const token = useAuthStore((s) => s.currentToken)
-    if (!token) return <Navigate to="/login" replace/>
+    const location = useLocation()
+    if (!token) return <Navigate to="/login" replace state={{ from: location }}/>
     return <>{children}</>
 }
 

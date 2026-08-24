@@ -4,7 +4,7 @@ import {
   Table, Input, Button, Space, Tag, message, Modal, Card, Row, Col,
   InputNumber, Checkbox, Spin, Popover, Tour, Drawer, Empty, Tooltip, DatePicker, Segmented, Badge, Select, Dropdown, Tabs, Typography,
 } from 'antd'
-import { SearchOutlined, ReloadOutlined, CheckCircleOutlined, StopOutlined, ArrowLeftOutlined, SaveOutlined, QuestionCircleOutlined, HistoryOutlined, PlusOutlined, RightOutlined, DownOutlined, DownloadOutlined, BarChartOutlined, DeleteOutlined } from '@ant-design/icons'
+import { SearchOutlined, ReloadOutlined, CheckCircleOutlined, CloudDownloadOutlined, StopOutlined, ArrowLeftOutlined, SaveOutlined, QuestionCircleOutlined, HistoryOutlined, PlusOutlined, RightOutlined, DownOutlined, DownloadOutlined, BarChartOutlined, DeleteOutlined } from '@ant-design/icons'
 import { useAntTableQuery } from '@/hooks/useAntTableQuery'
 import { useExport } from '@/hooks/useExport'
 import { materialApi, orderApi } from '@/services/api'
@@ -20,8 +20,9 @@ import CoCheckerPickerModal from './CoCheckerPickerModal'
 import SearchableColumnFilter from './SearchableColumnFilter'
 import { textColumnFilter, textFilterIcon } from './TextColumnFilter'
 import StatsCharts from './components/StatsCharts'
-import { useStockCheckSync } from './useStockCheckSync'
+import { useStockCheckSync } from '@/hooks/useStockCheckSync'
 import ConflictModal, { ConflictDraft } from './ConflictModal'
+import K3ImportModal from './K3ImportModal'
 import { useAuthStore } from '@/store/auth'
 
 interface StockCheckItem {
@@ -46,6 +47,9 @@ interface StockCheckItem {
   system_qty?: number | null
   system_qty_time?: string | null
   live_qty?: number | null
+  live_wh_names?: string | null
+  snapshot_live?: boolean | null
+  warehouse_display?: string | null
   actual_qty?: number | null
   diff_qty?: number | null
   is_checked?: number | null
@@ -218,6 +222,7 @@ export default function StockCheckPage() {
   const [productFilter, setProductFilter] = useState<string>('all')
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const [statsOpen, setStatsOpen] = useState(false)
+  const [k3ModalOpen, setK3ModalOpen] = useState(false)
 
   const { exporting, exportData } = useExport()
   const [exportFormat, setExportFormat] = useState<'xlsx' | 'csv'>('xlsx')
@@ -240,7 +245,8 @@ export default function StockCheckPage() {
   const { connected: syncConnected, lastEventAt: syncLastEventAt } = useStockCheckSync({
     checkId: activeCheck?.id ?? null,
     onSnapshot: (p) => {
-      setActiveCheck((prev) => (prev ? { ...prev, ...p } : prev))
+      // can_edit 为空时保留原值,防止旧版 snapshot 的 null 覆盖 REST 返回的 can_edit=false
+      setActiveCheck((prev) => (prev ? { ...prev, ...p, can_edit: p.can_edit ?? prev.can_edit } : prev))
       setItems(p.items || [])
       const map: Record<number, { user_id: number; name: string; isSelf: boolean }[]> = {}
       const me = useAuthStore.getState().currentUser?.id
@@ -303,6 +309,10 @@ export default function StockCheckPage() {
       if (activeCheck?.id) loadCheck(activeCheck.id)
       setSyncBanner('BOM 已被刷新,行已重载')
     },
+    onWarehousesRefreshed: () => {
+      if (activeCheck?.id) loadCheck(activeCheck.id)
+      setSyncBanner('仓库已被刷新,行已重载')
+    },
     onPresence: (p) => {
       const me = useAuthStore.getState().currentUser?.id
       if (me != null && Number(p.user_id) === Number(me)) return  // 自己的不显示
@@ -322,6 +332,9 @@ export default function StockCheckPage() {
   // 存在感:聚焦即声明编辑某行(立即广播 + 心跳续命);离开停心跳并延迟清除 presence。
   // 用 150ms 防抖避免 Ant InputNumber blur/focus 时序抖动导致误清:
   // 若 blur 后 150ms 内又 focus 回同一行,取消清除。
+  // 注意: blur 必须走 InputNumber 的 onBlur props(React 管理监听器生命周期),
+  // 不要用 ref + addEventListener 挂原生监听 —— 内联 ref 每次渲染都重挂且不清理,
+  // 监听器会无限累积,一次 blur 触发 N 次清除请求。
   const clearPresenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleEditingFocus = useCallback((itemId: number) => {
@@ -347,7 +360,8 @@ export default function StockCheckPage() {
     if (presenceHeartbeat.current) { clearInterval(presenceHeartbeat.current); presenceHeartbeat.current = null }
     const cid = activeCheck?.id
     if (!cid) return
-    // 防抖: 150ms 后才真正清除,避免 InputNumber 内部 focus/blur 抖动误清
+    // 防抖: 先取消旧定时器再挂新的,保证连续 blur 只发一次清除
+    if (clearPresenceTimer.current) { clearTimeout(clearPresenceTimer.current); clearPresenceTimer.current = null }
     clearPresenceTimer.current = setTimeout(() => {
       clearPresenceTimer.current = null
       console.log('[presence-debug] blur 防抖到期 → POST presence null')
@@ -394,6 +408,7 @@ export default function StockCheckPage() {
         sort_order: params.sort_order,
         status: params.status,
         check_type: checkTypeFilter === 'all' ? undefined : checkTypeFilter,
+        source: params.source,
         date_from: params.date_from,
         date_to: params.date_to,
       })
@@ -401,6 +416,7 @@ export default function StockCheckPage() {
     },
     filterToQuery: (filters) => ({
       status: (filters.status as string[] | undefined)?.join(','),
+      source: (filters.source as string[] | undefined)?.[0],
       date_from: dateFrom,
       date_to: dateTo,
     }),
@@ -841,6 +857,26 @@ export default function StockCheckPage() {
     })
   }, [activeCheck, loadCheck])
 
+  const handleRefreshWarehouses = useCallback(async () => {
+    if (!activeCheck) return
+    Modal.confirm({
+      title: '刷新"(未入库)"行为具体仓库',
+      content: '将按当前即时库存，把本单中未录入数据的"(未入库)"行更新/拆分为具体仓库行：物料现处于多个仓库时拆为多行，各行快照库存取刷新时点数量。已录入数据的行不会被改动。是否继续？',
+      okText: '刷新仓库',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res: any = await materialApi.refreshStockCheckWarehouses(activeCheck.id)
+          await loadCheck(activeCheck.id)
+          const s = res?.data || {}
+          message.success(`仓库已刷新：更新 ${s.updated ?? 0} 行、拆分新增 ${s.inserted ?? 0} 行`)
+        } catch (e: any) {
+          message.error(e?.response?.data?.detail || e.message || '刷新失败')
+        }
+      },
+    })
+  }, [activeCheck, loadCheck])
+
   const handleSaveCoCheckers = useCallback(async (ids: number[]) => {
     if (!activeCheck) return
     setCoSaving(true)
@@ -954,9 +990,17 @@ export default function StockCheckPage() {
       { title: '属性', dataIndex: 'material_property_label', width: 90, ...stringCol('material_property_label', 90), ...resizeCol('material_property_label', 90) },
       { title: '单位', dataIndex: 'unit', width: 60, ...stringCol('unit', 60), ...resizeCol('unit', 60) },
       {
-        title: '快照库存', dataIndex: 'system_qty', width: 110, align: 'right' as const,
+        title: '快照库存', dataIndex: 'system_qty', width: 130, align: 'right' as const,
         ...numCol('system_qty'),
         render: (v: any, r: StockCheckItem) => {
+          if (r.snapshot_live) {
+            return (
+              <div style={{ lineHeight: 1.2 }}>
+                <div style={{ color: '#1677ff', fontWeight: 500 }}>{v != null ? Number(v).toFixed(2) : '-'}</div>
+                <Tag color="blue" style={{ margin: '2px 0 0', fontSize: 11, lineHeight: '16px' }}>实时</Tag>
+              </div>
+            )
+          }
           const snapTime = r.system_qty_time || activeCheck?.created_at
           return (
             <div style={{ lineHeight: 1.2 }}>
@@ -967,7 +1011,7 @@ export default function StockCheckPage() {
             </div>
           )
         },
-        ...resizeCol('system_qty', 110),
+        ...resizeCol('system_qty', 130),
       },
       {
         title: '即时库存', dataIndex: 'live_qty', width: 90, align: 'right' as const,
@@ -980,46 +1024,54 @@ export default function StockCheckPage() {
         dataIndex: 'wh_name',
         width: 160,
         ellipsis: true,
-        ...stringCol('wh_name', 160),
+        ...stringCol('warehouse_display', 160),
         ...resizeCol('wh_name', 160),
-        render: (v: any) => v || '—',
+        render: (v: any, r: StockCheckItem) => {
+          if (r.wh_id == null && r.live_wh_names) {
+            return (
+              <Tooltip title={`建单时未入库，现已入库：${r.live_wh_names}`}>
+                <span style={{ color: '#1677ff' }}>{r.live_wh_names}</span>
+              </Tooltip>
+            )
+          }
+          return v || '—'
+        },
       },
       {
         title: '盘点数', dataIndex: 'actual_qty', width: 220, align: 'right' as const,
         ...numCol('actual_qty'),
-        render: (_: any, r: StockCheckItem) => (
-          <Space size={4} style={{ width: '100%', justifyContent: 'flex-end' }}>
-            <InputNumber
-              size="small"
-              min={0}
-              step={0.01}
-              style={{ width: 100 }}
-              disabled={readonly || !!r.recent_checked_check_no}
-              value={r.actual_qty != null ? Number(r.actual_qty) : null}
-              onFocus={() => handleEditingFocus(r.id)}
-              ref={(el: any) => {
-                if (el) {
-                  const nativeEl = el.nativeElement || el
-                  if (nativeEl?.addEventListener) {
-                    nativeEl.addEventListener('blur', () => handleEditingBlur(), true)
-                  }
-                }
-              }}
-              onChange={(v) => {
-                const actual = v == null ? null : Number(v)
-                const diff = actual != null && r.system_qty != null ? actual - Number(r.system_qty) : null
-                updateItem(r.id, { actual_qty: actual, diff_qty: diff })
-              }}
-            />
-            {r.recent_checked_check_no && !readonly && (
-              <Tooltip title={`近期已盘 ${r.recent_checked_check_no}${r.recent_checked_date ? ` · ${r.recent_checked_date}` : ''}`}>
-                <Tag color="default">近期已盘</Tag>
-              </Tooltip>
-            )}
-            {r.recent_checked_check_no && !readonly && (
-              <Checkbox
-                onChange={(e) => {
-                  if (e.target.checked) {
+        render: (_: any, r: StockCheckItem) => {
+          const recentMark = !!r.recent_checked_check_no
+          // 近期已盘免盘行(带标记未重盘,含旧预填行): 只显示标签+重盘入口,不显示输入框
+          const recentPending = recentMark
+          return (
+            <Space size={4} style={{ width: '100%', justifyContent: 'flex-end' }}>
+              {!recentPending && (
+                <InputNumber
+                  size="small"
+                  min={0}
+                  step={0.01}
+                  style={{ width: 100 }}
+                  disabled={readonly || recentMark}
+                  value={r.actual_qty != null ? Number(r.actual_qty) : null}
+                  onFocus={() => handleEditingFocus(r.id)}
+                  onBlur={handleEditingBlur}
+                  onChange={(v) => {
+                    const actual = v == null ? null : Number(v)
+                    const diff = actual != null && r.system_qty != null ? actual - Number(r.system_qty) : null
+                    updateItem(r.id, { actual_qty: actual, diff_qty: diff, is_checked: actual != null ? 1 : 0 })
+                  }}
+                />
+              )}
+              {recentMark && (
+                <Tooltip title={`近期已盘 ${r.recent_checked_check_no}${r.recent_checked_date ? ` · ${r.recent_checked_date}` : ''}，免盘`}>
+                  <Tag color="default">近期已盘</Tag>
+                </Tooltip>
+              )}
+              {recentPending && !readonly && (
+                <Button
+                  type="link" size="small" style={{ padding: 0, height: 'auto' }}
+                  onClick={() => {
                     materialApi.updateStockCheckItem(r.id, { force_recount: true }).then(async (res: any) => {
                       const updated: StockCheckItem = res.data
                       setItems(prev => prev.map(p => p.id === updated.id ? { ...p, ...updated, force_recount: true } : p))
@@ -1028,23 +1080,23 @@ export default function StockCheckPage() {
                     }).catch((err: any) => {
                       message.error(err?.response?.data?.detail || err.message || '重盘失败')
                     })
-                  }
-                }}
-              >重盘</Checkbox>
-            )}
-            {(presenceByItem[r.id] || []).length > 0 && (
-              <Tooltip title={`${(presenceByItem[r.id] || []).map((x) => x.name).join('、')} 正在编辑此行`}>
-                <span style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                  {(presenceByItem[r.id] || []).map((x, i) => (
-                    <span key={x.user_id} style={{ color: x.isSelf ? '#2563eb' : '#d97706', marginLeft: i > 0 ? 4 : 0 }}>
-                      👤{x.name}
-                    </span>
-                  ))}
-                </span>
-              </Tooltip>
-            )}
-          </Space>
-        ),
+                  }}
+                >重盘</Button>
+              )}
+              {(presenceByItem[r.id] || []).length > 0 && (
+                <Tooltip title={`${(presenceByItem[r.id] || []).map((x) => x.name).join('、')} 正在编辑此行`}>
+                  <span style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                    {(presenceByItem[r.id] || []).map((x, i) => (
+                      <span key={x.user_id} style={{ color: x.isSelf ? '#2563eb' : '#d97706', marginLeft: i > 0 ? 4 : 0 }}>
+                        👤{x.name}
+                      </span>
+                    ))}
+                  </span>
+                </Tooltip>
+              )}
+            </Space>
+          )
+        },
         ...resizeCol('actual_qty', 220),
       },
       {
@@ -1200,6 +1252,10 @@ export default function StockCheckPage() {
           </span>
         </span>
         <Button
+          icon={<CloudDownloadOutlined />}
+          onClick={() => setK3ModalOpen(true)}
+        >从 K3 导入</Button>
+        <Button
           type={statsOpen ? 'primary' : 'default'}
           icon={<BarChartOutlined />}
           onClick={() => setStatsOpen((v) => !v)}
@@ -1350,13 +1406,35 @@ export default function StockCheckPage() {
                     : <Tag color="blue">订单</Tag>,
                 },
                 { title: '订单号', dataIndex: 'order_no', width: 180, sorter: true, render: (v: any) => v || '—' },
-                { title: '标题', dataIndex: 'title', ellipsis: true },
+                {
+                  title: '标题', dataIndex: 'title', ellipsis: true,
+                  render: (v: any, r: any) => (
+                    <Space size={4}>
+                      {r.source === 'k3' && <Tag color="geekblue">K3</Tag>}
+                      {v || '-'}
+                    </Space>
+                  ),
+                },
                 {
                   title: '状态', dataIndex: 'status', width: 100,
                   filters: STATUS_OPTIONS,
                   filteredValue: (recentFilters.status as string[] | undefined) ?? null,
                   filterMultiple: true,
                   render: (v: any) => <Tag color={STATUS_MAP[v]?.color || 'default'}>{STATUS_MAP[v]?.label || v}</Tag>,
+                },
+                {
+                  title: '来源', dataIndex: 'source', width: 90,
+                  filters: [
+                    { text: 'K3导入', value: 'k3' },
+                    { text: '本系统', value: 'manual' },
+                  ],
+                  filteredValue: (recentFilters.source as string[] | undefined) ?? null,
+                  filterMultiple: false,
+                  render: (v: any) => v === 'k3'
+                    ? <Tag color="geekblue">K3</Tag>
+                    : v === 'manual'
+                      ? <Tag>本系统</Tag>
+                      : '-',
                 },
                 { title: '盘点日期', dataIndex: 'check_date', width: 120, sorter: true },
                 { title: '应盘', dataIndex: 'total_materials', width: 70, align: 'right' as const, sorter: true },
@@ -1493,6 +1571,9 @@ export default function StockCheckPage() {
               )}
               {!readonly && activeCheck.check_type === 'order' && (activeCheck.status === 'in_progress' || activeCheck.status === 'open') && (
                 <Button type="link" size="small" onClick={handleRefreshBom}>补入子BOM物料</Button>
+              )}
+              {!readonly && (activeCheck.status === 'in_progress' || activeCheck.status === 'open') && items.some((it) => it.wh_id == null) && (
+                <Button type="link" size="small" onClick={handleRefreshWarehouses}>刷新仓库</Button>
               )}
               {!readonly && activeCheck.check_type === 'manual' && (activeCheck.status === 'in_progress' || activeCheck.status === 'open') && (
                 <Button type="link" size="small" icon={<PlusOutlined />} onClick={() => setAddPickerOpen(true)}>添加物料</Button>
@@ -1645,6 +1726,13 @@ export default function StockCheckPage() {
         onSave={handleSaveCoCheckers}
         saveLoading={coSaving}
       />
+      {k3ModalOpen && (
+        <K3ImportModal
+          open
+          onClose={() => setK3ModalOpen(false)}
+          onImported={() => reloadRecentList()}
+        />
+      )}
       <ConflictModal
         open={!!conflict}
         myDraft={conflict?.myDraft ?? null}

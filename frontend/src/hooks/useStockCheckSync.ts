@@ -46,6 +46,12 @@ export interface BomRefreshedPayload {
   new_item_ids: number[]
 }
 
+export interface WarehousesRefreshedPayload {
+  check_id: number
+  head_version: number
+  stats?: Record<string, number>
+}
+
 export interface PresencePayload {
   user_id: number
   name: string | null
@@ -65,6 +71,7 @@ export function useStockCheckSync(opts: {
   onStatusChanged: (p: StatusChangedPayload) => void
   onCoCheckersChanged: (p: CoCheckersChangedPayload) => void
   onBomRefreshed: (p: BomRefreshedPayload) => void
+  onWarehousesRefreshed?: (p: WarehousesRefreshedPayload) => void
   onPresence: (p: PresencePayload) => void
 }): { connected: boolean; lastEventAt: number | null } {
   const { checkId, onSnapshot, onItemUpdated, onStatusChanged, onCoCheckersChanged, onBomRefreshed, onPresence } = opts
@@ -72,8 +79,8 @@ export function useStockCheckSync(opts: {
   const [lastEventAt, setLastEventAt] = useState<number | null>(null)
   const esRef = useRef<EventSource | null>(null)
   // 用 ref 持有最新回调,避免回调变化导致重连
-  const cbRef = useRef({ onSnapshot, onItemUpdated, onStatusChanged, onCoCheckersChanged, onBomRefreshed, onPresence })
-  cbRef.current = { onSnapshot, onItemUpdated, onStatusChanged, onCoCheckersChanged, onBomRefreshed, onPresence }
+  const cbRef = useRef({ onSnapshot, onItemUpdated, onStatusChanged, onCoCheckersChanged, onBomRefreshed, onWarehousesRefreshed: opts.onWarehousesRefreshed, onPresence })
+  cbRef.current = { onSnapshot, onItemUpdated, onStatusChanged, onCoCheckersChanged, onBomRefreshed, onWarehousesRefreshed: opts.onWarehousesRefreshed, onPresence }
 
   const currentUserId = useAuthStore.getState().currentUser?.id ?? 0
 
@@ -121,6 +128,9 @@ export function useStockCheckSync(opts: {
         case 'bom_refreshed':
           cbRef.current.onBomRefreshed(env.payload)
           break
+        case 'warehouses_refreshed':
+          cbRef.current.onWarehousesRefreshed?.(env.payload)
+          break
         case 'presence':
           cbRef.current.onPresence(env.payload)
           break
@@ -128,7 +138,7 @@ export function useStockCheckSync(opts: {
           break
       }
     }
-    ;['snapshot', 'item_updated', 'status_changed', 'co_checkers_changed', 'bom_refreshed', 'presence', 'error'].forEach(
+    ;['snapshot', 'item_updated', 'status_changed', 'co_checkers_changed', 'bom_refreshed', 'warehouses_refreshed', 'presence', 'error'].forEach(
       (t) => es.addEventListener(t, dispatch as EventListener),
     )
 

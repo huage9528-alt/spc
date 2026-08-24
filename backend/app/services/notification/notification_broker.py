@@ -132,11 +132,17 @@ def _make_subscribe_client() -> Optional[redis.Redis]:
 
 async def subscribe_stream(
     user_id: int,
-    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
-    """SSE 端点生成器。首帧 snapshot(当前未读计数)，后续 unread 事件 + 15s 心跳。"""
+    """SSE 端点生成器。首帧 snapshot(当前未读计数)，后续 unread 事件 + 15s 心跳。
+
+    快照用短命会话算完立刻归还,订阅循环只走 Redis:流可活几小时,
+    持有调用方 db 会话会占住连接池的一条连接。
+    """
+    from app.core.database import AsyncSessionLocal
+
     try:
-        snapshot = await compute_unread_counts(db, user_id)
+        async with AsyncSessionLocal() as db:
+            snapshot = await compute_unread_counts(db, user_id)
     except Exception as e:
         logger.warning("notification_broker.subscribe snapshot failed: %s", e)
         snapshot = {"total": 0, "by_type": {}}

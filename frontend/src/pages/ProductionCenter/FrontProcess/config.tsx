@@ -31,11 +31,11 @@ export interface FrontRow {
 }
 
 const columns: ColumnsType<FrontRow> = [
-  { title: '任务单号', dataIndex: 'task_no', width: 120, ellipsis: true },
-  { title: '车间', dataIndex: 'workshop', width: 90, ellipsis: true },
-  { title: '物料代码', dataIndex: 'material_code', width: 120, ellipsis: true },
-  { title: '物料名称', dataIndex: 'material_name', width: 180, ellipsis: true },
-  { title: '销售订单号', dataIndex: 'sale_order_no', width: 130, ellipsis: true },
+  { title: '任务单号', dataIndex: 'task_no', width: 140 },
+  { title: '车间', dataIndex: 'workshop', width: 100 },
+  { title: '物料代码', dataIndex: 'material_code', width: 140 },
+  { title: '物料名称', dataIndex: 'material_name', width: 200 },
+  { title: '销售订单号', dataIndex: 'sale_order_no', width: 150 },
   { title: '客户代码', dataIndex: 'customer_code', width: 100, ellipsis: true },
   { title: '客户', dataIndex: 'customer', width: 140, ellipsis: true },
   { title: '下单日期', dataIndex: 'order_date', width: 90, render: (v: string) => formatDate(v) },
@@ -55,7 +55,7 @@ const columns: ColumnsType<FrontRow> = [
 export const frontProcessConfig: ProcessCrudConfig<FrontRow> = {
   editModalTitle: '编辑前道记录',
   editModalWidth: 700,
-  tableScrollX: 2220,
+  tableScrollX: 2320,
   searchPlaceholder: '搜索任务单号/物料/订单号/客户',
   showImport: false,
   keyField: 'task_id',
@@ -64,12 +64,28 @@ export const frontProcessConfig: ProcessCrudConfig<FrontRow> = {
     update: productionApi.updateFrontProcess,
   },
   columns,
+  checkFields: ['shell_status', 'frame_status', 'handle_status', 'bracket_status'],
+  extraFilters: [
+    { name: 'sale_order_no', placeholder: '销售订单号', type: 'text', width: 150 },
+    { name: 'year', placeholder: '计划开工年份', type: 'year', width: 130 },
+    {
+      name: 'workshop',
+      placeholder: '车间',
+      type: 'select',
+      width: 130,
+      options: [
+        { label: '喷塑车间', value: '喷塑车间' },
+        { label: '压铸车间', value: '压铸车间' },
+      ],
+    },
+  ],
   rowClassName: (row) => row.status === 'overdue' ? 'ant-table-row-danger' : row.status === 'abnormal' ? 'ant-table-row-warning' : '',
   formFields: [
-    { name: 'shell_status', label: '壳体', type: 'text', span: 6 },
-    { name: 'frame_status', label: '框', type: 'text', span: 6 },
-    { name: 'handle_status', label: '手杆', type: 'text', span: 6 },
-    { name: 'bracket_status', label: '支架圆盘', type: 'text', span: 6 },
+    { name: 'shell_status', label: '壳体', type: 'number', span: 6 },
+    { name: 'frame_status', label: '框', type: 'number', span: 6 },
+    { name: 'handle_status', label: '手杆', type: 'number', span: 6 },
+    { name: 'bracket_status', label: '支架圆盘', type: 'number', span: 6 },
     { name: 'remark', label: '备注', type: 'text', span: 24 },
   ],
 }
+

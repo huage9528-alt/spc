@@ -93,6 +93,8 @@ class StockCheckCountedItemOut(BaseModel):
     counted_at: Optional[datetime] = None
     checked_at: Optional[datetime] = None
     live_qty: Optional[Decimal] = None
+    # 运行时计算: 未入库行(wh_id=NULL)物料现已入库时的实时仓库名(顿号分隔)
+    live_wh_names: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -145,6 +147,12 @@ class StockCheckItemOut(BaseModel):
     warehouses: Optional[str] = None
     # 运行时计算(读详情时实时查 scm_inventory,不落库)
     live_qty: Optional[Decimal] = None
+    # 运行时计算: 未入库行(wh_id=NULL)物料现已入库时的实时仓库名(顿号分隔)
+    live_wh_names: Optional[str] = None
+    # 运行时计算: True=未盘点,快照库存展示为实时值;录入盘点数时冻结
+    snapshot_live: Optional[bool] = None
+    # 运行时计算: 仓库展示名(含实时仓库),供前端筛选/排序/展示
+    warehouse_display: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -170,6 +178,8 @@ class StockCheckOut(BaseModel):
     covered_products: Optional[List[Dict[str, Any]]] = None
     co_checker_user_ids: Optional[List[int]] = None
     created_by_user_id: Optional[int] = None
+    source: Optional[str] = None
+    erp_bill_no: Optional[str] = None
     # 以下为运行时计算字段
     co_checkers: Optional[List[Dict[str, Any]]] = None  # [{user_id, name}]
     can_edit: Optional[bool] = None
@@ -192,6 +202,8 @@ class StockCheckListOut(BaseModel):
     created_by: Optional[str] = None
     checked_by: Optional[str] = None
     created_at: Optional[datetime] = None
+    source: Optional[str] = None
+    erp_bill_no: Optional[str] = None
     covered_products: Optional[List[Dict[str, Any]]] = None
     co_checker_user_ids: Optional[List[int]] = None
 
@@ -278,3 +290,26 @@ class StockCheckConflictOut(BaseModel):
 class StockCheckActionBody(BaseModel):
     """complete / cancel 的请求体(支持 expected_version)"""
     expected_version: Optional[int] = None
+
+
+class K3BillOut(BaseModel):
+    """K3 盘盈盘亏单预览行(来自 ICStockBill FTranType 40/43)"""
+    erp_bill_no: str
+    erp_inter_id: int
+    tran_type: int
+    type_label: str
+    bill_date: Optional[date] = None
+    wh_name: Optional[str] = None
+    item_count: int
+    diff_total: Decimal
+    imported: bool
+
+
+class K3ImportRequest(BaseModel):
+    bill_nos: List[str]
+
+
+class K3ImportResultOut(BaseModel):
+    created: List[Dict[str, Any]] = []   # [{check_no, erp_bill_no, skipped_items}]
+    skipped: List[str] = []              # 已导入过被跳过的 K3 单号
+    failed: List[Dict[str, Any]] = []    # [{erp_bill_no, reason}]

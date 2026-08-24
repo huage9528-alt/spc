@@ -16,14 +16,49 @@
 """
 
 from decimal import Decimal, InvalidOperation
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
+from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_db
 from app.models.basicdata.bom import Bom
+from app.models.basicdata.data_supply import DataSupplyApiKey
+from app.schemas.common import ResponseModel
+from app.schemas.order.schemas import BomDetailItemOut
 from app.services.order.order_materials_service import _expand_bom_tree
 
-from ..registry import register_external, ExternalCallContext
+from ..common import ExternalQuery
+from ..deps import external_auth
+from ..log_wrap import log_external_call
+from ..registry import register_external
+
+router = APIRouter(prefix="/boms", tags=["主数据"])
+
+
+class BomsTreeQuery(ExternalQuery):
+    bom_id: str = Field(..., description="顶层 BOM ID（必填），以其为根向下展开多级")
+    demand_qty: Optional[str] = Field(None, description="根需求量（订单数量），数字字符串。缺省取根 BOM 的 base_qty，再缺省取 1")
+    flatten: Optional[str] = Field(None, description="true/1 时返回扁平列表 items，否则返回嵌套树 tree")
+
+
+class BomTreeData(BaseModel):
+    """BOM 多级树查询结果"""
+    bom_id: Optional[str] = Field(None, description="顶层 BOM ID")
+    bom_no: Optional[str] = Field(None, description="顶层 BOM 编号")
+    material_id: Optional[int] = Field(None, description="顶层物料 id")
+    base_qty: Optional[float] = Field(None, description="根 BOM 基础用量")
+    demand_qty: Optional[float] = Field(None, description="根需求量")
+    bom_version: Optional[str] = Field(None, description="BOM 版本号")
+    bom_type: Optional[str] = Field(None, description="BOM 类型")
+    flatten: bool = Field(False, description="是否扁平列表形态")
+    total_nodes: int = Field(0, description="节点总数")
+    max_level: int = Field(0, description="最大层级")
+    message: Optional[str] = Field(None, description="提示信息（如未找到 BOM 时）")
+    tree: Optional[List[BomDetailItemOut]] = Field(None, description="嵌套树（flatten=false 时返回）")
+    items: Optional[List[BomDetailItemOut]] = Field(None, description="扁平列表（flatten=true 时返回，含 bom_id/level/parent_material_id 供还原关系）")
 
 
 def _to_decimal(value, default: Decimal) -> Decimal:
@@ -81,6 +116,8 @@ def _flatten_nodes(nodes) -> list:
     return flat
 
 
+@router.get("/tree", response_model=ResponseModel[BomTreeData],
+            summary="BOM多级树", description="endpoint_code: boms.tree")
 @register_external(
     "boms.tree",
     "BOM多级树",
@@ -89,39 +126,33 @@ def _flatten_nodes(nodes) -> list:
     description="返回已组装好的多级 BOM 树（仅按 bom_id 查询），层级靠 material_id 桥接",
     tags=["主数据"],
 )
-async def boms_tree(ctx: ExternalCallContext) -> dict:
+@log_external_call("boms.tree")
+async def boms_tree(
+    request: Request,
+    q: Annotated[BomsTreeQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    key: DataSupplyApiKey = Depends(external_auth("boms.tree")),
+):
     """BOM 多级树（外部定制版）
 
-    参数（query）：
-        bom_id: 顶层 BOM ID（必填）。以其为根向下展开多级。
-        demand_qty: 根需求量（订单数量）。缺省时取根 BOM 的 base_qty，再缺省取 1。
-                    子件需求量 = standard_qty × 父级需求量（沿树纯连乘，不除 base_qty）。
-        flatten: true 时返回扁平列表 items，否则返回嵌套树 tree。
+    根需求量缺省取根 BOM 的 base_qty，再缺省取 1；
+    子件需求量 = standard_qty × 父级需求量（沿树纯连乘，不除 base_qty）。
     """
-    params = ctx.params
-    db = ctx.db
+    flatten = str(q.flatten if q.flatten is not None else "").lower() in ("1", "true", "yes")
 
-    bom_id = params.get("bom_id")
-    flatten = str(params.get("flatten", "")).lower() in ("1", "true", "yes")
-
-    base_result = {
-        "bom_id": bom_id,
-        "flatten": flatten,
-        "total_nodes": 0,
-        "max_level": 0,
-    }
-
-    if not bom_id:
-        return {**base_result, "message": "需要提供 bom_id"}
-
-    root_bom = await _resolve_root_bom(db, bom_id)
+    root_bom = await _resolve_root_bom(db, q.bom_id)
     if not root_bom:
-        return {**base_result, "message": "未找到该 bom_id 对应的 BOM"}
+        return {
+            "bom_id": q.bom_id,
+            "flatten": flatten,
+            "total_nodes": 0,
+            "max_level": 0,
+            "message": "未找到该 bom_id 对应的 BOM",
+        }
 
     # 根需求量：显式参数 > 根 BOM base_qty > 1
-    demand_param = params.get("demand_qty")
-    if demand_param not in (None, ""):
-        factor = _to_decimal(demand_param, Decimal("1"))
+    if q.demand_qty not in (None, ""):
+        factor = _to_decimal(q.demand_qty, Decimal("1"))
     elif root_bom.base_qty:
         factor = Decimal(str(root_bom.base_qty))
     else:

@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import oauth2_scheme, decode_access_token
+from app.core.security import oauth2_scheme, decode_access_token, verify_channel_version
 from app.core.token_blacklist import is_token_blacklisted
 from app.core.permissions import merge_role_permission_additions
 from app.models.basicdata.user import SysUser, SysRole
@@ -90,7 +90,6 @@ async def get_current_user(
     username = payload.get("username")
     role = payload.get("role")
     supplier_code = payload.get("supplier_code")
-    token_login_version = payload.get("login_version", 0)
     token_jti = payload.get("jti")
 
     if not user_id:
@@ -121,14 +120,7 @@ async def get_current_user(
             detail="用户不存在或已禁用",
         )
 
-    db_login_version = user.login_version or 0
-    if token_login_version != db_login_version:
-        from fastapi import HTTPException, status
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="您的账号已在其他设备登录，请重新登录",
-            headers={"X-Force-Logout": "true"},
-        )
+    verify_channel_version(user, payload)
 
     return await _build_user_info(db, user, user_id, username, role, supplier_code)
 
@@ -162,7 +154,6 @@ async def get_current_user_or_share(
     username = payload.get("username")
     role = payload.get("role")
     supplier_code = payload.get("supplier_code")
-    token_login_version = payload.get("login_version", 0)
     token_jti = payload.get("jti")
 
     if not user_id:
@@ -193,14 +184,7 @@ async def get_current_user_or_share(
             detail="用户不存在或已禁用",
         )
 
-    db_login_version = user.login_version or 0
-    if token_login_version != db_login_version:
-        from fastapi import HTTPException, status
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="您的账号已在其他设备登录，请重新登录",
-            headers={"X-Force-Logout": "true"},
-        )
+    verify_channel_version(user, payload)
 
     return await _build_user_info(db, user, user_id, username, role, supplier_code)
 
@@ -260,6 +244,7 @@ async def _authenticate_via_api_key(request: Request, db: AsyncSession):
         check_ip_whitelist,
         log_call,
     )
+    from app.services.basicdata.rate_limiter import check_rate_limit, RATE_LIMITED_MARK
 
     app_key = request.headers.get("x-app-key")
     timestamp = request.headers.get("x-timestamp")
@@ -282,6 +267,27 @@ async def _authenticate_via_api_key(request: Request, db: AsyncSession):
     client_ip = request.client.host if request.client else None
     if client_ip and not check_ip_whitelist(key_obj, client_ip):
         return None
+
+    allowed, retry_after = await check_rate_limit(key_obj.id, key_obj.rate_limit)
+    if not allowed:
+        try:
+            await log_call(
+                db=db, api_key_id=key_obj.id, api_key_name=key_obj.key_name,
+                data_type=endpoint_code,
+                request_params={"path": request.url.path, "query": str(request.url.query)},
+                response_status=429, response_count=0,
+                ip_address=client_ip,
+                user_agent=request.headers.get("user-agent"),
+                duration_ms=(time.time() - auth_start) * 1000,
+                error_message=RATE_LIMITED_MARK,
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=429,
+            detail=f"请求超过每分钟限额 {key_obj.rate_limit} 次，请 {retry_after} 秒后重试",
+            headers={"Retry-After": str(retry_after)},
+        )
 
     sys_user = await _get_or_load_sys_api_user(db)
 
@@ -344,6 +350,15 @@ async def get_current_user_or_api_key(
         return sys_user
 
     token = _extract_bearer_token(request)
+    if not token:
+        # 与 oauth2_scheme 行为对齐：缺 Authorization 头直接 401，
+        # 否则 decode_access_token(None) 会抛 AttributeError 变成 500
+        from fastapi import HTTPException, status
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     user = await get_current_user(token=token, db=db)
     request.state.current_user = user
     request.state.auth_source = "jwt"

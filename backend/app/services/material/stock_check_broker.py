@@ -180,11 +180,16 @@ async def get_presence_map(check_id: int) -> list:
             pass
 
 
-async def build_snapshot_payload(check_id: int, db) -> Optional[dict]:
-    """构造 snapshot 事件 payload: head + items + co_checkers 全量(含 version)。"""
+async def build_snapshot_payload(check_id: int, db, current_user: dict) -> Optional[dict]:
+    """构造 snapshot 事件 payload: head + items + co_checkers 全量(含 version)。
+
+    can_edit 按订阅者计算:否则 payload 里恒为 null,前端合并时会覆盖掉
+    REST 接口返回的 can_edit=false,导致无权限用户按钮"恢复可用"。
+    """
     from app.services.material.stock_check_service import (  # late import 防循环
         get_stock_check_with_items,
         _resolve_user_names,
+        _user_can_edit,
     )
     from app.schemas.material.stock_check import StockCheckOut, StockCheckItemOut
 
@@ -200,6 +205,7 @@ async def build_snapshot_payload(check_id: int, db) -> Optional[dict]:
         {"user_id": int(i), "name": name_map.get(int(i), f"user#{i}")}
         for i in ids
     ]
+    out.can_edit = _user_can_edit(head, current_user)
     out.items = [StockCheckItemOut.model_validate(it) for it in (head.items or [])]
     out_dict = out.model_dump()
     out_dict["version"] = int(head.version or 0)
@@ -209,11 +215,17 @@ async def build_snapshot_payload(check_id: int, db) -> Optional[dict]:
 
 async def subscribe_stream(
     check_id: int,
-    db,
     current_user: dict,
 ) -> AsyncGenerator[str, None]:
-    """SSE 端点生成器。yield 形如 'event: <type>\\ndata: {...}\\n\\n'。"""
-    snapshot = await build_snapshot_payload(check_id, db)
+    """SSE 端点生成器。yield 形如 'event: <type>\\ndata: {...}\\n\\n'。
+
+    快照用短命会话构建后立刻归还,订阅循环只走 Redis:流可活几小时,
+    持有 db 会话会占住连接池的一条连接。
+    """
+    from app.core.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        snapshot = await build_snapshot_payload(check_id, db, current_user)
     if snapshot is None:
         return
     yield _sse_chunk("snapshot", snapshot)

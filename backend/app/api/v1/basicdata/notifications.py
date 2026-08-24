@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func, update, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import AsyncSessionLocal, get_db
 from app.core.dependencies import get_current_user
 from app.core.security import PermissionChecker
 from app.models.basicdata.announcement import Notification
@@ -162,15 +162,18 @@ async def mark_all_read(
 async def stream_notifications(
     request: Request,
     token: str = Query(..., description="JWT token (EventSource 无法设 header)"),
-    db: AsyncSession = Depends(get_db),
 ):
-    """通知 SSE 实时流。首帧 snapshot(未读计数)，后续 unread 事件，15s 心跳。"""
-    current_user = await get_current_user(token=token, db=db)
+    """通知 SSE 实时流。首帧 snapshot(未读计数)，后续 unread 事件，15s 心跳。
+
+    鉴权用短命会话,不挂 Depends(get_db):流可活几小时,不能占住池连接。
+    """
+    async with AsyncSessionLocal() as db:
+        current_user = await get_current_user(token=token, db=db)
     uid = _get_user_id(current_user)
 
     async def gen():
         try:
-            async for chunk in subscribe_stream(uid, db):
+            async for chunk in subscribe_stream(uid):
                 if await request.is_disconnected():
                     break
                 yield chunk

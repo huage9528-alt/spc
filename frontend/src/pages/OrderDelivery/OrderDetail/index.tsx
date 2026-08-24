@@ -70,6 +70,8 @@ interface ProductMaterialGroup {
   product_code: string | null
   product_name: string | null
   product_model: string | null
+  bom_no?: string | null
+  bom_id?: string | null
   order_qty: number | null
   promised_date: string | null
   total_materials: number
@@ -400,6 +402,7 @@ export default function OrderDetail() {
     { title: '行号', dataIndex: 'line_no', key: 'line_no', width: 80 },
     { title: '产品编码', dataIndex: 'product_code', key: 'product_code', width: 130 },
     { title: 'BOM编号', dataIndex: 'bom_no', key: 'bom_no', render: (v: string | null) => v || '-' },
+    { title: 'BOM ID', dataIndex: 'bom_id', key: 'bom_id', width: 100, render: (v: string | null) => v || '-' },
     { title: '产品名称', dataIndex: 'product_name', key: 'product_name', ellipsis: true },
     { title: '产品型号', dataIndex: 'product_model', key: 'product_model', width: 130, ellipsis: true },
     { title: '订单数量', dataIndex: 'order_qty', key: 'order_qty', width: 90, render: (v: number | null) => v?.toLocaleString() || '-' },

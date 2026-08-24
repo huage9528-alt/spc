@@ -54,7 +54,6 @@ from app.models.rules.status_dictionary import StatusDictionary
 from app.models.common.business_document import BusinessDocument, BusinessDocumentVersion
 from app.models.basicdata.user import SysUser, SysRole
 from app.models.basicdata.audit_log import AuditLog
-from app.models.basicdata.field_mapping import FieldMapping
 from app.models.basicdata.sync_sql_config import SyncSqlConfig
 from app.models.basicdata.sync_log import SyncLog
 from app.models.basicdata.position import Position
@@ -340,6 +339,9 @@ class DatabaseInitializer:
                 "co_checker_user_ids": "JSONB",
                 "created_by_user_id": "BIGINT",
                 "version": "INTEGER NOT NULL DEFAULT 0",
+                "source": "VARCHAR(16) NOT NULL DEFAULT 'manual'",
+                "erp_bill_no": "VARCHAR(64)",
+                "erp_inter_id": "BIGINT",
             },
             "scm_inventory_check_item": {
                 "level": "INTEGER",
@@ -390,6 +392,7 @@ class DatabaseInitializer:
             },
             "sys_user": {
                 "wecom_user_id": "VARCHAR(64)",
+                "channel_sessions": "JSONB",
             },
         }
         # 删除已废弃的列
@@ -400,6 +403,7 @@ class DatabaseInitializer:
                 "reporter", "content", "node", "audit_person", "audit_score",
                 "is_project", "material_code", "process_type", "resolved_at",
             ],
+            "data_supply_api_key": ["allowed_data_types_json"],
         }
         added = 0
         # 每条 ALTER 独立事务：避免单条失败导致整批回滚（asyncpg 下事务一旦
@@ -414,6 +418,25 @@ class DatabaseInitializer:
                     added += 1
                 except Exception as e:
                     print(f"  Column {table}.{col} skipped: {e}")
+        # 历史 web 会话迁入 channel_sessions（幂等）：保留存量会话，部署后旧 token 不失效。
+        # login_version / last_token_jti 两列保留不删（仅作历史兼容），channel_sessions 为运行时真相。
+        try:
+            async with self.engine.begin() as conn:
+                col_exists = (await conn.execute(text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name='sys_user' AND column_name='login_version'"
+                ))).scalar_one_or_none()
+                if col_exists:
+                    await conn.execute(text(
+                        "UPDATE sys_user SET channel_sessions = jsonb_build_object('web', "
+                        "jsonb_build_object('version', COALESCE(login_version, 0), "
+                        "'last_jti', last_token_jti)) "
+                        "WHERE channel_sessions IS NULL "
+                        "AND (COALESCE(login_version, 0) > 0 OR last_token_jti IS NOT NULL)"
+                    ))
+                    print("  sys_user.channel_sessions backfilled from login_version/last_token_jti")
+        except Exception as e:
+            print(f"  sys_user.channel_sessions backfill skipped: {e}")
         # 删除废弃列
         for table, cols in drop_columns.items():
             for col in cols:
@@ -426,6 +449,15 @@ class DatabaseInitializer:
                 except Exception as e:
                     print(f"  Drop {table}.{col} skipped: {e}")
         print(f"Column migration completed ({added} statements executed)")
+
+        # 数据供给旧通用查询模型已下线：删除死表（幂等，每条独立事务）
+        for dead_table in ("data_supply_config", "field_mapping"):
+            try:
+                async with self.engine.begin() as conn:
+                    await conn.execute(text(f"DROP TABLE IF EXISTS {dead_table}"))
+                print(f"  Dropped dead table {dead_table}")
+            except Exception as e:
+                print(f"  Drop table {dead_table} skipped: {e}")
 
         # sys_user.wecom_user_id 部分唯一索引：每个企业微信 userid 至多绑定一个系统用户；
         # WHERE ... IS NOT NULL 使未绑定的用户（NULL）互不冲突。
@@ -533,6 +565,14 @@ class DatabaseInitializer:
                 print(f"  Employee oa_user_id unique constraint skipped: {e}")
             try:
                 await conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_business_document_version "
+                    "ON business_document_version (document_id, version_no)"
+                ))
+                print("  Unique constraint uq_business_document_version ensured")
+            except Exception as e:
+                print(f"  business_document_version unique constraint skipped: {e}")
+            try:
+                await conn.execute(text(
                     "ALTER TABLE scm_position ALTER COLUMN position_code DROP NOT NULL"
                 ))
                 await conn.execute(text(
@@ -570,6 +610,14 @@ class DatabaseInitializer:
                 print("  scm_inventory_check_item.ix_sci_counted_by_date index ensured")
             except Exception as e:
                 print(f"  scm_inventory_check_item.ix_sci_counted_by_date index skipped: {e}")
+            try:
+                await conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_scm_inventory_check_erp_bill_no "
+                    "ON scm_inventory_check (erp_bill_no) WHERE erp_bill_no IS NOT NULL"
+                ))
+                print("  scm_inventory_check.erp_bill_no unique index ensured")
+            except Exception as e:
+                print(f"  scm_inventory_check.erp_bill_no index skipped: {e}")
 
     async def migrate_production_daily_report_index(self):
         """将 production_daily_report 的唯一索引由 (oa_id) 改为 (oa_id, oa_detail_id)，
@@ -1327,83 +1375,6 @@ class DatabaseInitializer:
                 print(f"Error seeding risk rules: {e}")
                 raise
 
-    async def seed_field_mapping(self):
-        """Seed field mapping configuration"""
-        print("Seeding field mapping...")
-        async with AsyncSessionLocal() as session:
-            try:
-                # Check if mappings already exist
-                result = await session.execute(text("SELECT COUNT(*) FROM field_mapping"))
-                if result.scalar() > 0:
-                    print("Field mappings already exist, skipping...")
-                    return
-
-                mappings_data = [
-                    # ERP Order mappings
-                    {
-                        "source_system": "erp",
-                        "source_field": "ORDER_ID",
-                        "target_field": "order_no",
-                        "description": "ERP Order ID to order_no",
-                        "created_by": "admin"
-                    },
-                    {
-                        "source_system": "erp",
-                        "source_field": "LINE_NUM",
-                        "target_field": "line_no",
-                        "description": "Order line number",
-                        "created_by": "admin"
-                    },
-                    {
-                        "source_system": "erp",
-                        "source_field": "CUST_NAME",
-                        "target_field": "customer",
-                        "description": "Customer name",
-                        "created_by": "admin"
-                    },
-                    {
-                        "source_system": "erp",
-                        "source_field": "PRODUCT_CODE",
-                        "target_field": "product_code",
-                        "description": "Product/SKU code",
-                        "created_by": "admin"
-                    },
-                    # SRM PO mappings
-                    {
-                        "source_system": "srm",
-                        "source_field": "PO_NUMBER",
-                        "target_field": "po_no",
-                        "description": "SRM PO number",
-                        "created_by": "admin"
-                    },
-                    {
-                        "source_system": "srm",
-                        "source_field": "MATERIAL_CODE",
-                        "target_field": "material_code",
-                        "description": "Material code",
-                        "created_by": "admin"
-                    },
-                    {
-                        "source_system": "srm",
-                        "source_field": "SUPPLIER_CODE",
-                        "target_field": "supplier_code",
-                        "description": "Supplier code",
-                        "created_by": "admin"
-                    }
-                ]
-
-                for mapping_data in mappings_data:
-                    mapping = FieldMapping(**mapping_data)
-                    session.add(mapping)
-
-                await session.commit()
-                print("Field mapping seeded successfully")
-
-            except Exception as e:
-                await session.rollback()
-                print(f"Error seeding field mapping: {e}")
-                raise
-
     async def seed_normal_order_standards(self):
         """Seed normal order delivery and material kit readiness standards."""
         print("Seeding normal order standards...")
@@ -1467,7 +1438,7 @@ class DatabaseInitializer:
                             'published',
                             'admin'
                         )
-                        ON CONFLICT (doc_type, code) DO UPDATE
+                        ON CONFLICT (doc_type, code) WHERE is_deleted = 0 DO UPDATE
                         SET title = EXCLUDED.title,
                             applicable_product = EXCLUDED.applicable_product,
                             applicable_order = EXCLUDED.applicable_order,
@@ -2286,7 +2257,6 @@ ORDER BY FModifyDate DESC
             await self.seed_users()
             await self.seed_price_change_rule_config()
             await self.seed_risk_rules()
-            await self.seed_field_mapping()
             await self.seed_normal_order_standards()
             await self.seed_base_conditions()
             await self.seed_sync_sql_config()

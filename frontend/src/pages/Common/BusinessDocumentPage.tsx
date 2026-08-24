@@ -1,8 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Col, DatePicker, Descriptions, Drawer, Form, Input, List, Modal, Popconfirm, Row, Select, Space, Table, Tag, Tooltip, Upload, message } from 'antd'
-import { DeleteOutlined, EditOutlined, HistoryOutlined, InboxOutlined, InfoCircleOutlined, PlusOutlined, ReloadOutlined, SendOutlined, UploadOutlined } from '@ant-design/icons'
+import { DeleteOutlined, DownloadOutlined, EditOutlined, EyeOutlined, HistoryOutlined, InboxOutlined, InfoCircleOutlined, PaperClipOutlined, PlusOutlined, ReloadOutlined, SendOutlined, UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
+import axios from 'axios'
+import { renderAsync } from 'docx-preview'
+import * as XLSX from 'xlsx'
 import { fileApi } from '../../services/api'
+import { useAuthStore } from '../../store/auth'
 import { formatDate, formatDateTime } from '../../utils'
 
 type DocumentApiSet = {
@@ -28,6 +32,8 @@ const STATUS_MAP: Record<string, { label: string; color: string }> = {
   archived: { label: '已归档', color: 'orange' },
 }
 
+type PreviewKind = 'image' | 'pdf' | 'docx' | 'xlsx' | 'other'
+
 export default function BusinessDocumentPage({ title, namespace, api }: Props) {
   const [data, setData] = useState<any[]>([])
   const [total, setTotal] = useState(0)
@@ -43,8 +49,109 @@ export default function BusinessDocumentPage({ title, namespace, api }: Props) {
   const [historyOpen, setHistoryOpen] = useState(false)
   const [detailOpen, setDetailOpen] = useState(false)
   const [versions, setVersions] = useState<any[]>([])
+  const [previewFile, setPreviewFile] = useState<{ url?: string; name: string; key?: string; kind: PreviewKind; blob?: Blob } | null>(null)
+  const [xlsxSheets, setXlsxSheets] = useState<{ name: string; html: string }[]>([])
   const [form] = Form.useForm()
   const [versionForm] = Form.useForm()
+  const docxContainerRef = useRef<HTMLDivElement>(null)
+
+  const authHeaders = () => {
+    const token = useAuthStore.getState().currentToken
+    return token ? { Authorization: `Bearer ${token}` } : {}
+  }
+
+  type PreviewKind = 'image' | 'pdf' | 'docx' | 'xlsx' | 'other'
+
+  const fileKind = (name?: string, mime?: string): PreviewKind => {
+    const n = (name || '').toLowerCase()
+    if (mime?.startsWith('image/') || /\.(png|jpe?g|gif|bmp|webp|svg)$/.test(n)) return 'image'
+    if (mime === 'application/pdf' || /\.pdf$/.test(n)) return 'pdf'
+    if (/\.docx$/.test(n)) return 'docx'
+    if (/\.(xlsx|xls|csv)$/.test(n)) return 'xlsx'
+    return 'other'
+  }
+
+  // 预览：走带鉴权的 preview 接口（img/iframe 无法带 header，这里拉 blob 生成临时 URL）
+  const openPreview = async (f: any) => {
+    if (!f?.key) { message.warning('附件缺少文件标识，无法预览'); return }
+    if (previewFile?.url) window.URL.revokeObjectURL(previewFile.url)
+    setXlsxSheets([])
+    try {
+      const res = await axios.get(`/api/v1/files/preview/${f.key}`, {
+        responseType: 'blob',
+        headers: authHeaders(),
+      })
+      const mime = f.mime || (res.headers?.['content-type'] as string | undefined)
+      const kind = fileKind(f.name, mime)
+      if (kind === 'xlsx') {
+        const buf = await (res.data as Blob).arrayBuffer()
+        const wb = XLSX.read(buf, { type: 'array' })
+        setXlsxSheets(wb.SheetNames.map((sn: string) => ({ name: sn, html: XLSX.utils.sheet_to_html(wb.Sheets[sn]) })))
+        setPreviewFile({ name: f.name || '附件', key: f.key, kind })
+      } else if (kind === 'docx') {
+        setPreviewFile({ name: f.name || '附件', key: f.key, kind, blob: res.data as Blob })
+      } else {
+        const blob = new Blob([res.data], { type: mime || undefined })
+        setPreviewFile({ url: window.URL.createObjectURL(blob), name: f.name || '附件', key: f.key, kind })
+      }
+    } catch {
+      message.warning('预览失败')
+    }
+  }
+
+  // docx 渲染到容器（docx-preview 需要 DOM 容器，在 state 变化后的 effect 中执行）
+  useEffect(() => {
+    if (previewFile?.kind === 'docx' && previewFile.blob && docxContainerRef.current) {
+      const container = docxContainerRef.current
+      container.innerHTML = ''
+      renderAsync(previewFile.blob, container, undefined, { inWrapper: true })
+        .catch(() => message.warning('文档渲染失败'))
+    }
+  }, [previewFile])
+
+  const downloadAttachment = async (f: { url?: string; name: string; key?: string }) => {
+    if (f.url?.startsWith('blob:')) {
+      const a = document.createElement('a')
+      a.href = f.url
+      a.download = f.name
+      a.click()
+      return
+    }
+    if (!f.key) { message.warning('附件缺少文件标识，无法下载'); return }
+    try {
+      const res = await axios.get(`/api/v1/files/download/${f.key}`, {
+        responseType: 'blob',
+        headers: authHeaders(),
+      })
+      const url = window.URL.createObjectURL(new Blob([res.data]))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = f.name
+      a.click()
+      window.URL.revokeObjectURL(url)
+    } catch {
+      message.error('下载失败')
+    }
+  }
+
+  const closePreview = () => {
+    if (previewFile?.url?.startsWith('blob:')) window.URL.revokeObjectURL(previewFile.url)
+    if (docxContainerRef.current) docxContainerRef.current.innerHTML = ''
+    setPreviewFile(null)
+    setXlsxSheets([])
+  }
+
+  const renderAttachments = (attachments?: any[]) => (
+    <Space wrap size={8}>
+      {(attachments || []).map((a: any) => (
+        <Space key={a.key || a.id} size={4}>
+          <a onClick={() => openPreview(a)} style={{ fontSize: 12 }}><PaperClipOutlined /> {a.name}</a>
+          <a onClick={() => openPreview(a)} style={{ fontSize: 12, color: '#2563eb' }} title="预览"><EyeOutlined /></a>
+          <a onClick={() => downloadAttachment({ name: a.name, key: a.key })} style={{ fontSize: 12, color: '#2563eb' }} title="下载"><DownloadOutlined /></a>
+        </Space>
+      ))}
+    </Space>
+  )
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -75,6 +182,11 @@ export default function BusinessDocumentPage({ title, namespace, api }: Props) {
       } catch (e) {
         onError?.(e)
       }
+    },
+    onPreview: (file: any) => {
+      const af = file.response?.data || file
+      if (af.key) openPreview(af)
+      else message.warning('文件尚未上传完成，无法预览')
     },
   }
 
@@ -192,7 +304,7 @@ export default function BusinessDocumentPage({ title, namespace, api }: Props) {
 
   const columns = [
     { title: '编码', dataIndex: 'code', width: 140 },
-    { title: '标题', dataIndex: 'title', ellipsis: true },
+    { title: '标题', dataIndex: 'title' },
     { title: '适用产品', dataIndex: 'applicable_product', width: 120, render: (v: string) => v || '-' },
     { title: '适用订单', dataIndex: 'applicable_order', width: 120, render: (v: string) => v || '-' },
     { title: '适用工序', dataIndex: 'applicable_process', width: 120, render: (v: string) => v || '-' },
@@ -240,6 +352,11 @@ export default function BusinessDocumentPage({ title, namespace, api }: Props) {
 
   return (
     <div>
+      <style>{`
+        .xlsx-preview table { border-collapse: collapse; background: #fff; }
+        .xlsx-preview td, .xlsx-preview th { border: 1px solid #d9d9d9; padding: 4px 8px; min-width: 60px; height: 26px; font-size: 12px; white-space: nowrap; }
+        .xlsx-preview table tr:first-child td { background: #f8fafc; font-weight: 500; }
+      `}</style>
       <div className="card-modern" style={{ padding: '16px 20px', marginBottom: 16 }}>
         <Row gutter={12} align="middle">
           <Col>
@@ -352,7 +469,7 @@ export default function BusinessDocumentPage({ title, namespace, api }: Props) {
                     <div style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>{item.content || '-'}</div>
                     {item.attachments?.length ? (
                       <div style={{ marginTop: 8 }}>
-                        {item.attachments.map((a: any) => <Tag key={a.key || a.id}>{a.name}</Tag>)}
+                        {renderAttachments(item.attachments)}
                       </div>
                     ) : null}
                   </div>
@@ -387,12 +504,56 @@ export default function BusinessDocumentPage({ title, namespace, api }: Props) {
             <div style={{ marginTop: 16, fontWeight: 500 }}>附件</div>
             <div style={{ marginTop: 8 }}>
               {currentDetailVersion?.attachments?.length
-                ? currentDetailVersion.attachments.map((a: any) => <Tag key={a.key || a.id}>{a.name}</Tag>)
+                ? renderAttachments(currentDetailVersion.attachments)
                 : <span>-</span>}
             </div>
           </>
         )}
       </Drawer>
+
+      <Modal
+        title={previewFile?.name || '附件预览'}
+        open={!!previewFile}
+        onCancel={closePreview}
+        width={800}
+        footer={
+          <Button icon={<DownloadOutlined />} onClick={() => previewFile && downloadAttachment({ url: previewFile.url, name: previewFile.name, key: previewFile.key })}>
+            下载
+          </Button>
+        }
+      >
+        {previewFile && (
+          previewFile.kind === 'pdf' ? (
+            <iframe src={previewFile.url} title={previewFile.name} style={{ width: '100%', height: '70vh', border: 'none' }} />
+          ) : previewFile.kind === 'image' ? (
+            <div style={{ textAlign: 'center' }}>
+              <img src={previewFile.url} alt={previewFile.name} style={{ maxWidth: '100%', maxHeight: '70vh' }} />
+            </div>
+          ) : previewFile.kind === 'docx' ? (
+            <div style={{ background: '#f1f5f9', padding: 12, borderRadius: 4, maxHeight: '70vh', overflow: 'auto' }}>
+              <div ref={docxContainerRef} />
+            </div>
+          ) : previewFile.kind === 'xlsx' ? (
+            <div className="xlsx-preview" style={{ maxHeight: '70vh', overflow: 'auto' }}>
+              {xlsxSheets.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 24 }}>表格解析中…</div>}
+              {xlsxSheets.length > 1 && (
+                <div style={{ marginBottom: 8, color: '#64748b', fontSize: 12 }}>共 {xlsxSheets.length} 个工作表</div>
+              )}
+              {xlsxSheets.map(s => (
+                <div key={s.name} style={{ marginBottom: 16 }}>
+                  {xlsxSheets.length > 1 && <div style={{ fontWeight: 600, margin: '8px 0' }}>工作表：{s.name}</div>}
+                  <div dangerouslySetInnerHTML={{ __html: s.html }} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ textAlign: 'center', padding: '48px 0', color: '#94a3b8' }}>
+              <PaperClipOutlined style={{ fontSize: 32, marginBottom: 8, display: 'block' }} />
+              <div>该文件类型不支持在线预览，请点击下方“下载”按钮查看</div>
+            </div>
+          )
+        )}
+      </Modal>
     </div>
   )
 }

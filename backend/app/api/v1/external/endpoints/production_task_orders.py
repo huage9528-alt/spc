@@ -3,75 +3,89 @@
 为外部系统定制的 OA 生产任务单查询接口。基于 ProductionTaskOrder 表。
 支持分页、关键字、车间、类型、状态、增量同步。
 """
-from datetime import datetime
-from typing import Optional
+from datetime import date, datetime
+from typing import Annotated, Optional
 
+from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_db
+from app.models.basicdata.data_supply import DataSupplyApiKey
 from app.models.production.production_task_order import ProductionTaskOrder
+from app.schemas.common import ResponseModel
 
-from ..registry import register_external, ExternalCallContext
+from ..common import ExternalPage, PageParamsMixin
+from ..deps import external_auth
+from ..log_wrap import log_external_call
+from ..registry import register_external
 
-
-def _parse_int(s: Optional[str]) -> Optional[int]:
-    if s is None or s == "":
-        return None
-    try:
-        return int(s)
-    except (ValueError, TypeError):
-        return None
+router = APIRouter(prefix="/production-task-orders", tags=["生产"])
 
 
-def _parse_dt(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError):
-        return None
+class TaskOrdersListQuery(PageParamsMixin):
+    keyword: Optional[str] = Field(None, description="关键字（任务单号 / 物料名称 模糊匹配）")
+    workshop: Optional[str] = Field(None, description="生产车间精确匹配")
+    task_type: Optional[str] = Field(None, description="类型精确匹配")
+    is_closed: Optional[int] = Field(None, description="是否关闭 0/1")
+    audit_status: Optional[int] = Field(None, description="审核状态 0=未审核 1=已审核")
+    mrp_flag: Optional[int] = Field(None, description="MRP 标志 0/1")
+    sale_order_no: Optional[str] = Field(None, description="销售订单号精确匹配")
+    updated_after: Optional[datetime] = Field(None, description="增量同步，仅返回 updated_at >= 此时间的记录（ISO 8601）")
 
 
+class TaskOrderOut(BaseModel):
+    """生产任务单（对外精简字段集）"""
+    id: int = Field(..., description="主键")
+    task_id: Optional[int] = Field(None, description="OA 任务单 ID")
+    task_no: Optional[str] = Field(None, description="任务单号")
+    workshop: Optional[str] = Field(None, description="车间")
+    material_code: Optional[str] = Field(None, description="物料编码")
+    material_name: Optional[str] = Field(None, description="物料名称")
+    planned_start_date: Optional[date] = Field(None, description="计划开始日期")
+    planned_end_date: Optional[date] = Field(None, description="计划结束日期")
+    actual_start_date: Optional[date] = Field(None, description="实际开始日期")
+    actual_end_date: Optional[date] = Field(None, description="实际结束日期")
+    task_qty: Optional[float] = Field(None, description="任务数量")
+    repair_qty: Optional[float] = Field(None, description="返修数量")
+    actual_qty: Optional[float] = Field(None, description="实际完成数量")
+    task_type: Optional[str] = Field(None, description="类型")
+    sale_order_no: Optional[str] = Field(None, description="销售订单号")
+    sale_order_id: Optional[int] = Field(None, description="销售订单 id")
+    start_flag: Optional[int] = Field(None, description="开工标志")
+    is_closed: Optional[int] = Field(None, description="是否关闭")
+    audit_status: Optional[int] = Field(None, description="审核状态 0=未审核 1=已审核")
+    mrp_flag: Optional[int] = Field(None, description="MRP 标志")
+    audit_user_id: Optional[int] = Field(None, description="审核人 id")
+    request_user_id: Optional[int] = Field(None, description="申请人 id")
+    supplier_id: Optional[int] = Field(None, description="供应商 id")
+    erp_updated_at: Optional[datetime] = Field(None, description="ERP 侧更新时间")
+    updated_at: Optional[datetime] = Field(None, description="更新时间（增量同步锚点）")
+
+
+@router.get("/list", response_model=ResponseModel[ExternalPage[TaskOrderOut]],
+            summary="生产任务单列表", description="endpoint_code: production_task_orders.list")
 @register_external(
-    "production_task_orders.list",
-    "生产任务单列表",
-    method="GET",
-    path="/production-task-orders/list",
+    "production_task_orders.list", "生产任务单列表", method="GET", path="/production-task-orders/list",
     description="OA 生产任务单列表查询，支持关键字、车间、类型、状态、增量同步",
     tags=["生产"],
 )
-async def production_task_orders_list(ctx: ExternalCallContext) -> dict:
-    """生产任务单列表（外部定制版）
-
-    参数（query）：
-        page, page_size: 分页
-        keyword: 关键字（任务单号 / 物料名称 模糊匹配）
-        workshop: 生产车间精确匹配
-        task_type: 类型精确匹配
-        is_closed: 是否关闭 0/1
-        audit_status: 审核状态 0=未审核 1=已审核
-        mrp_flag: MRP标志 0/1
-        sale_order_no: 销售订单号精确匹配
-        updated_after: 增量同步，仅返回 updated_at >= 此时间的记录 (ISO 8601)
-    """
-    params = ctx.params
-    db = ctx.db
-
-    page = max(int(params.get("page", 1) or 1), 1)
-    page_size = min(max(int(params.get("page_size", 20) or 20), 1), 200)
-    keyword = params.get("keyword")
-    workshop = params.get("workshop")
-    task_type = params.get("task_type")
-    is_closed = _parse_int(params.get("is_closed"))
-    audit_status = _parse_int(params.get("audit_status"))
-    mrp_flag = _parse_int(params.get("mrp_flag"))
-    sale_order_no = params.get("sale_order_no")
-    updated_after = _parse_dt(params.get("updated_after"))
+@log_external_call("production_task_orders.list")
+async def production_task_orders_list(
+    request: Request,
+    q: Annotated[TaskOrdersListQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    key: DataSupplyApiKey = Depends(external_auth("production_task_orders.list")),
+):
+    page = max(q.page or 1, 1)
+    page_size = min(max(q.page_size if q.page_size is not None else 20, 1), 200)
 
     query = select(ProductionTaskOrder)
     count_query = select(func.count()).select_from(ProductionTaskOrder)
 
-    if keyword:
-        like_expr = f"%{keyword}%"
+    if q.keyword:
+        like_expr = f"%{q.keyword}%"
         kw_cond = or_(
             ProductionTaskOrder.task_no.ilike(like_expr),
             ProductionTaskOrder.material_name.ilike(like_expr),
@@ -79,33 +93,33 @@ async def production_task_orders_list(ctx: ExternalCallContext) -> dict:
         query = query.where(kw_cond)
         count_query = count_query.where(kw_cond)
 
-    if workshop:
-        query = query.where(ProductionTaskOrder.workshop == workshop)
-        count_query = count_query.where(ProductionTaskOrder.workshop == workshop)
+    if q.workshop:
+        query = query.where(ProductionTaskOrder.workshop == q.workshop)
+        count_query = count_query.where(ProductionTaskOrder.workshop == q.workshop)
 
-    if task_type:
-        query = query.where(ProductionTaskOrder.task_type == task_type)
-        count_query = count_query.where(ProductionTaskOrder.task_type == task_type)
+    if q.task_type:
+        query = query.where(ProductionTaskOrder.task_type == q.task_type)
+        count_query = count_query.where(ProductionTaskOrder.task_type == q.task_type)
 
-    if is_closed is not None:
-        query = query.where(ProductionTaskOrder.is_closed == is_closed)
-        count_query = count_query.where(ProductionTaskOrder.is_closed == is_closed)
+    if q.is_closed is not None:
+        query = query.where(ProductionTaskOrder.is_closed == q.is_closed)
+        count_query = count_query.where(ProductionTaskOrder.is_closed == q.is_closed)
 
-    if audit_status is not None:
-        query = query.where(ProductionTaskOrder.audit_status == audit_status)
-        count_query = count_query.where(ProductionTaskOrder.audit_status == audit_status)
+    if q.audit_status is not None:
+        query = query.where(ProductionTaskOrder.audit_status == q.audit_status)
+        count_query = count_query.where(ProductionTaskOrder.audit_status == q.audit_status)
 
-    if mrp_flag is not None:
-        query = query.where(ProductionTaskOrder.mrp_flag == mrp_flag)
-        count_query = count_query.where(ProductionTaskOrder.mrp_flag == mrp_flag)
+    if q.mrp_flag is not None:
+        query = query.where(ProductionTaskOrder.mrp_flag == q.mrp_flag)
+        count_query = count_query.where(ProductionTaskOrder.mrp_flag == q.mrp_flag)
 
-    if sale_order_no:
-        query = query.where(ProductionTaskOrder.sale_order_no == sale_order_no)
-        count_query = count_query.where(ProductionTaskOrder.sale_order_no == sale_order_no)
+    if q.sale_order_no:
+        query = query.where(ProductionTaskOrder.sale_order_no == q.sale_order_no)
+        count_query = count_query.where(ProductionTaskOrder.sale_order_no == q.sale_order_no)
 
-    if updated_after:
-        query = query.where(ProductionTaskOrder.updated_at >= updated_after)
-        count_query = count_query.where(ProductionTaskOrder.updated_at >= updated_after)
+    if q.updated_after:
+        query = query.where(ProductionTaskOrder.updated_at >= q.updated_after)
+        count_query = count_query.where(ProductionTaskOrder.updated_at >= q.updated_after)
 
     total = (await db.execute(count_query)).scalar() or 0
 

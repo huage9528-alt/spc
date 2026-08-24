@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams, useLocation } from 'react-router-dom'
 import { Form, Input, Button, Spin, message } from 'antd'
 import { UserOutlined, LockOutlined, ShopOutlined, TeamOutlined } from '@ant-design/icons'
-import { authApi } from '../services/api'
+import { authApi, REDIRECT_AFTER_LOGIN_KEY } from '../services/api'
 import { useAuthStore } from '../store/auth'
 import { SUPPLIER_PORTAL_PATHS } from '../constants/permissions'
 
@@ -108,7 +108,17 @@ export default function Login() {
   const [qrConfig, setQrConfig] = useState<WecomQrConfig | null>(null)
   const navigate = useNavigate()
   const setAuth = useAuthStore((s) => s.setAuth)
+  const currentToken = useAuthStore((s) => s.currentToken)
   const [searchParams] = useSearchParams()
+  const location = useLocation()
+  // 登录后回跳：优先取路由 state（PrivateRoute 透传），其次取 sessionStorage（401 全页刷新场景），最后兜底首页
+  const from =
+    (location.state as { from?: { pathname?: string } } | null)?.from?.pathname
+    || (() => { try { return sessionStorage.getItem(REDIRECT_AFTER_LOGIN_KEY) } catch { return null } })()
+    || ''
+  useEffect(() => {
+    try { sessionStorage.removeItem(REDIRECT_AFTER_LOGIN_KEY) } catch {}
+  }, [])
   const code = searchParams.get('code')
   const isInWecom =
     typeof navigator !== 'undefined' &&
@@ -118,20 +128,22 @@ export default function Login() {
   const loginWithWecomCode = useCallback(async (wecomCode: string, opts?: { clearUrl?: boolean }) => {
     setLoggingIn(true)
     try {
-      const res: any = await authApi.wecomLogin(wecomCode)
+      // 渠道区分：企微客户端内 = wecom 渠道，浏览器扫码 = web 渠道（与账密登录互斥）
+      const channel = isInWecom ? 'wecom' : 'web'
+      const res: any = await authApi.wecomLogin(wecomCode, channel)
       const token = res.data.access_token
       useAuthStore.getState().setAuth(token, null)
       const meRes: any = await authApi.getMe()
       setAuth(token, meRes.data)
       message.success('登录成功')
-      navigate('/dashboard')
+      navigate(from || '/dashboard', { replace: true })
     } catch {
       // /wecom-login 失败由全局拦截器 toast；此处仅结束 loading
     } finally {
       setLoggingIn(false)
       if (opts?.clearUrl) window.history.replaceState({}, '', window.location.pathname)
     }
-  }, [setAuth, navigate])
+  }, [setAuth, navigate, from])
 
   // PC 浏览器：拉取扫码配置（企微客户端内不需要）
   useEffect(() => {
@@ -161,9 +173,9 @@ export default function Login() {
     loginWithWecomCode(code, { clearUrl: true })
   }, [code, searchParams, loginWithWecomCode])
 
-  // 企微客户端内：无 code 时静默跳转 OAuth
+  // 企微客户端内：无 code 且未登录时静默跳转 OAuth
   useEffect(() => {
-    if (code || !isInWecom) return
+    if (code || !isInWecom || currentToken) return
     ;(async () => {
       try {
         const state = genWecomState()
@@ -174,12 +186,28 @@ export default function Login() {
         // 企微未配置等：静默，保留账密表单
       }
     })()
-  }, [code, isInWecom])
+  }, [code, isInWecom, currentToken])
+
+  // 已登录用户访问 /login：自动跳转（OAuth ?code= 回调中途除外）
+  useEffect(() => {
+    if (!currentToken || code) return
+    if (useAuthStore.getState().isSupplierUser()) {
+      const firstAllowedPath = SUPPLIER_PORTAL_PATHS.find((path) => {
+        const permission = PATH_TO_PERMISSION[path]
+        return permission && useAuthStore.getState().hasPermission(permission, 'read')
+      })
+      navigate(firstAllowedPath || '/purchase-plan', { replace: true })
+    } else {
+      navigate(from || '/dashboard', { replace: true })
+    }
+  }, [currentToken, code, from, navigate])
 
   const onFinish = async (values: LoginFormValues) => {
     setLoading(true)
     try {
-      const res: any = await authApi.login(values.username, values.password, values.loginType)
+      // 渠道区分：企微客户端内 = wecom 渠道，浏览器 = web 渠道（同渠道互斥、跨渠道并存）
+      const channel = isInWecom ? 'wecom' : 'web'
+      const res: any = await authApi.login(values.username, values.password, values.loginType, channel)
       const token = res.data.access_token
 
       useAuthStore.getState().setAuth(token, null)
@@ -206,7 +234,7 @@ export default function Login() {
         })
         navigate(firstAllowedPath || '/purchase-plan')
       } else {
-        navigate('/dashboard')
+        navigate(from || '/dashboard', { replace: true })
       }
     } catch (error: any) {
       message.error(error?.message || '登录失败，请检查用户名和密码')

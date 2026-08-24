@@ -376,6 +376,7 @@ class OrderProductMaterialsOut(BaseModel):
     product_name: Optional[str] = None
     product_model: Optional[str] = None
     bom_no: Optional[str] = None
+    bom_id: Optional[str] = None
     order_qty: Optional[float] = None
     promised_date: Optional[date] = None
     total_materials: int = 0

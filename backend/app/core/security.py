@@ -55,6 +55,32 @@ def decode_access_token(token: str) -> dict:
         )
 
 
+def resolve_channel_login_version(user, token_channel: str) -> int:
+    """按渠道读取登录版本号：所有渠道统一存于 channel_sessions JSON。
+
+    同渠道每次登录版本递增，旧 token 携带的版本与当前版本不一致即失效；
+    跨渠道版本互相独立，互不影响。"""
+    sessions = user.channel_sessions or {}
+    return int((sessions.get(token_channel) or {}).get("version", 0) or 0)
+
+
+def verify_channel_version(user, payload: dict) -> int:
+    """校验 token 携带的渠道版本与 DB 当前版本一致；不一致抛 401（X-Force-Logout）。
+
+    返回 DB 当前版本号。供所有鉴权点（dependencies / PermissionChecker / schedule_plans）共用，
+    避免版本校验逻辑四处复制。"""
+    token_channel = payload.get("auth_channel", "web")
+    token_login_version = payload.get("login_version", 0)
+    db_login_version = resolve_channel_login_version(user, token_channel)
+    if token_login_version != db_login_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="您的账号已在其他设备登录，请重新登录",
+            headers={"X-Force-Logout": "true"},
+        )
+    return db_login_version
+
+
 def create_share_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """为分享链接访问签发临时 JWT，包含 share 标记，有效期 24 小时"""
     to_encode = data.copy()
@@ -242,6 +268,7 @@ class PermissionChecker:
         role = payload.get("role", "")
         token_jti = payload.get("jti")
         token_login_version = payload.get("login_version", 0)
+        token_channel = payload.get("auth_channel", "web")
         is_share = payload.get("share", False)
 
         if token_jti and await is_token_blacklisted(token_jti):
@@ -258,9 +285,9 @@ class PermissionChecker:
         db_login_version = 0  # 默认值，is_share 路径不查库
 
         # === 性能优化：先查 payload 缓存（命中则跳过所有数据库查询） ===
-        # 缓存 key 含 login_version，重新登录自动失效
+        # 缓存 key 含 channel + login_version，重新登录主动 invalidate 该渠道缓存
         if not is_share:
-            cached = await get_cached_user_payload(int(user_id), int(token_login_version or 0))
+            cached = await get_cached_user_payload(int(user_id), token_channel, int(token_login_version or 0))
             if cached and cached.get("role") and token_login_version == cached.get("login_version"):
                 # 命中缓存：payload 复用缓存的 role/supplier/oa/org_scope
                 payload.update({
@@ -320,17 +347,11 @@ class PermissionChecker:
                 supplier_code = supplier_result.scalar_one_or_none()
                 if supplier_code:
                     payload["supplier_code"] = supplier_code
-            db_login_version = user.login_version or 0
-            if token_login_version != db_login_version:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="您的账号已在其他设备登录，请重新登录",
-                    headers={"X-Force-Logout": "true"},
-                )
+            db_login_version = verify_channel_version(user, payload)
             # 写入缓存（含 role/supplier/oa/org_scope），下次请求命中即跳过 4 次查询
             try:
                 await self._enrich_payload(payload, db, user_id)
-                await set_cached_user_payload(int(user_id), int(db_login_version), {
+                await set_cached_user_payload(int(user_id), token_channel, int(db_login_version), {
                     "role": payload.get("role"),
                     "supplier_name": payload.get("supplier_name"),
                     "supplier_code": payload.get("supplier_code"),
@@ -346,7 +367,7 @@ class PermissionChecker:
                 # admin 缓存未命中时才补 oa/org_scope
                 await self._enrich_payload(payload, db, user_id)
                 try:
-                    await set_cached_user_payload(int(user_id), int(db_login_version or 0), {
+                    await set_cached_user_payload(int(user_id), token_channel, int(db_login_version or 0), {
                         "role": "admin",
                         "supplier_name": payload.get("supplier_name"),
                         "supplier_code": payload.get("supplier_code"),

@@ -346,6 +346,7 @@ async def get_order_product_materials(
             product_name=first.product_name,
             product_model=getattr(first, "product_model", None),
             bom_no=getattr(first, "bom_no", None),
+            bom_id=merged_bom_id,
             order_qty=_to_float(total_qty),
             promised_date=promised,
             total_materials=len(tree),

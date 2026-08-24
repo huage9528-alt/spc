@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Space, Select, DatePicker, Table, Tag, Typography, Button } from 'antd'
+import { Space, Select, DatePicker, Table, Tag, Typography, Button, Tooltip } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { materialApi } from '@/services/api'
 import { useAntTableQuery } from '@/hooks/useAntTableQuery'
@@ -25,6 +25,7 @@ interface LedgerRow {
   system_qty?: number | null
   system_qty_time?: string | null
   live_qty?: number | null
+  live_wh_names?: string | null
   actual_qty?: number | null
   diff_qty?: number | null
   counted_by?: string | null
@@ -129,7 +130,16 @@ export default function CountedLedgerPanel() {
     { title: '单位', dataIndex: 'unit', key: 'unit', width: 70, sorter: true },
     {
       title: '仓库', dataIndex: 'wh_name', key: 'wh_name', width: 130, sorter: true,
-      render: (v: string | null | undefined) => v || '—',
+      render: (v: string | null | undefined, r: LedgerRow) => {
+        if (r.wh_id == null && r.live_wh_names) {
+          return (
+            <Tooltip title={`建单时未入库，现已入库：${r.live_wh_names}`}>
+              <span style={{ color: '#1677ff' }}>{r.live_wh_names}</span>
+            </Tooltip>
+          )
+        }
+        return v || '—'
+      },
       filterDropdown: selectColumnFilter({ placeholder: '选择仓库', options: whOptions }),
       filterIcon: textFilterIcon,
       filteredValue: (filters.wh_name as string[] | undefined) ?? null,

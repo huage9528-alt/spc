@@ -7,9 +7,9 @@ import {
 } from 'antd'
 import {
   PlusOutlined, CopyOutlined, ApiOutlined,
-  DatabaseOutlined, BarChartOutlined, KeyOutlined, ReloadOutlined,
+  BarChartOutlined, KeyOutlined, ReloadOutlined,
   CheckCircleOutlined, CloseCircleOutlined, ClockCircleOutlined,
-  SearchOutlined, SettingOutlined, SafetyCertificateOutlined,
+  SafetyCertificateOutlined,
   ExclamationCircleOutlined, BookOutlined, DownloadOutlined,
   CodeOutlined, LockOutlined, WarningOutlined,
 } from '@ant-design/icons'
@@ -168,31 +168,12 @@ const DescTable = ({ rows, columns = 2 }: {
 }
 
 
-interface DataTypeOption {
-  value: string
-  label: string
-}
-
-interface ConfigItem {
-  id: number
-  data_type: string
-  data_name: string
-  description: string | null
-  model_name: string
-  allowed_fields_json: string | null
-  filter_fields_json: string | null
-  is_active: boolean
-  created_at: string | null
-  updated_at: string | null
-}
-
 interface ApiKeyItem {
   id: number
   key_name: string
   app_key: string | null
   description: string | null
   is_active: boolean
-  allowed_data_types_json: string | null
   allowed_endpoints_json: string | null
   rate_limit: number
   expires_at: string | null
@@ -213,51 +194,33 @@ interface CallLogItem {
   ip_address: string | null
   user_agent: string | null
   duration_ms: number | null
+  error_message: string | null
   called_at: string | null
-}
-
-interface AvailableType {
-  data_type: string
-  data_name: string
-  description: string
-  model_name: string
-  exposed_fields: string[]
-  default_fields: string[]
-  is_configured: boolean
-  is_active: boolean
-  allowed_fields: string[]
-  filter_fields: string[]
-  mask_fields: string[]
-  search_fields: string[]
-}
-
-interface Statistics {
-  value: string
-  label: string
 }
 
 interface Statistics {
   total_calls: number
   success_calls: number
   failed_calls: number
+  failure_rate?: number | null
+  rate_limited_calls?: number
+  p95_duration_ms?: number | null
   avg_duration_ms: number | null
   by_data_type: Record<string, number>
+  by_endpoint?: Record<string, number>
   by_date: Record<string, number>
   by_api_key: Record<string, number>
 }
 
+const ENDPOINT_TEMPLATES: { name: string; prefixes: string[] }[] = [
+  { name: '主数据只读', prefixes: ['customers.', 'suppliers.', 'materials.', 'products.', 'warehouses.', 'locations.', 'processes.', 'organizations.', 'positions.', 'employees.'] },
+  { name: '生产域', prefixes: ['schedule_plans.', 'process_exceptions.', 'process_progress.', 'production_task_orders.', 'boms.', 'bom_details.'] },
+  { name: '供需域', prefixes: ['orders.', 'order_details.', 'purchase_orders.', 'inventory.'] },
+]
+
 export default function DataSupply() {
-  const [activeTab, setActiveTab] = useState('configs')
+  const [activeTab, setActiveTab] = useState('api-keys')
   const [loading, setLoading] = useState(false)
-
-  // ── 动态数据类型选项（替代硬编码） ──
-  const [dataTypeOptions, setDataTypeOptions] = useState<DataTypeOption[]>([])
-
-  // 从 API 获取的选项构建 label 映射
-  const dataTypeLabelMap = useMemo(
-    () => Object.fromEntries(dataTypeOptions.map(o => [o.value, o.label])),
-    [dataTypeOptions]
-  )
 
   // ── 对外接口清单（供 API Key 勾选接口权限） ──
   interface EndpointOption {
@@ -275,16 +238,6 @@ export default function DataSupply() {
   )
 
   const [internalEndpointOptions, setInternalEndpointOptions] = useState<EndpointOption[]>([])
-
-  // ── 配置 ──
-  const [availableTypes, setAvailableTypes] = useState<AvailableType[]>([])
-  const [configs, setConfigs] = useState<ConfigItem[]>([])
-  const [configTotal, setConfigTotal] = useState(0)
-  const [configPage, setConfigPage] = useState(1)
-  const [configModalOpen, setConfigModalOpen] = useState(false)
-  const [editingConfig, setEditingConfig] = useState<ConfigItem | null>(null)
-  const [configForm] = Form.useForm()
-  const [configSearchText, setConfigSearchText] = useState('')
 
   // ── API Key ──
   const [apiKeys, setApiKeys] = useState<ApiKeyItem[]>([])
@@ -306,20 +259,11 @@ export default function DataSupply() {
   // ── 统计 ──
   const [statistics, setStatistics] = useState<Statistics | null>(null)
   const hasPermission = useAuthStore(s => s.hasPermission)
-  const canCreate = hasPermission('basicdata.data_supply', 'create')
-  const canUpdate = hasPermission('basicdata.data_supply', 'update')
   const canDelete = hasPermission('basicdata.data_supply', 'delete')
 
   // ═══════════════════════════════════════════
   // 数据加载
   // ═══════════════════════════════════════════
-
-  const fetchDataTypeOptions = useCallback(async () => {
-    try {
-      const res: any = await dataSupplyApi.dataTypeOptions()
-      setDataTypeOptions(res.data || [])
-    } catch { /* silent */ }
-  }, [])
 
   const fetchEndpoints = useCallback(async () => {
     try {
@@ -327,23 +271,6 @@ export default function DataSupply() {
       setEndpointOptions(res.data || [])
     } catch { /* silent */ }
   }, [])
-
-  const fetchAvailableTypes = useCallback(async () => {
-    try {
-      const res: any = await dataSupplyApi.listAvailableTypes()
-      setAvailableTypes(res.data || [])
-    } catch { /* silent */ }
-  }, [])
-
-  const fetchConfigs = useCallback(async () => {
-    setLoading(true)
-    try {
-      const res: any = await dataSupplyApi.listConfigs({ page: configPage, page_size: 20 })
-      setConfigs(res.data?.items || [])
-      setConfigTotal(res.data?.total || 0)
-    } catch { /* 错误已由全局拦截器提示 */ }
-    setLoading(false)
-  }, [configPage])
 
   const fetchApiKeys = useCallback(async () => {
     setLoading(true)
@@ -385,19 +312,13 @@ export default function DataSupply() {
   }, [logFilters])
 
   useEffect(() => {
-    // 首次加载时获取动态选项
-    fetchDataTypeOptions()
+    // 首次加载时获取对外接口清单
     fetchEndpoints()
-  }, [fetchDataTypeOptions, fetchEndpoints])
+  }, [fetchEndpoints])
 
   useEffect(() => {
-    if (activeTab === 'configs') {
-      fetchAvailableTypes()
-      fetchConfigs()
-    } else if (activeTab === 'api-keys') {
+    if (activeTab === 'api-keys') {
       fetchApiKeys()
-      // 切换到 API Key tab 时刷新选项
-      fetchDataTypeOptions()
     } else if (activeTab === 'call-logs') {
       fetchCallLogs()
       fetchStatistics()
@@ -405,7 +326,7 @@ export default function DataSupply() {
       // 切换到使用说明 tab 时刷新对外接口清单，自动获取新添加的接口
       fetchEndpoints()
     }
-  }, [activeTab, fetchConfigs, fetchApiKeys, fetchCallLogs, fetchAvailableTypes, fetchStatistics, fetchDataTypeOptions, fetchEndpoints])
+  }, [activeTab, fetchApiKeys, fetchCallLogs, fetchStatistics, fetchEndpoints])
 
   useEffect(() => {
     if (!apiKeyModalOpen) return
@@ -418,84 +339,20 @@ export default function DataSupply() {
   }, [apiKeyModalOpen])
 
   // ═══════════════════════════════════════════
-  // 配置操作
-  // ═══════════════════════════════════════════
-
-  const handleToggleConfig = async (type: AvailableType) => {
-    try {
-      if (type.is_configured) {
-        const config = configs.find(c => c.data_type === type.data_type)
-        if (config) {
-          await dataSupplyApi.updateConfig(config.id, { is_active: !type.is_active })
-          message.success(type.is_active ? '已禁用' : '已启用')
-        }
-      } else {
-        await dataSupplyApi.createConfig({
-          data_type: type.data_type,
-          data_name: type.data_name,
-          model_name: type.model_name,
-          is_active: true,
-        })
-        message.success('已启用')
-      }
-      fetchAvailableTypes()
-      fetchConfigs()
-      fetchDataTypeOptions()
-    } catch (e: any) {
-      // 错误已由全局拦截器提示
-    }
-  }
-
-  const handleEditConfig = (config: ConfigItem) => {
-    setEditingConfig(config)
-    configForm.setFieldsValue({
-      data_name: config.data_name,
-      description: config.description,
-      allowed_fields: config.allowed_fields_json ? JSON.parse(config.allowed_fields_json) : [],
-      filter_fields: config.filter_fields_json ? JSON.parse(config.filter_fields_json) : [],
-      mask_fields: (config as any).mask_fields_json ? JSON.parse((config as any).mask_fields_json) : [],
-    })
-    setConfigModalOpen(true)
-  }
-
-  const handleSaveConfig = async () => {
-    try {
-      const values = await configForm.validateFields()
-      if (!editingConfig) return
-      await dataSupplyApi.updateConfig(editingConfig.id, {
-        data_name: values.data_name,
-        description: values.description,
-        allowed_fields_json: JSON.stringify(values.allowed_fields || []),
-        filter_fields_json: JSON.stringify(values.filter_fields || []),
-        mask_fields_json: JSON.stringify(values.mask_fields || []),
-      })
-      message.success('配置已更新')
-      setConfigModalOpen(false)
-      setEditingConfig(null)
-      fetchConfigs()
-      fetchAvailableTypes()
-      fetchDataTypeOptions()
-    } catch (e: any) {
-      if (e.errorFields) return // 表单校验失败
-      // 错误已由全局拦截器提示
-    }
-  }
-
-  const handleDeleteConfig = async (id: number) => {
-    try {
-      await dataSupplyApi.deleteConfig(id)
-      message.success('已删除')
-      fetchConfigs()
-      fetchAvailableTypes()
-      fetchDataTypeOptions()
-    } catch (e: any) {
-      // 错误已由全局拦截器提示
-    }
-  }
-
-  // ═══════════════════════════════════════════
   // API Key 操作
   // ═══════════════════════════════════════════
+
+  const applyEndpointTemplate = (prefixes: string[]) => {
+    const codes = endpointOptions
+      .filter(e => prefixes.some(p => e.endpoint_code.startsWith(p)))
+      .map(e => e.endpoint_code)
+    apiKeyForm.setFieldValue('allowed_endpoints', codes)
+    if (codes.length) {
+      message.success(`已按模板勾选 ${codes.length} 个对外接口`)
+    } else {
+      message.warning('该模板未匹配到任何接口，请确认接口清单已加载')
+    }
+  }
 
   const handleCreateApiKey = () => {
     setEditingApiKey(null)
@@ -512,7 +369,6 @@ export default function DataSupply() {
     apiKeyForm.setFieldsValue({
       key_name: key.key_name,
       description: key.description,
-      allowed_data_types: key.allowed_data_types_json ? JSON.parse(key.allowed_data_types_json) : [],
       allowed_endpoints: externalAllowed,
       allowed_internal_endpoints: internalAllowed,
       rate_limit: key.rate_limit,
@@ -536,7 +392,6 @@ export default function DataSupply() {
         const updateData: any = {
           key_name: values.key_name,
           description: values.description,
-          allowed_data_types_json: JSON.stringify(values.allowed_data_types || []),
           allowed_endpoints_json: JSON.stringify([
             ...(values.allowed_endpoints || []),
             ...(values.allowed_internal_endpoints || []),
@@ -553,7 +408,6 @@ export default function DataSupply() {
         const createData: any = {
           key_name: values.key_name,
           description: values.description,
-          allowed_data_types_json: JSON.stringify(values.allowed_data_types || []),
           allowed_endpoints_json: JSON.stringify([
             ...(values.allowed_endpoints || []),
             ...(values.allowed_internal_endpoints || []),
@@ -603,230 +457,6 @@ export default function DataSupply() {
   // ═══════════════════════════════════════════
   // 渲染
   // ═══════════════════════════════════════════
-
-  // ── Tab 1: 数据范围配置 ──
-  const renderConfigsTab = () => {
-    const filteredTypes = configSearchText
-      ? availableTypes.filter(t =>
-          t.data_name.includes(configSearchText) ||
-          t.data_type.includes(configSearchText) ||
-          t.model_name.includes(configSearchText)
-        )
-      : availableTypes
-
-    const activeCount = availableTypes.filter(t => t.is_active).length
-    const totalCount = availableTypes.length
-
-    return (
-      <div>
-        {/* 概览统计 */}
-        <Row gutter={12} style={{ marginBottom: 16 }}>
-          <Col span={8}>
-            <StatCard
-              icon={<DatabaseOutlined />}
-              color="#1890ff"
-              title="已启用数据类型"
-              value={activeCount}
-              suffix={`/ ${totalCount}`}
-            />
-          </Col>
-          <Col span={8}>
-            <StatCard
-              icon={<CheckCircleOutlined />}
-              color="#52c41a"
-              title="已配置"
-              value={availableTypes.filter(t => t.is_configured).length}
-            />
-          </Col>
-          <Col span={8}>
-            <StatCard
-              icon={<ExclamationCircleOutlined />}
-              color="#faad14"
-              title="未配置"
-              value={availableTypes.filter(t => !t.is_configured).length}
-            />
-          </Col>
-        </Row>
-
-        {/* 工具栏 */}
-        <div style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: 12,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', fontWeight: 600, color: '#262626' }}>数据类型列表</span>
-            <Tag color="blue" style={{ margin: 0 }}>{filteredTypes.length} 项</Tag>
-          </div>
-          <Input
-            placeholder="搜索数据类型名称..."
-            prefix={<SearchOutlined />}
-            allowClear
-            value={configSearchText}
-            onChange={e => setConfigSearchText(e.target.value)}
-            style={{ width: 260 }}
-            size="small"
-          />
-        </div>
-
-        {/* 表格 */}
-        <Table
-          className="data-supply-table"
-          dataSource={filteredTypes}
-          rowKey="model_name"
-          loading={loading}
-          pagination={false}
-          size="middle"
-          rowClassName={(record, index) => {
-            let cls = index! % 2 === 0 ? 'row-even' : 'row-odd'
-            if (!record.is_active) cls += ' row-disabled'
-            return cls
-          }}
-          onRow={(record) => ({
-            style: {
-              transition: 'all 0.2s ease',
-            },
-          })}
-          showSorterTooltip={false}
-          columns={[
-            {
-              title: '数据类型',
-              dataIndex: 'data_type',
-              key: 'data_type',
-              width: 180,
-              render: (v: string, r: AvailableType) => (
-                <Space>
-                  <Tag color="blue" style={{ margin: 0, fontWeight: 500 }}>
-                    {r.data_name}
-                  </Tag>
-                  <Text type="secondary" style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))' }}>{v}</Text>
-                </Space>
-              ),
-            },
-            {
-              title: '模型',
-              dataIndex: 'model_name',
-              key: 'model_name',
-              width: 200,
-              render: (v: string) => (
-                <span style={{
-                  background: '#f5f7fa',
-                  padding: '3px 8px',
-                  borderRadius: 4,
-                  fontSize: 'calc(0.75rem * var(--font-size-scale))',
-                  fontFamily: 'Consolas, monospace',
-                  color: '#595959',
-                }}>
-                  {v}
-                </span>
-              ),
-            },
-            {
-              title: '暴露字段',
-              key: 'fields',
-              width: 220,
-              render: (_: any, r: AvailableType) => {
-                const fields = r.allowed_fields?.length ? r.allowed_fields : r.default_fields
-                const displayFields = fields.slice(0, 3)
-                const remaining = fields.length - 3
-                return (
-                  <Space wrap size={4}>
-                    {displayFields.map(f => (
-                      <Tag key={f} style={{ fontSize: 'calc(0.6875rem * var(--font-size-scale))', margin: 0, borderRadius: 4 }}>{f}</Tag>
-                    ))}
-                    {remaining > 0 && (
-                      <Tooltip title={fields.slice(3).join(', ')}>
-                        <Tag style={{ fontSize: 'calc(0.6875rem * var(--font-size-scale))', margin: 0, borderRadius: 4 }}>+{remaining}</Tag>
-                      </Tooltip>
-                    )}
-                  </Space>
-                )
-              },
-            },
-            {
-              title: '筛选字段',
-              key: 'filter_fields',
-              width: 160,
-              render: (_: any, r: AvailableType) => {
-                if (!r.filter_fields?.length) return <Text type="secondary" style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))' }}>无</Text>
-                return (
-                  <Space wrap size={4}>
-                    {r.filter_fields.slice(0, 2).map(f => (
-                      <Tag key={f} color="orange" style={{ fontSize: 'calc(0.6875rem * var(--font-size-scale))', margin: 0, borderRadius: 4 }}>{f}</Tag>
-                    ))}
-                    {r.filter_fields.length > 2 && (
-                      <Tooltip title={r.filter_fields.slice(2).join(', ')}>
-                        <Tag color="orange" style={{ fontSize: 'calc(0.6875rem * var(--font-size-scale))', margin: 0, borderRadius: 4 }}>+{r.filter_fields.length - 2}</Tag>
-                      </Tooltip>
-                    )}
-                  </Space>
-                )
-              },
-            },
-            {
-              title: '状态',
-              key: 'status',
-              width: 100,
-              render: (_: any, r: AvailableType) => (
-                <Switch
-                  checked={r.is_active}
-                  onChange={() => handleToggleConfig(r)}
-                  checkedChildren="启用"
-                  unCheckedChildren="禁用"
-                />
-              ),
-            },
-            {
-              title: '操作',
-              key: 'action',
-              width: 140,
-              render: (_: any, r: AvailableType) => {
-                const config = configs.find(c => c.data_type === r.data_type)
-                return config ? (
-                  <Space>
-                    <PermButton permResource="basicdata.data_supply" permAction="update" size="small" type="link" icon={<SettingOutlined />} onClick={() => handleEditConfig(config)}>
-                      编辑
-                    </PermButton>
-                    <Popconfirm title="确认删除此配置？" onConfirm={() => handleDeleteConfig(config.id)} disabled={!canDelete}>
-                      <PermButton permResource="basicdata.data_supply" permAction="delete" size="small" type="link" danger>删除</PermButton>
-                    </Popconfirm>
-                  </Space>
-                ) : <Text type="secondary" style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))' }}>未配置</Text>
-              },
-            },
-          ]}
-        />
-
-        <Modal
-          title="编辑数据供给配置"
-          open={configModalOpen}
-          onOk={handleSaveConfig}
-          onCancel={() => { setConfigModalOpen(false); setEditingConfig(null) }}
-          width={640}
-          destroyOnClose
-        >
-          <Form form={configForm} layout="vertical">
-            <Form.Item name="data_name" label="数据名称" rules={[{ required: true, message: '请输入数据名称' }]}>
-              <Input />
-            </Form.Item>
-            <Form.Item name="description" label="描述">
-              <Input.TextArea rows={2} placeholder="可选，描述此数据供给的用途" />
-            </Form.Item>
-            <Form.Item name="allowed_fields" label="允许暴露的字段" rules={[{ required: true, message: '请至少添加一个字段' }]}>
-              <Select mode="tags" placeholder="输入字段名后按回车添加" />
-            </Form.Item>
-            <Form.Item name="filter_fields" label="允许筛选的字段">
-              <Select mode="tags" placeholder="输入字段名后按回车添加（可选）" />
-            </Form.Item>
-            <Form.Item name="mask_fields" label="需要脱敏的字段" tooltip="这些字段的值会自动脱敏（如手机号、邮箱等），支持自动识别 phone/mobile/email/credit_code/id_card 等字段名">
-              <Select mode="tags" placeholder="输入字段名后按回车添加（可选）" />
-            </Form.Item>
-          </Form>
-        </Modal>
-      </div>
-    )
-  }
 
   // ── Tab 2: API Key 管理 ──
   const renderApiKeysTab = () => (
@@ -997,25 +627,9 @@ export default function DataSupply() {
                   if (!s) return null
                   try { const a = JSON.parse(s); return Array.isArray(a) && a.length ? a : null } catch { return null }
                 }
-                const types = parseArr(r.allowed_data_types_json)
                 const eps = parseArr(r.allowed_endpoints_json)
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <div>
-                      <Text type="secondary" style={{ fontSize: 'calc(0.6875rem * var(--font-size-scale))', fontWeight: 500 }}>数据类型：</Text>
-                      {!types ? <Tag color="green" style={{ margin: 0 }}>全部</Tag> : (
-                        <Space wrap size={4}>
-                          {types.slice(0, 3).map((t: string) => (
-                            <Tag key={t} color="blue" style={{ margin: 0 }}>{dataTypeLabelMap[t] || t}</Tag>
-                          ))}
-                          {types.length > 3 && (
-                            <Tooltip title={types.map((t: string) => dataTypeLabelMap[t] || t).join('、')}>
-                              <Tag style={{ margin: 0 }}>+{types.length - 3}</Tag>
-                            </Tooltip>
-                          )}
-                        </Space>
-                      )}
-                    </div>
                     <div>
                       <Text type="secondary" style={{ fontSize: 'calc(0.6875rem * var(--font-size-scale))', fontWeight: 500 }}>对外接口：</Text>
                       {!eps ? <Tag style={{ margin: 0 }}>无</Tag> : (
@@ -1108,15 +722,33 @@ export default function DataSupply() {
           <Form.Item name="description" label="用途说明">
             <Input.TextArea rows={2} placeholder="描述此 Key 的用途" />
           </Form.Item>
-          <Form.Item name="allowed_data_types" label="允许访问的数据类型" tooltip="控制通用数据供给接口 /data/{data_type} 的访问范围">
-            <Select mode="multiple" options={dataTypeOptions} placeholder="选择允许访问的数据类型" />
-          </Form.Item>
           <Form.Item
-            name="allowed_endpoints"
             label="允许调用的对外接口"
             tooltip="控制 /external/* 下各业务接口的调用权限，未勾选则无法调用任何对外接口"
           >
-            <Select
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+              <Text type="secondary" style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))', fontWeight: 500 }}>权限模板：</Text>
+              {ENDPOINT_TEMPLATES.map(tpl => {
+                const count = endpointOptions.filter(e => tpl.prefixes.some(p => e.endpoint_code.startsWith(p))).length
+                return (
+                  <Tooltip key={tpl.name} title={`按前缀批量勾选：${tpl.prefixes.join('、')}`}>
+                    <Button size="small" onClick={() => applyEndpointTemplate(tpl.prefixes)}>
+                      {tpl.name}{count > 0 ? `（${count}）` : ''}
+                    </Button>
+                  </Tooltip>
+                )
+              })}
+              <Tooltip title={`勾选全部 ${endpointOptions.length} 个对外接口`}>
+                <Button size="small" onClick={() => apiKeyForm.setFieldValue('allowed_endpoints', endpointOptions.map(e => e.endpoint_code))}>
+                  全量只读（{endpointOptions.length}）
+                </Button>
+              </Tooltip>
+              <Button size="small" danger onClick={() => apiKeyForm.setFieldValue('allowed_endpoints', [])}>
+                清空
+              </Button>
+            </div>
+            <Form.Item name="allowed_endpoints" noStyle>
+              <Select
               mode="multiple"
               placeholder="选择允许调用的对外接口"
               optionLabelProp="label"
@@ -1140,6 +772,7 @@ export default function DataSupply() {
                 )
               }}
             />
+            </Form.Item>
           </Form.Item>
           <Form.Item
             name="allowed_internal_endpoints"
@@ -1171,8 +804,8 @@ export default function DataSupply() {
               }}
             />
           </Form.Item>
-          <Form.Item name="rate_limit" label="速率限制（每分钟请求数）" rules={[{ required: true, message: '请输入速率限制' }]}>
-            <InputNumber min={1} max={10000} style={{ width: '100%' }} placeholder="100" />
+          <Form.Item name="rate_limit" label="速率限制（每分钟请求数，0 表示不限）" rules={[{ required: true, message: '请输入速率限制' }]}>
+            <InputNumber min={0} max={10000} style={{ width: '100%' }} placeholder="100" />
           </Form.Item>
           <Form.Item name="ip_whitelist" label="IP 白名单（每行一个，留空则不限制）" tooltip="限制允许调用的来源 IP，留空表示不限制">
             <Input.TextArea rows={3} placeholder={"192.168.1.100\n10.0.0.0/24"} />
@@ -1200,6 +833,7 @@ export default function DataSupply() {
       <div>
         {/* 统计卡片 */}
         {statistics && (
+          <>
           <Row gutter={12} style={{ marginBottom: 16 }}>
             <Col span={6}>
               <StatCard
@@ -1236,6 +870,35 @@ export default function DataSupply() {
               />
             </Col>
           </Row>
+          <Row gutter={12} style={{ marginBottom: 16, marginTop: 12 }}>
+            <Col span={8}>
+              <StatCard
+                icon={<WarningOutlined />}
+                color={statistics.failure_rate ? '#ff4d4f' : '#52c41a'}
+                title="失败率"
+                value={statistics.failure_rate != null ? (statistics.failure_rate * 100).toFixed(1) : '-'}
+                suffix={statistics.failure_rate != null ? '%' : ''}
+              />
+            </Col>
+            <Col span={8}>
+              <StatCard
+                icon={<ExclamationCircleOutlined />}
+                color={statistics.rate_limited_calls ? '#fa8c16' : '#bfbfbf'}
+                title="限流命中（429）"
+                value={statistics.rate_limited_calls ?? 0}
+              />
+            </Col>
+            <Col span={8}>
+              <StatCard
+                icon={<ClockCircleOutlined />}
+                color="#13c2c2"
+                title="P95 耗时"
+                value={statistics.p95_duration_ms != null ? statistics.p95_duration_ms.toFixed(1) : '-'}
+                suffix="ms"
+              />
+            </Col>
+          </Row>
+          </>
         )}
 
         {/* 筛选栏 */}
@@ -1249,9 +912,11 @@ export default function DataSupply() {
           <Space wrap size={12}>
             <Select
               allowClear
-              placeholder="按数据类型筛选"
-              style={{ width: 200 }}
-              options={dataTypeOptions}
+              placeholder="按接口筛选（endpoint_code）"
+              style={{ width: 220 }}
+              showSearch
+              optionFilterProp="value"
+              options={endpointOptions.map(e => ({ value: e.endpoint_code, label: e.name }))}
               value={logFilters.data_type || undefined}
               onChange={(v) => {
                 setCallLogPage(1)
@@ -1274,10 +939,10 @@ export default function DataSupply() {
           </Space>
         </div>
 
-        {/* 按数据类型分布 */}
+        {/* 按接口分布 */}
         {statistics && Object.keys(statistics.by_data_type).length > 0 && (
           <div style={{ marginBottom: 12 }}>
-            <Text strong style={{ marginBottom: 6, display: 'block', fontSize: 'calc(0.8125rem * var(--font-size-scale))' }}>按数据类型分布</Text>
+            <Text strong style={{ marginBottom: 6, display: 'block', fontSize: 'calc(0.8125rem * var(--font-size-scale))' }}>按接口分布</Text>
             <Space wrap size={6}>
               {Object.entries(statistics.by_data_type)
                 .sort(([, a], [, b]) => b - a)
@@ -1287,7 +952,7 @@ export default function DataSupply() {
                     color="blue"
                     style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))', padding: '3px 10px', borderRadius: 4 }}
                   >
-                    {dataTypeLabelMap[type] || type}: <Text strong>{count}</Text>
+                    {endpointLabelMap[type] || type}: <Text strong>{count}</Text>
                   </Tag>
                 ))}
             </Space>
@@ -1322,7 +987,7 @@ export default function DataSupply() {
             onChange: setCallLogPage,
             showTotal: t => `共 ${t} 条`,
           }}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1340 }}
           size="middle"
           rowClassName={(_, index) => index! % 2 === 0 ? 'row-even' : 'row-odd'}
           locale={{ emptyText: <Empty description="暂无调用日志" /> }}
@@ -1346,13 +1011,13 @@ export default function DataSupply() {
               render: (v: string | null) => v || <Text type="secondary">-</Text>,
             },
             {
-              title: '数据类型',
+              title: '接口',
               dataIndex: 'data_type',
               key: 'data_type',
-              width: 120,
+              width: 160,
               render: (v: string) => (
                 <Tag color="blue">
-                  {dataTypeLabelMap[v] || v}
+                  {endpointLabelMap[v] || v}
                 </Tag>
               ),
             },
@@ -1366,6 +1031,18 @@ export default function DataSupply() {
                 if (v === 500) return <Badge status="error" text={String(v)} />
                 return <Badge status="warning" text={String(v || '-')} />
               },
+            },
+            {
+              title: '错误信息',
+              dataIndex: 'error_message',
+              key: 'error_message',
+              width: 150,
+              ellipsis: true,
+              render: (v: string | null) => v ? (
+                <Tooltip title={v}>
+                  <Text type="danger" style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))' }}>{v}</Text>
+                </Tooltip>
+              ) : <Text type="secondary">-</Text>,
             },
             {
               title: '返回条数',
@@ -1413,18 +1090,7 @@ export default function DataSupply() {
   // ── Tab 4: 使用说明 ──
   const generateGuideMarkdown = () => {
     const host = window.location.host
-    const baseUrl = `http://${host}/api/v1/basicdata/data-supply`
     const externalBase = `http://${host}/api/v1/external`
-
-    // ── 数据类型字段说明：取自 Registry 的 exposed_fields/filter_fields/mask_fields ──
-    const typeDetailMap = new Map(availableTypes.map(t => [t.data_type, t]))
-    const typeRows = dataTypeOptions.map(o => {
-      const t = typeDetailMap.get(o.value)
-      const fields = t?.exposed_fields?.length ? t.exposed_fields.join('、') : '（由配置决定）'
-      const filters = t?.filter_fields?.length ? t.filter_fields.join('、') : '-'
-      const masks = t?.mask_fields?.length ? t.mask_fields.join('、') : '-'
-      return `| ${o.value} | ${o.label} | ${fields} | ${filters} | ${masks} |`
-    }).join('\n')
 
     const endpointRows = endpointOptions.map(e =>
       `| ${e.endpoint_code} | ${e.name} | \`${e.method} ${e.path}\` | ${e.description} |`
@@ -1833,21 +1499,19 @@ ${fieldRows}
 
 ## 1. 接入流程
 
-1. 在 **数据范围配置** 中启用需要的数据类型
-2. 若需把某个内部接口（已有路由）也对外开放，请在该 handler 上加 \`@exposable("int:<domain>.<verb>", ...)\` 装饰器并重新启动后端（该端点会出现在 API Key 表单的「可调用内部接口」中）
-3. 在 **API Key 管理** 中创建一个 API Key，勾选允许访问的数据类型、对外接口、**以及新增的内部接口（以 int: 为前缀）**
-4. 妥善保存生成的 AppKey + AppSecret（仅显示一次），将其配置到外部系统中
-5. 外部系统调用 API 时，使用 HMAC-SHA256 签名认证
+1. 若需把某个内部接口（已有路由）也对外开放，请在该 handler 上加 \`@exposable("int:<domain>.<verb>", ...)\` 装饰器并重新启动后端（该端点会出现在 API Key 表单的「可调用内部接口」中）
+2. 在 **API Key 管理** 中创建一个 API Key，勾选允许调用的对外接口、**以及需要的内部接口（以 int: 为前缀）**
+3. 妥善保存生成的 AppKey + AppSecret（仅显示一次），将其配置到外部系统中
+4. 外部系统调用 API 时，使用 HMAC-SHA256 签名认证
 
-## 2. 三类接口
+## 2. 两类接口
 
 | 接口类别 | 路径前缀 | 权限字段 | 说明 |
 |----------|----------|----------|------|
-| 通用数据供给 | \`${baseUrl}/data/{data_type}\` | allowed_data_types | 按数据类型查询，字段由配置决定 |
 | 对外业务接口 | \`${externalBase}/...\` | allowed_endpoints | 按业务场景封装，字段固定精简 |
 | 内部可暴露接口（@exposable）| **保持原 URL 不变**（不重新挂载）| allowed_endpoints（含 \`int:\` 前缀）| 在已有内部 handler 上加 \`@exposable\` 装饰器即可，外部系统用同一 URL + HMAC 签名调用 |
 
-> 三类接口共用同一套 AppKey / 签名算法。\`allowed_endpoints\` 同时控制「对外业务接口」与「内部可暴露接口」两者（后者用 \`int:\` 前缀区分）。
+> 两类接口共用同一套 AppKey / 签名算法。\`allowed_endpoints\` 同时控制「对外业务接口」与「内部可暴露接口」两者（后者用 \`int:\` 前缀区分）。
 
 ## 3. 认证方式
 
@@ -1864,8 +1528,8 @@ ${fieldRows}
 **签名算法：**
 
 \`\`\`
-通用接口：待签名串 = timestamp + app_key + data_type + query_string
 对外接口：待签名串 = timestamp + app_key + endpoint_code + query_string
+内部接口：待签名串 = timestamp + app_key + endpoint_code + query_string（endpoint_code 以 int: 开头）
 
 例：1719000000ak_a1b2c3d4e5f6g7h8orders.listpage=1&page_size=20
 
@@ -1883,7 +1547,7 @@ ${fieldRows}
 |---------------|------|------|------|
 ${endpointRows}
 
-> 所有对外接口共用统一响应格式（见 5.3），items 元素字段见下方各接口明细。
+> 所有对外接口共用统一响应格式（见 5），items 元素字段见下方各接口明细。
 > 通用查询参数：page / page_size 分页、keyword 关键字、updated_after 增量同步（部分接口不支持）。
 
 ${endpointDetails}
@@ -1894,27 +1558,9 @@ ${endpointDetails}
 |---------------|------|--------------|------|
 ${internalEndpointRows}
 
-> 说明：这些端点不需要在 URL 中加 \`/external\` 前缀 — 调用方发送请求到原始 URL（如 \`/api/v1/common/ping\`），按 7.4 / 7.5 节示例签名即可。endpoint_code 仍以 \`int:\` 前缀与其他接口区分。
+> 说明：这些端点不需要在 URL 中加 \`/external\` 前缀 — 调用方发送请求到原始 URL（如 \`/api/v1/common/ping\`），按第 6 章内部接口示例签名即可。endpoint_code 仍以 \`int:\` 前缀与其他接口区分。
 
-## 5. 通用数据供给接口
-
-### 5.1 查询数据列表
-
-\`GET ${baseUrl}/data/{data_type}\`
-
-| 参数 | 位置 | 必填 | 说明 |
-|------|------|------|------|
-| \`data_type\` | Path | 是 | 数据类型标识 |
-| \`page\` | Query | 否 | 页码，默认 1 |
-| \`page_size\` | Query | 否 | 每页条数，默认 20，最大 200 |
-| \`keyword\` | Query | 否 | 关键字搜索 |
-| \`updated_after\` | Query | 否 | 增量同步：ISO 8601 时间，只返回此时间后更新的数据 |
-
-### 5.2 查询单条数据
-
-\`GET ${baseUrl}/data/{data_type}/{record_id}\`
-
-### 5.3 响应格式
+## 5. 统一响应格式
 
 \`\`\`json
 {
@@ -1929,18 +1575,9 @@ ${internalEndpointRows}
 }
 \`\`\`
 
-> items 元素字段随 data_type 不同而异，详见第 6 章「可用数据类型」。
+> items 元素字段见第 4 章各接口明细。
 
-## 6. 可用数据类型
-
-> 暴露字段由 Registry 注册表决定，API Key 实际可见字段以「数据范围配置」中的 allowed_fields 为准。
-> filter_fields 为可筛选字段，mask_fields 为脱敏字段（如手机号、信用代码）。
-
-| data_type | 中文名 | 暴露字段 | 可筛选字段 | 脱敏字段 |
-|-----------|--------|----------|------------|----------|
-${typeRows}
-
-## 7. 调用示例
+## 6. 调用示例
 
 ### Python（对外接口签名认证）
 
@@ -1968,29 +1605,6 @@ resp = requests.get(
 print(resp.json())
 \`\`\`
 
-### Python（通用数据供给接口）
-
-\`\`\`python
-import hmac, hashlib, time, requests
-
-BASE_URL = "${baseUrl}"
-APP_KEY = "ak_xxxxxxxx"
-APP_SECRET = "your_app_secret"
-
-data_type = "materials"
-query_string = "page=1&page_size=20"
-timestamp = str(int(time.time()))
-string_to_sign = f"{timestamp}{APP_KEY}{data_type}{query_string}"
-signature = hmac.new(APP_SECRET.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
-
-resp = requests.get(
-    f"{BASE_URL}/data/{data_type}",
-    params={"page": 1, "page_size": 20},
-    headers={"X-App-Key": APP_KEY, "X-Timestamp": timestamp, "X-Signature": signature},
-)
-print(resp.json())
-\`\`\`
-
 ### cURL
 
 \`\`\`bash
@@ -2006,7 +1620,7 @@ curl "${externalBase}/orders/list?page=1&page_size=20" \\
   -H "X-App-Key: \$APP_KEY" -H "X-Timestamp: \$TIMESTAMP" -H "X-Signature: \$SIG"
 \`\`\`
 
-### 7.4 内部接口 — Node.js / TypeScript
+### 内部接口 — Node.js / TypeScript
 
 \`\`\`typescript
 import crypto from "crypto";
@@ -2037,7 +1651,7 @@ const resp = await fetch(
 console.log(await resp.json());
 \`\`\`
 
-### 7.5 内部接口 — Go
+### 内部接口 — Go
 
 \`\`\`go
 package main
@@ -2085,7 +1699,7 @@ func getenv(k, def string) string {
 
 > 注意：内部接口（@exposable）的待签名串同样以 \`endpoint_code\` 参与拼接（不是 URL 路径），格式与对外业务接口一致。
 
-## 8. 安全机制
+## 7. 安全机制
 
 | 机制 | 说明 |
 |------|------|
@@ -2093,15 +1707,19 @@ func getenv(k, def string) string {
 | 时间戳校验 | 请求时间与服务器时间差超过 5 分钟则拒绝，防重放攻击 |
 | IP 白名单 | 可为每个 API Key 配置允许的来源 IP |
 | 字段级脱敏 | 手机号、邮箱等敏感字段自动脱敏（如 138****1234） |
-| 接口级权限 | allowed_data_types / allowed_endpoints 分别控制两类接口的访问范围 |
+| 接口级权限 | allowed_endpoints 统一控制对外接口与 int: 内部接口的访问范围 |
+| 限流 | 每 Key 每分钟固定窗口计数，超限返回 429 + Retry-After |
 
-## 9. 错误码说明
+> **限流规则**：每个 Key 每分钟固定窗口计数，额度 = Key 的 rate_limit（0 或空表示不限）；超限返回 429 并携带 Retry-After 响应头（当前窗口剩余秒数），按其秒数等待后重试即可，客户端建议做指数退避。
+
+## 8. 错误码说明
 
 | HTTP 状态码 | 含义 | 排查建议 |
 |-------------|------|----------|
 | 401 | 缺少认证信息 | 检查是否携带了 X-App-Key/X-Timestamp/X-Signature（含内部接口路径） |
-| 403 | 签名错/过期/无权限/IP不在白名单 | 签名不匹配、Key 已过期、IP 不在白名单、未授权该接口/数据类型，或该内部接口未在 allowed_endpoints（含 int: 前缀）授权 |
-| 404 | 接口/数据/记录不存在 | 数据类型未启用、URL 路径未注册为 @exposable、或单条记录 ID 不存在 |
+| 403 | 签名错/过期/无权限/IP不在白名单 | 签名不匹配、Key 已过期、IP 不在白名单、未授权该接口，或该内部接口未在 allowed_endpoints（含 int: 前缀）授权 |
+| 404 | 接口/记录不存在 | URL 路径不存在、未注册为 @exposable、或单条记录 ID 不存在 |
+| 429 | 触发限流 | 已超过 Key 的每分钟限额，按 Retry-After 头等待后重试，或联系管理员调整额度 |
 | 500 | sys-api-caller 占位用户缺失 | 容器启动后未执行 init_database.py，缺少 api_caller 角色与 sys-api-caller 系统用户。补跑一次 init_database.py 即可恢复 |
 `
   }
@@ -2227,9 +1845,8 @@ System.out.println(resp.body());`
             current={-1}
             direction="vertical"
             items={[
-              { title: '启用数据类型', description: '在「数据范围配置」中启用需要的数据类型（控制 /data/* 通用接口）' },
               { title: '标记内部接口（如需）', description: '对需要对外开放的已有内部 handler 加 @exposable("int:<code>", ...)，重启后端。该端点会出现在 API Key 表单的「可调用内部接口」中' },
-              { title: '创建 API Key', description: '在「API Key 管理」中创建 Key，勾选允许访问的数据类型、对外接口、以及新增的内部接口' },
+              { title: '创建 API Key', description: '在「API Key 管理」中创建 Key，勾选允许调用的对外接口、以及需要的内部接口（int: 前缀）' },
               { title: '保存凭据', description: '妥善保存 AppKey + AppSecret（仅显示一次），配置到外部系统' },
               { title: '签名调用', description: '外部系统每次请求用 HMAC-SHA256 生成签名，携带三个请求头，访问原 URL 即可' },
             ]}
@@ -2285,11 +1902,10 @@ System.out.println(resp.body());`
           }}>
             <Text strong>签名算法</Text>
             <div style={{ marginTop: 10 }}>
-              <Text>① 构造待签名串（三段拼接，无分隔符）：</Text>
+              <Text>① 构造待签名串（四段拼接，无分隔符）：</Text>
               <CodeBlock
                 lang="text"
-                code={`通用接口:    timestamp + app_key + data_type    + query_string
-对外接口:    timestamp + app_key + endpoint_code + query_string
+                code={`对外接口:    timestamp + app_key + endpoint_code + query_string
 内部接口:    timestamp + app_key + endpoint_code + query_string   (endpoint_code 以 int: 开头)
 
 示例:  1719000000ak_xxxorders.listpage=1&page_size=20
@@ -2580,7 +2196,8 @@ func getenv(k, def string) string {
                   { label: '时间戳校验', value: '±5 分钟防重放' },
                   { label: 'IP 白名单', value: '可限制来源 IP' },
                   { label: '字段脱敏', value: '手机/邮箱自动脱敏' },
-                  { label: '分级权限', value: 'data_types / endpoints 分别控制' },
+                  { label: '接口级权限', value: 'allowed_endpoints 统一控制' },
+                  { label: '限流', value: '每分钟固定窗口，超限 429' },
                   { label: '调用日志', value: '全程记录可追溯' },
                 ]}
               />
@@ -2610,21 +2227,56 @@ func getenv(k, def string) string {
                 size="small"
                 pagination={false}
                 rowKey="code"
-                showHeader={false}
                 dataSource={[
-                  { code: '401', desc: '缺少认证头（JWT 或 X-App-Key 三件套）' },
-                  { code: '403', desc: '签名错/过期/无权限/IP 不在白名单，或内部接口未在 allowed_endpoints 勾选' },
-                  { code: '404', desc: 'URL 未注册为 @exposable，或单条记录 ID 不存在' },
-                  { code: '500', desc: 'sys-api-caller 占位用户缺失（未跑 init_database.py），或服务端内部错误' },
+                  { code: '401', meaning: '缺少认证头', advice: '检查是否携带 X-App-Key / X-Timestamp / X-Signature 三件套（内部接口路径同样需要）' },
+                  { code: '403', meaning: '签名失败 / IP 不在白名单 / Key 未授权该接口', advice: '按返回 detail 排查：核对签名串与 query_string、确认 Key 未过期、IP 已加白，且该接口（含 int: 前缀）已在 allowed_endpoints 勾选' },
+                  { code: '404', meaning: '接口 / 记录不存在', advice: '核对 URL 路径；内部接口需已注册 @exposable；单条查询确认记录 ID 存在' },
+                  { code: '429', meaning: '触发限流', advice: '已超过 Key 每分钟限额，按 Retry-After 响应头等待后重试，或联系管理员调高额度和退避重试' },
+                  { code: '500', meaning: '服务内部错误', advice: 'sys-api-caller 占位用户缺失时补跑 init_database.py；其余情况携带调用时间与日志联系管理员' },
                 ]}
                 columns={[
-                  { dataIndex: 'code', width: 56, render: (v: string) => <Tag color={v === '403' || v === '500' ? 'red' : v === '404' ? 'orange' : 'default'}>{v}</Tag> },
-                  { dataIndex: 'desc' },
+                  {
+                    title: '状态码', dataIndex: 'code', width: 76,
+                    render: (v: string) => <Tag color={v === '403' || v === '500' ? 'red' : v === '404' || v === '429' ? 'orange' : 'default'}>{v}</Tag>,
+                  },
+                  { title: '含义', dataIndex: 'meaning', width: 170 },
+                  { title: '处理建议', dataIndex: 'advice' },
                 ]}
               />
             </Card>
           </Col>
         </Row>
+
+        {/* 6. 限流规则 */}
+        <Card
+          style={{ marginTop: 16, borderRadius: 12, boxShadow: '0 2px 10px rgba(0,0,0,0.04)', transition: 'all 0.2s ease' }}
+          size="small"
+          bordered={false}
+          hoverable
+          title={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{
+                width: 32, height: 32, borderRadius: 10,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: 'linear-gradient(135deg, #faad1425 0%, #faad140d 100%)',
+                boxShadow: '0 2px 6px rgba(250, 173, 20, 0.1)',
+              }}>
+                <ClockCircleOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#faad14' }} />
+              </div>
+              <span style={{ fontSize: 'calc(0.9375rem * var(--font-size-scale))', fontWeight: 600, color: '#1f2937' }}>限流规则</span>
+            </div>
+          }
+        >
+          <DescTable
+            columns={2}
+            rows={[
+              { label: '计数方式', value: '每 Key 每分钟固定窗口计数（按自然分钟对齐，该 Key 的所有对外 / 内部接口共用同一额度）' },
+              { label: '额度', value: '等于 API Key 的「速率限制（每分钟请求数）」即 rate_limit；为 0 或空表示不限流' },
+              { label: '超限行为', value: '返回 429，并携带 Retry-After 响应头（当前窗口剩余秒数），命中限流的调用会记录到调用日志' },
+              { label: '处理建议', value: '按 Retry-After 等待后重试；频繁触发请联系管理员调高额度，客户端建议做指数退避' },
+            ]}
+          />
+        </Card>
       </div>
     )
   }
@@ -2691,16 +2343,6 @@ func getenv(k, def string) string {
         tabBarStyle={{ marginBottom: 0 }}
         items={[
           {
-            key: 'configs',
-            label: (
-              <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', fontWeight: 500 }}>
-                <DatabaseOutlined style={{ marginRight: 6 }} />
-                数据范围配置
-              </span>
-            ),
-            children: null,
-          },
-          {
             key: 'api-keys',
             label: (
               <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', fontWeight: 500 }}>
@@ -2742,7 +2384,6 @@ func getenv(k, def string) string {
           }}
           bodyStyle={{ padding: 20 }}
         >
-          {activeTab === 'configs' && renderConfigsTab()}
           {activeTab === 'api-keys' && renderApiKeysTab()}
           {activeTab === 'call-logs' && renderCallLogsTab()}
           {activeTab === 'guide' && renderGuideTab()}

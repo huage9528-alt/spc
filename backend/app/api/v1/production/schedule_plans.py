@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import log_audit
 from app.core.database import AsyncSessionLocal, get_db, get_read_only_db
-from app.core.security import PermissionChecker, decode_access_token, oauth2_scheme
+from app.core.security import PermissionChecker, decode_access_token, oauth2_scheme, verify_channel_version
 from app.core.token_blacklist import TOKEN_BLACKLIST_PREFIX, get_redis_client
 from app.models.basicdata.user import SysRole, SysUser
 from app.models.production.order_schedule_snapshot import ProductionOrderScheduleSnapshot
@@ -201,7 +201,6 @@ async def _check_production_schedule_permission_fast(
     timings["decode_access_token"] = round((perf_counter() - decode_started_at) * 1000, 2)
 
     token_jti = payload.get("jti")
-    token_login_version = payload.get("login_version", 0)
     if token_jti:
         is_blacklisted, blacklist_meta = await _is_token_blacklisted_fast(token_jti)
         timings["token_blacklist"] = blacklist_meta
@@ -241,13 +240,7 @@ async def _check_production_schedule_permission_fast(
     payload["username"] = user.username
     payload["supplier_name"] = user.supplier_name
 
-    db_login_version = user.login_version or 0
-    if token_login_version != db_login_version:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="您的账号已在其他设备登录，请重新登录",
-            headers={"X-Force-Logout": "true"},
-        )
+    verify_channel_version(user, payload)
 
     if role == "admin":
         return payload, timings

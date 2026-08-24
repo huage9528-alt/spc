@@ -7,23 +7,6 @@ from sqlalchemy.sql import func
 from app.core.database import Base
 
 
-class DataSupplyConfig(Base):
-    """数据供给配置 — 定义哪些数据实体可对外暴露"""
-    __tablename__ = "data_supply_config"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    data_type = Column(String(64), nullable=False, unique=True, comment="数据实体标识 (customers/suppliers/...)")
-    data_name = Column(String(128), nullable=False, comment="数据实体中文名")
-    description = Column(String(512), nullable=True, comment="描述")
-    model_name = Column(String(128), nullable=False, comment="对应 SQLAlchemy 模型类名")
-    allowed_fields_json = Column(Text, nullable=True, comment="允许暴露的字段列表 JSON")
-    filter_fields_json = Column(Text, nullable=True, comment="允许作为筛选条件的字段列表 JSON")
-    mask_fields_json = Column(Text, nullable=True, comment="需要脱敏的字段列表 JSON（如手机号、邮箱等）")
-    is_active = Column(Boolean, default=True, comment="是否启用")
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-
-
 class DataSupplyApiKey(Base):
     """数据供给 API Key — 为外部系统分配的访问凭据"""
     __tablename__ = "data_supply_api_key"
@@ -33,7 +16,6 @@ class DataSupplyApiKey(Base):
     api_key = Column(String(64), nullable=False, unique=True, index=True, comment="API Key 值")
     description = Column(String(512), nullable=True, comment="用途说明")
     is_active = Column(Boolean, default=True, comment="是否启用")
-    allowed_data_types_json = Column(Text, nullable=True, comment="允许访问的数据类型列表 JSON")
     allowed_endpoints_json = Column(Text, nullable=True, comment="允许调用的对外接口 endpoint_code 列表 JSON")
     rate_limit = Column(Integer, default=100, comment="每分钟请求限制")
     app_key = Column(String(64), nullable=True, unique=True, index=True, comment="应用标识（AppKey）")
@@ -61,3 +43,4 @@ class DataSupplyCallLog(Base):
     duration_ms = Column(Numeric(10, 2), nullable=True, comment="响应耗时(ms)")
     error_message = Column(Text, nullable=True, comment="错误信息")
     called_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+

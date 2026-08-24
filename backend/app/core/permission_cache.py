@@ -1,8 +1,9 @@
 """用户权限 payload 缓存 — 减轻 PermissionChecker 每次请求查库的负担
 
 缓存内容：role_code / supplier_name / supplier_code / oa_user_id / org_scope_ids / login_version
-缓存粒度：按 user_id + login_version（重新登录会 bump login_version，自动失效旧缓存）
-TTL：5 分钟（兜底，即使 login_version 失效机制出问题也不会缓存太久）
+缓存粒度：按 user_id + channel + login_version（login_version 为 token 携带的渠道版本；
+   同渠道重新登录版本递增，登录时主动 invalidate 该渠道缓存，立即失效旧缓存）
+TTL：5 分钟（兜底，即使失效机制出问题也不会缓存太久）
 """
 import json
 import time
@@ -27,8 +28,8 @@ async def _get_redis():
         return None
 
 
-def _cache_key(user_id: int, login_version: int) -> str:
-    return f"{PAYLOAD_CACHE_PREFIX}{user_id}:v{login_version}"
+def _cache_key(user_id: int, channel: str, login_version: int) -> str:
+    return f"{PAYLOAD_CACHE_PREFIX}{user_id}:{channel}:v{login_version}"
 
 
 def _local_get(key: str) -> dict | None:
@@ -48,9 +49,9 @@ def _local_set(key: str, value: dict) -> None:
         _local_cache[key] = (time.time(), value)
 
 
-async def get_cached_user_payload(user_id: int, login_version: int) -> dict | None:
+async def get_cached_user_payload(user_id: int, channel: str, login_version: int) -> dict | None:
     """读取缓存的用户 payload（不含 permissions，permissions 单独查）。返回 None 表示未命中。"""
-    key = _cache_key(user_id, login_version)
+    key = _cache_key(user_id, channel, login_version)
     # 先查进程内缓存（最快）
     local = _local_get(key)
     if local is not None:
@@ -75,9 +76,9 @@ async def get_cached_user_payload(user_id: int, login_version: int) -> dict | No
             pass
 
 
-async def set_cached_user_payload(user_id: int, login_version: int, payload: dict) -> None:
+async def set_cached_user_payload(user_id: int, channel: str, login_version: int, payload: dict) -> None:
     """写入用户 payload 缓存"""
-    key = _cache_key(user_id, login_version)
+    key = _cache_key(user_id, channel, login_version)
     # org_scope_ids 是 set，需要转 list 才能序列化
     safe = dict(payload)
     if isinstance(safe.get("org_scope_ids"), set):
@@ -99,15 +100,24 @@ async def set_cached_user_payload(user_id: int, login_version: int, payload: dic
             pass
 
 
-async def invalidate_user_payload(user_id: int) -> None:
-    """主动失效某用户的所有版本缓存（扫前缀）"""
+async def invalidate_user_payload(user_id: int, channel: str | None = None) -> None:
+    """主动失效某用户（某渠道）的所有版本缓存。
+
+    channel 给定时只清该渠道；为 None 时清该用户所有渠道。同时清进程内缓存与 Redis。
+    """
+    local_prefix = f"{PAYLOAD_CACHE_PREFIX}{user_id}:{channel}:v" if channel else f"{PAYLOAD_CACHE_PREFIX}{user_id}:"
+    redis_pattern = f"{PAYLOAD_CACHE_PREFIX}{user_id}:{channel}:v*" if channel else f"{PAYLOAD_CACHE_PREFIX}{user_id}:*"
+    # 清进程内缓存
+    with _local_lock:
+        stale = [k for k in _local_cache if k.startswith(local_prefix)]
+        for k in stale:
+            _local_cache.pop(k, None)
+    # 清 Redis
     client = await _get_redis()
     if not client:
         return
     try:
-        # 扫所有版本 key（不同 login_version 的）
-        pattern = f"{PAYLOAD_CACHE_PREFIX}{user_id}:v*"
-        async for key in client.scan_iter(match=pattern, count=100):
+        async for key in client.scan_iter(match=redis_pattern, count=100):
             await client.delete(key)
     except Exception:
         pass

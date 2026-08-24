@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://root:123456@192.168.0.127:5432/spc_db"
     DATABASE_URL_SYNC: str = "postgresql+psycopg2://root:123456@192.168.0.127:5432/spc_db"
+    # 远程 DB 空闲连接会被防火墙/NAT 静默掐断(无 RST),必须 recycle+pre_ping 双保险
+    DB_POOL_RECYCLE: int = 180
 
     # ERP 中间库连接（只读）
     ERP_DB_URL: str = ""  # e.g. "mssql+pyodbc://user:pass@host/erp_db?driver=ODBC+Driver+17+for+SQL+Server"
@@ -95,7 +97,7 @@ class Settings(BaseSettings):
     AI_MAX_AGENT_DURATION_S: int = 120
 
     # 物料盘点
-    STOCK_CHECK_RECENT_SKIP_DAYS: int = 7  # 订单盘点建单时，近 N 天内已盘过的(物料×仓库)行自动预填补
+    STOCK_CHECK_RECENT_SKIP_DAYS: int = 7  # 订单盘点建单/刷新BOM时，近 N 天内已盘过的(物料×仓库)行仅标记"近期已盘"免盘(不预填盘点数据)
 
     # WeCom (企业微信)
     wecom_corp_id: Optional[str] = None
@@ -103,6 +105,7 @@ class Settings(BaseSettings):
     wecom_corp_secret: Optional[str] = None
     wecom_contact_secret: Optional[str] = None
     frontend_base_url: Optional[str] = None
+    data_supply_alert_wecom_uids: str = ""  # 逗号分隔的企微 userid，空则告警只记日志
 
     model_config = {"env_file": _ENV_FILES, "env_file_encoding": "utf-8", "extra": "ignore"}
 

@@ -6,8 +6,9 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional, List, Dict, Tuple
 
-from sqlalchemy import select, func, desc, or_, String as SAString, text, case
+from sqlalchemy import select, func, desc, or_, and_, String as SAString, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.models.basicdata.inventory import Inventory
 from app.models.basicdata.material import Material
@@ -274,6 +275,11 @@ async def enrich_live_qty(db: AsyncSession, items: List[StockCheckItem]) -> None
 
     优先按与快照相同的 (material_id, wh_id) 查询 scm_inventory.qty_on_hand;
     老盘点单明细无 wh_id 时,回退到按物料跨仓聚合,保证兼容。
+    wh_id=NULL 的"(未入库)"合成行,若物料现在已有库存记录,
+    额外注入 live_wh_names(实时仓库名,顿号分隔),供前端展示真实仓库。
+    未盘点行(actual_qty IS NULL)的快照库存 system_qty 读时覆盖为实时值
+    (set_committed_value 不落库),并标记 snapshot_live=True;
+    录入盘点数时由 update_stock_check_item 冻结快照写库。
     """
     mids = [int(it.material_id) for it in items if it.material_id is not None]
     stock_map = await _get_stock_by_warehouse(db, mids) if mids else {}
@@ -284,9 +290,11 @@ async def enrich_live_qty(db: AsyncSession, items: List[StockCheckItem]) -> None
     agg_map = (
         await _get_stock_aggregated_by_material_id(db, none_wh_mids) if none_wh_mids else {}
     )
+    live_wh_map = _split_stock_by_warehouse(stock_map, none_wh_mids) if none_wh_mids else {}
     for it in items:
         mid = int(it.material_id) if it.material_id is not None else None
         wh_id = int(it.wh_id) if it.wh_id is not None else None
+        it.live_wh_names = None
         if mid is None:
             it.live_qty = Decimal("0")
         elif wh_id is not None:
@@ -294,6 +302,85 @@ async def enrich_live_qty(db: AsyncSession, items: List[StockCheckItem]) -> None
             it.live_qty = entry[1] if entry else Decimal("0")
         else:
             it.live_qty = agg_map.get(mid, Decimal("0"))
+            whs = live_wh_map.get(mid) or []
+            if whs:
+                it.live_wh_names = "、".join(w[1] for w in whs)
+        # 未盘点行: 快照库存跟随实时值(读时覆盖,不落库)
+        if it.actual_qty is None and it.material_id is not None:
+            set_committed_value(it, "system_qty", it.live_qty)
+            it.snapshot_live = True
+        else:
+            it.snapshot_live = False
+        # 仓库展示名: 含实时仓库名,供前端筛选/排序/展示(不落库)
+        it.warehouse_display = it.live_wh_names or it.wh_name or "(未入库)"
+
+
+async def _freeze_snapshot_for_count(
+    db: AsyncSession,
+    item: StockCheckItem,
+    live_cache: Optional[Dict[Tuple[int, Optional[int]], Tuple[Decimal, Optional[datetime]]]] = None,
+) -> None:
+    """录入盘点数时冻结快照库存:把当前实时库存写入 system_qty/system_qty_time。
+
+    与 enrich_live_qty 同口径: 有 wh_id 按 (物料,仓库),无 wh_id(未入库合成行)
+    按物料跨仓聚合(时间取冻结时点)。
+    """
+    mid = int(item.material_id) if item.material_id is not None else None
+    if mid is None:
+        item.system_qty = Decimal("0")
+        item.system_qty_time = None
+        return
+    wh_id = int(item.wh_id) if item.wh_id is not None else None
+    key = (mid, wh_id)
+    if live_cache is not None and key in live_cache:
+        q, t = live_cache[key]
+    elif wh_id is not None:
+        entry = (await _get_stock_by_warehouse(db, [mid])).get((mid, wh_id))
+        q, t = (entry[1], entry[2]) if entry else (Decimal("0"), None)
+    else:
+        q = (await _get_stock_aggregated_by_material_id(db, [mid])).get(mid, Decimal("0"))
+        t = datetime.now()
+    item.system_qty = q
+    item.system_qty_time = t
+
+
+async def _build_live_freeze_cache(
+    db: AsyncSession,
+    item_ids: List[int],
+) -> Dict[Tuple[int, Optional[int]], Tuple[Decimal, Optional[datetime]]]:
+    """批量更新前一次性预取待冻结行的实时库存,避免逐行查询。
+
+    只对 actual_qty IS NULL(将首次录入盘点数)的行建缓存。
+    """
+    if not item_ids:
+        return {}
+    rows = (await db.execute(
+        select(StockCheckItem.material_id, StockCheckItem.wh_id).where(
+            StockCheckItem.id.in_(item_ids),
+            StockCheckItem.actual_qty.is_(None),
+        )
+    )).all()
+    keys = {
+        (int(r[0]), int(r[1]) if r[1] is not None else None)
+        for r in rows if r[0] is not None
+    }
+    if not keys:
+        return {}
+    wh_mids = [mid for (mid, wh) in keys if wh is not None]
+    agg_mids = [mid for (mid, wh) in keys if wh is None]
+    stock_map = await _get_stock_by_warehouse(db, wh_mids) if wh_mids else {}
+    agg_map = (
+        await _get_stock_aggregated_by_material_id(db, agg_mids) if agg_mids else {}
+    )
+    cache: Dict[Tuple[int, Optional[int]], Tuple[Decimal, Optional[datetime]]] = {}
+    for k in keys:
+        mid, wh = k
+        if wh is not None:
+            e = stock_map.get(k)
+            cache[k] = (e[1], e[2]) if e else (Decimal("0"), None)
+        else:
+            cache[k] = (agg_map.get(mid, Decimal("0")), datetime.now())
+    return cache
 
 
 def _serialize_item(item: StockCheckItem) -> dict:
@@ -303,11 +390,21 @@ def _serialize_item(item: StockCheckItem) -> dict:
 
 
 async def _refresh_check_aggregates(db: AsyncSession, check_id: int) -> None:
-    """刷新头表 total_materials / checked_materials / total_diff_qty"""
+    """刷新头表 total_materials / checked_materials / total_diff_qty
+
+    checked 口径: is_checked=1(已录数/已签收) 或 带近期已盘标记(recent_checked_check_no 非空,
+    免盘行,不记录盘点数据但视为无需再盘)。
+    """
     items_agg = await db.execute(
         select(
             func.count(StockCheckItem.id).label("total"),
-            func.coalesce(func.sum(StockCheckItem.is_checked), 0).label("checked"),
+            func.coalesce(func.sum(case(
+                (or_(
+                    StockCheckItem.is_checked == 1,
+                    StockCheckItem.recent_checked_check_no.isnot(None),
+                ), 1),
+                else_=0,
+            )), 0).label("checked"),
             func.coalesce(func.sum(StockCheckItem.diff_qty), 0).label("diff"),
         ).where(StockCheckItem.check_id == check_id)
     )
@@ -478,7 +575,8 @@ async def create_stock_check_from_order(
             and (today - recent["check_date"]).days <= skip_days
         )
         if prefill:
-            actual_q = recent["actual_qty"]
+            # 近期已盘: 仅打标记,不预填任何盘点数据(实盘数/差异/已盘状态均不记录),
+            # 避免旧实盘数与当前库存跨时间点错配产生假差异;需要重盘时走 force_recount。
             item_rows.append(StockCheckItem(
                 check_id=head.id,
                 line_no=None,
@@ -493,11 +591,9 @@ async def create_stock_check_from_order(
                 system_qty_time=meta.get("system_qty_time"),
                 wh_id=wh_id,
                 wh_name=meta["wh_name"],
-                actual_qty=actual_q,
-                diff_qty=Decimal(str(actual_q)) - Decimal(str(meta["system_qty"])),
-                is_checked=1,
-                checked_at=datetime.now(),
-                checked_by="system-recent",
+                actual_qty=None,
+                diff_qty=Decimal("0"),
+                is_checked=0,
                 recent_checked_check_no=recent["check_no"],
                 recent_checked_date=recent["check_date"],
             ))
@@ -919,20 +1015,37 @@ async def list_material_candidates(
 async def list_counted_warehouses(db: AsyncSession) -> List[Dict]:
     """已盘点物料台账中涉及的仓库列表（去重），供前端仓库筛选下拉使用。
 
-    只统计 actual_qty 非空 且盘点单未取消 的盘点行涉及的仓库，
-    与 list_counted_materials_ledger 的基础过滤口径保持一致。
+    只统计 actual_qty 非空 且盘点单未取消 的盘点行；
+    "(未入库)"行(wh_id=NULL)额外并入该物料当前在 scm_inventory 中的实时仓库
+    (与台账页仓库列展示 live_wh_names 的口径一致,使筛选可选到如"包装仓库")。
     """
-    stmt = (
+    snapshot_stmt = (
         select(StockCheckItem.wh_id, StockCheckItem.wh_name)
         .join(StockCheck, StockCheck.id == StockCheckItem.check_id)
         .where(StockCheckItem.actual_qty.is_not(None))
         .where(StockCheck.status != 'cancelled')
         .where(StockCheckItem.wh_id.is_not(None))
         .group_by(StockCheckItem.wh_id, StockCheckItem.wh_name)
-        .order_by(StockCheckItem.wh_name)
     )
-    rows = (await db.execute(stmt)).all()
-    return [{"wh_id": r[0], "wh_name": r[1] or ''} for r in rows]
+    live_stmt = (
+        select(Inventory.wh_id, func.max(Inventory.wh_name).label("wh_name"))
+        .select_from(StockCheckItem)
+        .join(StockCheck, StockCheck.id == StockCheckItem.check_id)
+        .join(Inventory, Inventory.material_id == StockCheckItem.material_id)
+        .where(StockCheckItem.actual_qty.is_not(None))
+        .where(StockCheck.status != 'cancelled')
+        .where(StockCheckItem.wh_id.is_(None))
+        .group_by(Inventory.wh_id)
+    )
+    merged: Dict[int, str] = {}
+    for r in (await db.execute(snapshot_stmt)).all():
+        merged[int(r[0])] = r[1] or ''
+    for r in (await db.execute(live_stmt)).all():
+        merged.setdefault(int(r[0]), (r[1] or '').strip() or f"WH#{int(r[0])}")
+    return [
+        {"wh_id": wid, "wh_name": name}
+        for wid, name in sorted(merged.items(), key=lambda kv: kv[1])
+    ]
 
 
 async def list_counted_materials_ledger(
@@ -985,10 +1098,19 @@ async def list_counted_materials_ledger(
         wh_raw = str(wh_id).strip()
         try:
             params["wh_int"] = int(wh_raw)
-            conds.append("ic.wh_id = :wh_int")
+            # 未入库行(wh_id=NULL)按物料实时库存所在仓匹配,与仓库列 live_wh_names 口径一致
+            conds.append(
+                "(ic.wh_id = :wh_int OR (ic.wh_id IS NULL AND EXISTS ("
+                "SELECT 1 FROM scm_inventory inv "
+                "WHERE inv.material_id = ic.material_id AND inv.wh_id = :wh_int)))"
+            )
         except (TypeError, ValueError):
             params["wh_name_like"] = f"%{wh_raw}%"
-            conds.append("ic.wh_name ILIKE :wh_name_like")
+            conds.append(
+                "(ic.wh_name ILIKE :wh_name_like OR (ic.wh_id IS NULL AND EXISTS ("
+                "SELECT 1 FROM scm_inventory inv "
+                "WHERE inv.wh_name ILIKE :wh_name_like AND inv.material_id = ic.material_id)))"
+            )
     if date_from:
         params["date_from"] = date_from
         conds.append("h.check_date >= :date_from")
@@ -1099,6 +1221,7 @@ WITH ranked AS (
 
     # 实时库存(读时计算,不落库): 按 (material_id, wh_id) 查 scm_inventory;
     # 无仓库(未入库/老数据)回退按物料跨仓聚合,与明细页 enrich_live_qty 一致。
+    # 未入库行若物料现在已有库存记录,注入 live_wh_names 供前端展示真实仓库。
     ledger_mids = [int(it["material_id"]) for it in items if it["material_id"] is not None]
     stock_map = await _get_stock_by_warehouse(db, ledger_mids) if ledger_mids else {}
     none_wh_mids = list({
@@ -1107,9 +1230,11 @@ WITH ranked AS (
     agg_map = (
         await _get_stock_aggregated_by_material_id(db, none_wh_mids) if none_wh_mids else {}
     )
+    live_wh_map = _split_stock_by_warehouse(stock_map, none_wh_mids) if none_wh_mids else {}
     for it in items:
         mid = int(it["material_id"]) if it["material_id"] is not None else None
         wh = int(it["wh_id"]) if it["wh_id"] is not None else None
+        it["live_wh_names"] = None
         if mid is None:
             it["live_qty"] = Decimal("0")
         elif wh is not None:
@@ -1117,6 +1242,9 @@ WITH ranked AS (
             it["live_qty"] = entry[1] if entry else Decimal("0")
         else:
             it["live_qty"] = agg_map.get(mid, Decimal("0"))
+            whs = live_wh_map.get(mid) or []
+            if whs:
+                it["live_wh_names"] = "、".join(w[1] for w in whs)
 
     return int(total), items
 
@@ -1132,6 +1260,7 @@ async def update_stock_check_item(
     force_recount: Optional[bool] = None,
     expected_version: Optional[int] = None,
     current_user: Optional[dict] = None,
+    live_cache: Optional[Dict[Tuple[int, Optional[int]], Tuple[Decimal, Optional[datetime]]]] = None,
 ) -> StockCheckItem:
     item = (await db.execute(select(StockCheckItem).where(StockCheckItem.id == item_id).with_for_update())).scalar_one_or_none()
     if not item:
@@ -1162,6 +1291,13 @@ async def update_stock_check_item(
         else:
             new_actual_qty = Decimal(str(actual_qty))
             item.actual_qty = new_actual_qty
+            if old_actual_qty is None:
+                # 首次录入盘点数 → 冻结快照库存为当前实时值;
+                # 若该行带近期已盘标记,真实盘点已取代免盘,同步撤销标记
+                await _freeze_snapshot_for_count(db, item, live_cache)
+                if item.recent_checked_check_no is not None:
+                    item.recent_checked_check_no = None
+                    item.recent_checked_date = None
             if new_actual_qty != old_actual_qty or force_recount:
                 actual_qty_changed = True
                 item.counted_by_user_id = _current_user_id(current_user)
@@ -1183,6 +1319,13 @@ async def update_stock_check_item(
             item.is_checked = 0
             item.checked_at = None
             item.checked_by = None
+    # 盘点数联动:盘点数非空 → 自动勾选已盘;清空 → 自动取消勾选
+    # 仅当实际提交了盘点数且 is_checked 未被显式设置时生效,避免覆盖 force_recount / 手动勾选
+    if actual_qty_provided and is_checked is None:
+        if item.actual_qty is not None and item.is_checked != 1:
+            item.is_checked = 1
+        elif item.actual_qty is None and item.is_checked != 0:
+            item.is_checked = 0
     if item.actual_qty is not None and item.system_qty is not None:
         item.diff_qty = Decimal(str(item.actual_qty)) - Decimal(str(item.system_qty))
     elif actual_qty_provided:
@@ -1218,6 +1361,9 @@ async def batch_update_items(
     items: List[dict],
     current_user: dict,
 ) -> int:
+    # 预取待首次录入行的实时库存,避免逐行查询
+    ids = [int(it["id"]) for it in items if it.get("id") is not None]
+    live_cache = await _build_live_freeze_cache(db, ids)
     n = 0
     for it in items:
         if it.get("id") is None:
@@ -1232,6 +1378,7 @@ async def batch_update_items(
             force_recount=it.get("force_recount"),
             expected_version=it.get("expected_version"),
             current_user=current_user,
+            live_cache=live_cache,
         )
         n += 1
     return n
@@ -1264,7 +1411,11 @@ async def complete_stock_check(
     )).scalar_one()
     checked = (await db.execute(
         select(func.count(StockCheckItem.id)).where(
-            StockCheckItem.check_id == check_id, StockCheckItem.is_checked == 1
+            StockCheckItem.check_id == check_id,
+            or_(
+                StockCheckItem.is_checked == 1,
+                StockCheckItem.recent_checked_check_no.isnot(None),
+            ),
         )
     )).scalar_one()
     if int(total or 0) == 0:
@@ -1273,7 +1424,8 @@ async def complete_stock_check(
         raise ValueError(f"还有 {int(total) - int(checked)} 行未盘点,无法完结")
 
     for item in head.items:
-        if item.actual_qty is None:
+        # 近期已盘免盘行(recent 标记未撤销且未录入实盘数)不强制录入
+        if item.actual_qty is None and not item.recent_checked_check_no:
             raise ValueError(f"物料 {item.material_code or item.material_id} 还未录入实盘数,请先填写再完结")
 
     head.status = "completed"
@@ -1499,7 +1651,7 @@ async def refresh_order_bom(db: AsyncSession, check_id: int, current_user: dict)
             and (today - recent["check_date"]).days <= skip_days
         )
         if prefill:
-            actual_q = recent["actual_qty"]
+            # 近期已盘: 仅打标记,不预填任何盘点数据(与 create_stock_check_from_order 同口径)
             db.add(StockCheckItem(
                 check_id=check_id,
                 line_no=None,
@@ -1514,11 +1666,9 @@ async def refresh_order_bom(db: AsyncSession, check_id: int, current_user: dict)
                 system_qty_time=meta.get("system_qty_time"),
                 wh_id=wh_id,
                 wh_name=meta["wh_name"],
-                actual_qty=actual_q,
-                diff_qty=Decimal(str(actual_q)) - Decimal(str(meta["system_qty"])),
-                is_checked=1,
-                checked_at=datetime.now(),
-                checked_by="system-recent",
+                actual_qty=None,
+                diff_qty=Decimal("0"),
+                is_checked=0,
                 recent_checked_check_no=recent["check_no"],
                 recent_checked_date=recent["check_date"],
             ))
@@ -1555,6 +1705,143 @@ async def refresh_order_bom(db: AsyncSession, check_id: int, current_user: dict)
     return head
 
 
+async def refresh_check_warehouses(db: AsyncSession, check_id: int, current_user: dict) -> Dict:
+    """将进行中盘点单的"(未入库)"明细行按当前库存刷新为具体仓库行(订单/手动盘点单通用)。
+
+    - 仅 open/in_progress 状态可用;权限:创建人 / 共同盘点人 / admin。
+    - 仅处理 wh_id IS NULL 且未录入数据(actual_qty IS NULL 且 is_checked=0)的行;
+      已录入数据的"(未入库)"行保持原样,避免改变已盘数据的差异归属口径。
+    - 物料当前有 1 个仓库: UPDATE 原行仓库三列,并把该行快照库存刷新为刷新时点数量;
+      ≥2 个仓库: 原行更新为库存最大的仓,其余仓 INSERT 新行(快照=刷新时点数量);
+      仍无库存: 保持"(未入库)"不动。
+    - 防重: 单内已存在同 (material_id, wh_id) 行的仓不再写入;同物料多行"(未入库)"
+      老数据整体跳过(护栏,与回填脚本一致)。
+    - 完成后重算头表汇总、head.version+1、广播 warehouses_refreshed 事件(客户端整体重拉)。
+    """
+    head = (await db.execute(select(StockCheck).where(StockCheck.id == check_id))).scalar_one_or_none()
+    if not head:
+        raise ValueError(f"盘点单 {check_id} 不存在")
+    if head.status not in ("open", "in_progress"):
+        raise ValueError("仅待盘点/盘点中的单据可刷新仓库")
+    if not _user_can_edit(head, current_user):
+        raise StockCheckPermissionError("无修改权限：仅创建人、共同盘点人或管理员可修改")
+
+    pending = (await db.execute(
+        select(StockCheckItem).where(
+            StockCheckItem.check_id == check_id,
+            StockCheckItem.wh_id.is_(None),
+            StockCheckItem.material_id.isnot(None),
+            StockCheckItem.actual_qty.is_(None),
+            or_(StockCheckItem.is_checked == 0, StockCheckItem.is_checked.is_(None)),
+        ).order_by(StockCheckItem.id)
+    )).scalars().all()
+    stats = {"pending": len(pending), "updated": 0, "split": 0, "inserted": 0,
+             "no_stock": 0, "skipped_existing": 0, "guard_skip": 0}
+    if not pending:
+        return stats
+
+    # 单内已有 (material_id, wh_id) 行集合(防重复写入)
+    existing_res = await db.execute(
+        select(StockCheckItem.material_id, StockCheckItem.wh_id)
+        .where(StockCheckItem.check_id == check_id, StockCheckItem.wh_id.isnot(None))
+    )
+    existing_keys = {
+        (int(r[0]), int(r[1])) for r in existing_res.all() if r[0] is not None
+    }
+    # 护栏: 同单内同一 material_id 有多行"(未入库)"老明细 → 全部跳过
+    mid_count: Dict[int, int] = {}
+    for it in pending:
+        mid_count[int(it.material_id)] = mid_count.get(int(it.material_id), 0) + 1
+
+    mids = list(mid_count.keys())
+    stock_res = await db.execute(
+        select(
+            Inventory.material_id,
+            Inventory.wh_id,
+            func.max(Inventory.wh_code).label("wh_code"),
+            func.max(Inventory.wh_name).label("wh_name"),
+            func.coalesce(func.sum(Inventory.qty_on_hand), 0).label("qty"),
+            func.max(Inventory.updated_at).label("wh_updated"),
+        )
+        .where(Inventory.material_id.in_(mids))
+        .group_by(Inventory.material_id, Inventory.wh_id)
+    )
+    wh_map: Dict[int, List[Dict]] = {}
+    for r in stock_res.all():
+        wh_map.setdefault(int(r.material_id), []).append({
+            "wh_id": int(r.wh_id),
+            "wh_code": (r.wh_code or "").strip() or None,
+            "wh_name": (r.wh_name or "").strip() or f"WH#{r.wh_id}",
+            "qty": Decimal(str(r.qty or 0)),
+            "updated_at": r.wh_updated,
+        })
+    for mid in wh_map:
+        wh_map[mid].sort(key=lambda w: (-w["qty"], w["wh_id"]))
+
+    for item in pending:
+        mid = int(item.material_id)
+        if mid_count[mid] > 1:
+            stats["guard_skip"] += 1
+            continue
+        whs = [
+            w for w in wh_map.get(mid, [])
+            if (mid, w["wh_id"]) not in existing_keys
+        ]
+        if not wh_map.get(mid):
+            stats["no_stock"] += 1
+            continue
+        if not whs:
+            # 目标仓均已存在行,原"(未入库)"行冗余但不动(保留供人工确认)
+            stats["skipped_existing"] += 1
+            continue
+
+        first = whs[0]
+        item.wh_id = first["wh_id"]
+        item.wh_code = first["wh_code"]
+        item.wh_name = first["wh_name"]
+        item.system_qty = first["qty"]
+        item.system_qty_time = first["updated_at"]
+        item.diff_qty = Decimal("0")
+        item.version = int(item.version or 0) + 1
+        stats["updated"] += 1
+
+        for extra in whs[1:]:
+            db.add(StockCheckItem(
+                check_id=check_id,
+                line_no=item.line_no,
+                level=item.level,
+                material_id=item.material_id,
+                material_code=item.material_code,
+                material_name=item.material_name,
+                spec_model=item.spec_model,
+                unit=item.unit,
+                req_qty=Decimal("0"),
+                system_qty=extra["qty"],
+                system_qty_time=extra["updated_at"],
+                wh_id=extra["wh_id"],
+                wh_code=extra["wh_code"],
+                wh_name=extra["wh_name"],
+                actual_qty=None,
+                diff_qty=Decimal("0"),
+                is_checked=0,
+            ))
+            stats["inserted"] += 1
+        if len(whs) > 1:
+            stats["split"] += 1
+
+    await db.flush()
+    await _refresh_check_aggregates(db, check_id)
+    head.version = int(head.version or 0) + 1
+    await db.flush()
+    await publish_event(
+        check_id,
+        "warehouses_refreshed",
+        {"check_id": check_id, "head_version": int(head.version or 0), "stats": stats},
+        _current_user_id(current_user),
+    )
+    return stats
+
+
 async def get_stock_check_with_items(db: AsyncSession, check_id: int) -> Optional[StockCheck]:
     head = (await db.execute(select(StockCheck).where(StockCheck.id == check_id))).scalar_one_or_none()
     if not head:
@@ -1576,6 +1863,7 @@ async def list_recent_stock_checks(
     keyword: Optional[str] = None,
     status: Optional[List[str]] = None,
     check_type: Optional[str] = None,
+    source: Optional[str] = None,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     sort_by: Optional[str] = None,
@@ -1604,6 +1892,8 @@ async def list_recent_stock_checks(
             query = query.where(StockCheck.status.in_(statuses))
     if check_type:
         query = query.where(StockCheck.check_type == check_type)
+    if source:
+        query = query.where(StockCheck.source == source)
     if date_from:
         query = query.where(StockCheck.check_date >= date_from)
     if date_to:
@@ -1833,9 +2123,24 @@ async def list_my_stock_check_items(
         wh_raw = str(wh_id).strip()
         try:
             wh_int = int(wh_raw)
-            conds.append(StockCheckItem.wh_id == wh_int)
+            live_exists = select(1).where(
+                Inventory.material_id == StockCheckItem.material_id,
+                Inventory.wh_id == wh_int,
+            ).exists()
+            # 未入库行(wh_id=NULL)按物料实时库存所在仓匹配,与台账页口径一致
+            conds.append(or_(
+                StockCheckItem.wh_id == wh_int,
+                and_(StockCheckItem.wh_id.is_(None), live_exists),
+            ))
         except (TypeError, ValueError):
-            conds.append(StockCheckItem.wh_name.ilike(f"%{wh_raw}%"))
+            live_name_exists = select(1).where(
+                Inventory.material_id == StockCheckItem.material_id,
+                Inventory.wh_name.ilike(f"%{wh_raw}%"),
+            ).exists()
+            conds.append(or_(
+                StockCheckItem.wh_name.ilike(f"%{wh_raw}%"),
+                and_(StockCheckItem.wh_id.is_(None), live_name_exists),
+            ))
 
     if sort_by and sort_by in SORTABLE:
         col = SORTABLE[sort_by]

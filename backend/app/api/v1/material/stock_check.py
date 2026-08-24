@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import AsyncSessionLocal, get_db
 from app.core.dependencies import get_current_user
 from app.core.security import PermissionChecker
 from app.schemas.common import ResponseModel, PageResult
@@ -31,6 +31,9 @@ from app.schemas.material.stock_check import (
     StockCheckMyItemOut,
     StockCheckConflictOut,
     StockCheckActionBody,
+    K3BillOut,
+    K3ImportRequest,
+    K3ImportResultOut,
 )
 from app.models.material.inventory_check import StockCheck, StockCheckItem
 from app.services.material.stock_check_service import (
@@ -45,6 +48,7 @@ from app.services.material.stock_check_service import (
     cancel_stock_check,
     set_co_checkers,
     refresh_order_bom,
+    refresh_check_warehouses,
     add_items_to_check,
     remove_item_from_check,
     get_stock_check_with_items,
@@ -61,6 +65,10 @@ from app.services.material.stock_check_service import (
     _resolve_user_names,
     StockCheckPermissionError,
     StockCheckConflictError,
+)
+from app.services.material.stock_check_k3_service import (
+    list_k3_gain_loss_bills,
+    import_k3_bills_as_stock_checks,
 )
 from app.services.material.stock_check_broker import subscribe_stream, set_presence, clear_presence
 
@@ -260,6 +268,7 @@ async def recent(
     keyword: Optional[str] = Query(None, description="搜索盘点单号/订单号/标题"),
     status: Optional[str] = Query(None, description="状态筛选,逗号分隔(open/in_progress/completed/cancelled)"),
     check_type: Optional[str] = Query(None, description="盘点类型:order/manual"),
+    source: Optional[str] = Query(None, description="数据来源:k3/manual"),
     date_from: Optional[date] = Query(None, description="盘点日期起点 (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="盘点日期终点 (YYYY-MM-DD)"),
     sort_by: Optional[str] = Query(None, description="排序字段:check_no/order_no/check_date/total_materials/checked_materials/total_diff_qty/created_at"),
@@ -275,6 +284,7 @@ async def recent(
         keyword=keyword,
         status=statuses,
         check_type=check_type,
+        source=source,
         date_from=date_from,
         date_to=date_to,
         sort_by=sort_by,
@@ -292,6 +302,8 @@ async def recent(
         filter_query = filter_query.where(StockCheck.status.in_(statuses))
     if check_type:
         filter_query = filter_query.where(StockCheck.check_type == check_type)
+    if source:
+        filter_query = filter_query.where(StockCheck.source == source)
     if date_from:
         filter_query = filter_query.where(StockCheck.check_date >= date_from)
     if date_to:
@@ -416,23 +428,24 @@ async def stream_check_events(
     check_id: int,
     request: Request,
     token: str = Query(..., description="JWT token (EventSource 无法设 header)"),
-    db: AsyncSession = Depends(get_db),
 ):
     """共同盘点 SSE 实时同步流。
 
     客户端用 EventSource 连接,首帧 snapshot,后续 item_updated/status_changed/
-    co_checkers_changed/bom_refreshed。每 15s 发心跳注释行。
+    co_checkers_changed/bom_refreshed/warehouses_refreshed。每 15s 发心跳注释行。
+    鉴权/快照用短命会话,不挂 Depends(get_db):流可活几小时,不能占住池连接。
     """
-    current_user = await get_current_user(token=token, db=db)
-    head = await get_stock_check_with_items(db, check_id)
-    if not head:
-        raise HTTPException(status_code=404, detail="盘点单不存在")
-    if not _user_can_view(head, current_user):
-        raise HTTPException(status_code=403, detail="无查看权限")
+    async with AsyncSessionLocal() as db:
+        current_user = await get_current_user(token=token, db=db)
+        head = await get_stock_check_with_items(db, check_id)
+        if not head:
+            raise HTTPException(status_code=404, detail="盘点单不存在")
+        if not _user_can_view(head, current_user):
+            raise HTTPException(status_code=403, detail="无查看权限")
 
     async def gen():
         try:
-            async for chunk in subscribe_stream(check_id, db, current_user):
+            async for chunk in subscribe_stream(check_id, current_user):
                 if await request.is_disconnected():
                     break
                 yield chunk
@@ -749,6 +762,26 @@ async def export_stock_check(
     )
 
 
+@router.post("/stock-check/{check_id}/refresh-warehouses", response_model=ResponseModel[dict])
+async def refresh_warehouses(
+    check_id: int,
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """将"(未入库)"明细行按当前库存更新/拆分为具体仓库行（订单/手动盘点单均可用，仅 open/in_progress）。
+
+    仅处理未录入数据的"(未入库)"行；已录入数据的行不动。
+    返回统计 {pending, updated, split, inserted, no_stock, skipped_existing, guard_skip}。
+    权限不足或状态不允许时返回 403/400。"""
+    try:
+        stats = await refresh_check_warehouses(db, check_id, current_user)
+    except StockCheckPermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ResponseModel(data=stats)
+
+
 @router.post("/stock-check/{check_id}/refresh-bom", response_model=ResponseModel[StockCheckOut])
 async def refresh_bom(
     check_id: int,
@@ -766,4 +799,40 @@ async def refresh_bom(
     head = await get_stock_check_with_items(db, check_id)
     await db.refresh(head)
     return ResponseModel(data=await _to_check_out(db, head, current_user))
+
+
+@router.get("/stock-check/k3/bills", response_model=ResponseModel)
+async def list_k3_bills(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    tran_type: str = Query("all", pattern="^(all|40|41)$"),
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """K3 盘盈单(40)/盘亏调拨单(41,调入库存检查不良仓)预览(已审核未作废),带本系统已导入标记"""
+    try:
+        bills = await list_k3_gain_loss_bills(
+            db, date_from=date_from, date_to=date_to, tran_type=tran_type
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return ResponseModel(data=[K3BillOut.model_validate(b).model_dump() for b in bills])
+
+
+@router.post("/stock-check/k3/import", response_model=ResponseModel[K3ImportResultOut])
+async def import_k3_bills(
+    body: K3ImportRequest,
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """将勾选的 K3 盘盈盘亏单导入为已完结盘点单(一张 K3 单 -> 一张盘点单)"""
+    if not body.bill_nos:
+        raise HTTPException(status_code=400, detail="请至少选择一张 K3 单据")
+    if len(body.bill_nos) > 50:
+        raise HTTPException(status_code=400, detail="一次最多导入 50 张单据")
+    try:
+        result = await import_k3_bills_as_stock_checks(db, list(dict.fromkeys(body.bill_nos)), current_user)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return ResponseModel(data=result)
 

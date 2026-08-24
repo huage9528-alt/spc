@@ -1,33 +1,17 @@
 """对外接口注册表
 
-每个对外接口在此用 @register_external 装饰器声明：
-- endpoint_code: 唯一标识，与 API Key 的 allowed_endpoints_json 对应
-- name: 中文名
-- description: 描述
-- method: HTTP 方法
-- path: 固定路径（相对于 /external 前缀），如 /orders/list
-- handler: 异步处理函数 (ctx: ExternalCallContext) -> Any
+每个对外接口在 endpoints/ 中用 @register_external 声明：
+- endpoint_code: 唯一标识，与 API Key 的 allowed_endpoints_json、调用日志 data_type 对应
+- path: 相对 /external 前缀的路径（须与真实路由一致，装配时有一致性校验）
+
+真实路由由各 endpoints/*.py 的 APIRouter 声明；本注册表只负责
+endpoint 清单（管理端勾选、文档索引），不再参与请求分发。
 """
 
-import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional
 
-from fastapi import Request
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.basicdata.data_supply import DataSupplyApiKey
-
-
-@dataclass
-class ExternalCallContext:
-    """对外接口调用上下文，传给 handler"""
-    db: AsyncSession
-    request: Request
-    params: dict                       # 合并了 query params 和 body 的参数
-    key_obj: DataSupplyApiKey          # 已认证的 API Key 对象
-    client_ip: Optional[str] = None
-    user_agent: Optional[str] = None
+from fastapi.routing import APIRoute
 
 
 @dataclass
@@ -36,16 +20,12 @@ class ExternalEndpoint:
     endpoint_code: str                 # 唯一标识，如 orders.list
     name: str                          # 中文名
     description: str = ""
-    method: str = "GET"                # HTTP 方法（仅用于文档/校验）
-    path: str = ""                     # 固定路径（相对于 /external 前缀）
-    handler: Optional[Callable[[ExternalCallContext], Awaitable[Any]]] = None
-    tags: List[str] = field(default_factory=list)  # 分组标签
+    method: str = "GET"                # HTTP 方法
+    path: str = ""                     # 相对 /external 前缀的路径，如 /orders/list
+    tags: List[str] = field(default_factory=list)
 
 
-# 注册表
-_ENDPOINT_REGISTRY: Dict[str, ExternalEndpoint] = {}
-_PATH_INDEX: Dict[str, Dict[str, ExternalEndpoint]] = {}
-# _PATH_INDEX 形如 { "GET": { "/orders/list": Endpoint }, "POST": {...} }
+_REGISTRY: dict = {}
 
 
 def register_external(
@@ -57,80 +37,33 @@ def register_external(
     description: str = "",
     tags: Optional[List[str]] = None,
 ) -> Callable:
-    """装饰器：注册一个对外接口
-
-    用法:
-        @register_external("orders.list", "订单列表", method="GET", path="/orders/list")
-        async def orders_list(ctx: ExternalCallContext) -> dict:
-            ...
-    """
-    def decorator(fn: Callable[[ExternalCallContext], Awaitable[Any]]):
+    """装饰器：登记一个对外接口（与真实路由装饰器叠加使用，见 endpoints/orders.py）"""
+    def decorator(fn):
         endpoint = ExternalEndpoint(
             endpoint_code=endpoint_code,
             name=name,
             description=description,
             method=method.upper(),
             path=path or f"/{endpoint_code.replace('.', '/')}",
-            handler=fn,
             tags=tags or [],
         )
-
-        if endpoint.endpoint_code in _ENDPOINT_REGISTRY:
+        if endpoint.endpoint_code in _REGISTRY:
             raise ValueError(f"endpoint_code 重复: {endpoint.endpoint_code}")
-
-        method_upper = endpoint.method
-        path_map = _PATH_INDEX.setdefault(method_upper, {})
-        if endpoint.path in path_map:
-            raise ValueError(f"path 重复: {method_upper} {endpoint.path}")
-
-        _ENDPOINT_REGISTRY[endpoint.endpoint_code] = endpoint
-        path_map[endpoint.path] = endpoint
+        _REGISTRY[endpoint.endpoint_code] = endpoint
         return fn
-
     return decorator
 
 
 def get_endpoint_by_code(endpoint_code: str) -> Optional[ExternalEndpoint]:
-    return _ENDPOINT_REGISTRY.get(endpoint_code)
-
-
-def get_endpoint_by_route(method: str, path: str) -> Optional[ExternalEndpoint]:
-    """按 HTTP 方法和路径查找已注册的 endpoint（支持 {param} 路径参数）"""
-    return _PATH_INDEX.get(method.upper(), {}).get(path)
-
-
-def match_endpoint_by_route(method: str, path: str) -> Tuple[Optional[ExternalEndpoint], dict]:
-    """按 HTTP 方法和路径匹配已注册的 endpoint，支持 {param} 路径参数
-
-    返回 (endpoint, path_params)，若未匹配则 (None, {})。
-    优先精确匹配，其次按 {param} 模式匹配。
-    """
-    path_map = _PATH_INDEX.get(method.upper(), {})
-    if not path_map:
-        return None, {}
-
-    # 精确匹配优先
-    if path in path_map:
-        return path_map[path], {}
-
-    # 模式匹配：{param} → ([^/]+)
-    for registered_path, endpoint in path_map.items():
-        pattern = re.sub(r"\{([^}]+)\}", r"(?P<\1>[^/]+)", registered_path)
-        if "{" not in registered_path:
-            continue
-        m = re.fullmatch(pattern, path)
-        if m:
-            return endpoint, m.groupdict()
-
-    return None, {}
+    return _REGISTRY.get(endpoint_code)
 
 
 def list_endpoints() -> List[ExternalEndpoint]:
-    return list(_ENDPOINT_REGISTRY.values())
+    return list(_REGISTRY.values())
 
 
 def list_endpoint_dicts() -> List[dict]:
-    """返回可直接 JSON 序列化的 endpoint 清单"""
+    """返回可直接 JSON 序列化的 endpoint 清单（格式与旧版完全一致，前端在用）"""
     return [
         {
             "endpoint_code": e.endpoint_code,
@@ -140,5 +73,21 @@ def list_endpoint_dicts() -> List[dict]:
             "path": f"/external{e.path}",
             "tags": e.tags,
         }
-        for e in _ENDPOINT_REGISTRY.values()
+        for e in _REGISTRY.values()
     ]
+
+
+def check_registry_matches_router(router) -> None:
+    """校验注册表 (method, path) 与真实路由一致，防止两处声明漂移。启动时调用。"""
+    reg = {(e.method, e.path) for e in list_endpoints()}
+    routes = set()
+    for r in router.routes:
+        if isinstance(r, APIRoute):
+            for m in r.methods:
+                routes.add((m, r.path))
+    if reg != routes:
+        only_reg = sorted(reg - routes)
+        only_route = sorted(routes - reg)
+        raise RuntimeError(
+            f"对外接口注册表与路由不一致，仅注册表: {only_reg}，仅路由: {only_route}"
+        )

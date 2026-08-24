@@ -73,7 +73,10 @@ api_router.include_router(basicdata.permissions_router, prefix="/permissions", t
 api_router.include_router(basicdata.data_supply_router, prefix="/basicdata/data-supply", tags=["数据供给"])
 
 # 对外接口（外部系统集成，需 API Key 签名认证）
-api_router.include_router(external.external_router, prefix="/external", tags=["对外接口"])
+# 真路由直挂主应用；include_in_schema=False 使内部 /docs 不再混入对外接口
+api_router.include_router(external.external_router, prefix="/external", tags=["对外接口"], include_in_schema=False)
+# 对外专属 OpenAPI 文档（公开，无需签名）
+api_router.include_router(external.docs_router, prefix="/external", include_in_schema=False)
 
 # Common files and assistant
 api_router.include_router(common.files_router, prefix="/files", tags=["文件"])

@@ -4,27 +4,30 @@
 区别于内部 /api/v1/basicdata/* 的 CRUD 逻辑，对外只暴露精简字段集与常用筛选条件。
 """
 
-from datetime import datetime
-from typing import Optional, List, Set
+from typing import Annotated, Optional, Set
 
+from fastapi import APIRouter, Depends, Path, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, or_, cast, String
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.core.database import get_db
+from app.models.basicdata.data_supply import DataSupplyApiKey
 from app.models.basicdata.organization import Organization
 from app.models.basicdata.position import Position
 from app.models.basicdata.employee import Employee
 from app.models.basicdata.employee_organization import EmployeeOrganization
+from app.schemas.common import ResponseModel
 
-from ..registry import register_external, ExternalCallContext
+from ..common import ExternalPage, IntCsv, PageParamsMixin
+from ..deps import external_auth
+from ..log_wrap import log_external_call
+from ..registry import register_external
 
-
-def _parse_dt(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError):
-        return None
+org_router = APIRouter(prefix="/organizations", tags=["组织人员"])
+pos_router = APIRouter(prefix="/positions", tags=["组织人员"])
+emp_router = APIRouter(prefix="/employees", tags=["组织人员"])
 
 
 def _mask_phone(v):
@@ -37,6 +40,24 @@ def _mask_phone(v):
 # 组织
 # ═══════════════════════════════════════════
 
+class OrganizationsListQuery(PageParamsMixin):
+    keyword: Optional[str] = Field(None, description="关键字（oa_org_id / org_name 模糊匹配）")
+    org_type: Optional[str] = Field(None, description="组织类型精确匹配")
+    status: IntCsv = Field(None, description="状态，多选逗号分隔（1-启用 0-禁用）")
+
+
+class OrganizationOut(BaseModel):
+    """组织（对外精简字段集）"""
+    oa_org_id: Optional[str] = Field(None, description="OA 组织ID")
+    org_name: Optional[str] = Field(None, description="组织名称")
+    org_type: Optional[str] = Field(None, description="组织类型")
+    parent_code: Optional[str] = Field(None, description="父组织 oa_org_id")
+    leader_name: Optional[str] = Field(None, description="负责人姓名")
+    status: Optional[int] = Field(None, description="状态（1-启用 0-禁用）")
+
+
+@org_router.get("/list", response_model=ResponseModel[ExternalPage[OrganizationOut]],
+                summary="组织列表", description="endpoint_code: organizations.list")
 @register_external(
     "organizations.list",
     "组织列表",
@@ -45,47 +66,35 @@ def _mask_phone(v):
     description="组织架构列表查询，支持关键字、组织类型、状态筛选",
     tags=["组织人员"],
 )
-async def organizations_list(ctx: ExternalCallContext) -> dict:
-    """组织列表（外部定制版）
-
-    参数（query）:
-        page, page_size: 分页
-        keyword: 关键字（oa_org_id / org_name 模糊匹配）
-        org_type: 组织类型精确匹配
-        status: 状态，多选逗号分隔 (1-启用 0-禁用)
-    """
-    params = ctx.params
-    db = ctx.db
-
-    page = max(int(params.get("page", 1) or 1), 1)
-    page_size = min(max(int(params.get("page_size", 20) or 20), 1), 200)
-    keyword = params.get("keyword")
-    org_type = params.get("org_type")
-    status = params.get("status")
+@log_external_call("organizations.list")
+async def organizations_list(
+    request: Request,
+    q: Annotated[OrganizationsListQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    key: DataSupplyApiKey = Depends(external_auth("organizations.list")),
+):
+    page = max(q.page or 1, 1)
+    page_size = min(max(q.page_size if q.page_size is not None else 20, 1), 200)
 
     query = select(Organization)
-    count_query = select(func.count()).select_from(query.subquery())
+    count_query = select(func.count()).select_from(Organization)
 
-    if keyword:
-        like_expr = f"%{keyword}%"
+    if q.keyword:
+        like_expr = f"%{q.keyword}%"
         kw_cond = or_(
             Organization.oa_org_id.ilike(like_expr),
             Organization.org_name.ilike(like_expr),
         )
         query = query.where(kw_cond)
-        count_query = select(func.count()).select_from(query.subquery())
+        count_query = count_query.where(kw_cond)
 
-    if org_type:
-        query = query.where(Organization.org_type == org_type)
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.org_type:
+        query = query.where(Organization.org_type == q.org_type)
+        count_query = count_query.where(Organization.org_type == q.org_type)
 
-    if status is not None and status != "":
-        statuses = [s.strip() for s in str(status).split(",") if s.strip() != ""]
-        if len(statuses) == 1:
-            query = query.where(Organization.status == int(statuses[0]))
-        elif statuses:
-            query = query.where(Organization.status.in_([int(s) for s in statuses]))
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.status:
+        query = query.where(Organization.status.in_(q.status))
+        count_query = count_query.where(Organization.status.in_(q.status))
 
     total = (await db.execute(count_query)).scalar() or 0
 
@@ -127,6 +136,21 @@ async def organizations_list(ctx: ExternalCallContext) -> dict:
 # 岗位
 # ═══════════════════════════════════════════
 
+class PositionsListQuery(PageParamsMixin):
+    keyword: Optional[str] = Field(None, description="关键字（position_code / position_name 模糊匹配）")
+    status: IntCsv = Field(None, description="状态，多选逗号分隔（1-启用 0-禁用）")
+
+
+class PositionOut(BaseModel):
+    """岗位（对外精简字段集）"""
+    id: int = Field(..., description="主键")
+    position_code: Optional[str] = Field(None, description="岗位编码")
+    position_name: Optional[str] = Field(None, description="岗位名称")
+    status: Optional[int] = Field(None, description="状态（1-启用 0-禁用）")
+
+
+@pos_router.get("/list", response_model=ResponseModel[ExternalPage[PositionOut]],
+                summary="岗位列表", description="endpoint_code: positions.list")
 @register_external(
     "positions.list",
     "岗位列表",
@@ -135,41 +159,31 @@ async def organizations_list(ctx: ExternalCallContext) -> dict:
     description="岗位列表查询，支持关键字、状态筛选",
     tags=["组织人员"],
 )
-async def positions_list(ctx: ExternalCallContext) -> dict:
-    """岗位列表（外部定制版）
-
-    参数（query）:
-        page, page_size: 分页
-        keyword: 关键字（position_code / position_name 模糊匹配）
-        status: 状态，多选逗号分隔 (1-启用 0-禁用)
-    """
-    params = ctx.params
-    db = ctx.db
-
-    page = max(int(params.get("page", 1) or 1), 1)
-    page_size = min(max(int(params.get("page_size", 20) or 20), 1), 200)
-    keyword = params.get("keyword")
-    status = params.get("status")
+@log_external_call("positions.list")
+async def positions_list(
+    request: Request,
+    q: Annotated[PositionsListQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    key: DataSupplyApiKey = Depends(external_auth("positions.list")),
+):
+    page = max(q.page or 1, 1)
+    page_size = min(max(q.page_size if q.page_size is not None else 20, 1), 200)
 
     query = select(Position)
-    count_query = select(func.count()).select_from(query.subquery())
+    count_query = select(func.count()).select_from(Position)
 
-    if keyword:
-        like_expr = f"%{keyword}%"
+    if q.keyword:
+        like_expr = f"%{q.keyword}%"
         kw_cond = or_(
             Position.position_code.ilike(like_expr),
             Position.position_name.ilike(like_expr),
         )
         query = query.where(kw_cond)
-        count_query = select(func.count()).select_from(query.subquery())
+        count_query = count_query.where(kw_cond)
 
-    if status is not None and status != "":
-        statuses = [s.strip() for s in str(status).split(",") if s.strip() != ""]
-        if len(statuses) == 1:
-            query = query.where(Position.status == int(statuses[0]))
-        elif statuses:
-            query = query.where(Position.status.in_([int(s) for s in statuses]))
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.status:
+        query = query.where(Position.status.in_(q.status))
+        count_query = count_query.where(Position.status.in_(q.status))
 
     total = (await db.execute(count_query)).scalar() or 0
 
@@ -195,6 +209,28 @@ async def positions_list(ctx: ExternalCallContext) -> dict:
 # 员工
 # ═══════════════════════════════════════════
 
+class EmployeesListQuery(PageParamsMixin):
+    keyword: Optional[str] = Field(None, description="关键字（oa_user_id / emp_name 模糊匹配）")
+    org_id: Optional[str] = Field(None, description="组织 oa_org_id 筛选")
+    position_code: Optional[str] = Field(None, description="岗位编码筛选")
+    status: IntCsv = Field(None, description="状态，多选逗号分隔（1-启用 0-禁用）")
+
+
+class EmployeeOut(BaseModel):
+    """员工（对外精简字段集）"""
+    id: int = Field(..., description="主键")
+    oa_user_id: Optional[str] = Field(None, description="OA 用户ID")
+    emp_name: Optional[str] = Field(None, description="姓名")
+    org_id: Optional[int] = Field(None, description="组织 oa_org_id")
+    org_name: Optional[str] = Field(None, description="组织名称")
+    position_name: Optional[str] = Field(None, description="岗位名称")
+    phone: Optional[str] = Field(None, description="手机号，脱敏显示")
+    email: Optional[str] = Field(None, description="邮箱")
+    status: Optional[int] = Field(None, description="状态（1-启用 0-禁用）")
+
+
+@emp_router.get("/list", response_model=ResponseModel[ExternalPage[EmployeeOut]],
+                summary="员工列表", description="endpoint_code: employees.list")
 @register_external(
     "employees.list",
     "员工列表",
@@ -203,55 +239,42 @@ async def positions_list(ctx: ExternalCallContext) -> dict:
     description="员工列表查询，支持关键字、组织、岗位、状态筛选（手机号脱敏）",
     tags=["组织人员"],
 )
-async def employees_list(ctx: ExternalCallContext) -> dict:
-    """员工列表（外部定制版）
-
-    参数（query）:
-        page, page_size: 分页
-        keyword: 关键字（oa_user_id / emp_name 模糊匹配）
-        org_id: 组织 oa_org_id 筛选
-        position_code: 岗位编码筛选
-        status: 状态，多选逗号分隔
-    """
-    params = ctx.params
-    db = ctx.db
-
-    page = max(int(params.get("page", 1) or 1), 1)
-    page_size = min(max(int(params.get("page_size", 20) or 20), 1), 200)
-    keyword = params.get("keyword")
-    org_id = params.get("org_id")
-    position_code = params.get("position_code")
-    status = params.get("status")
+@log_external_call("employees.list")
+async def employees_list(
+    request: Request,
+    q: Annotated[EmployeesListQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    key: DataSupplyApiKey = Depends(external_auth("employees.list")),
+):
+    page = max(q.page or 1, 1)
+    page_size = min(max(q.page_size if q.page_size is not None else 20, 1), 200)
 
     query = select(Employee)
-    count_query = select(func.count()).select_from(query.subquery())
+    count_query = select(func.count()).select_from(Employee)
 
-    if keyword:
-        like_expr = f"%{keyword}%"
+    if q.keyword:
+        like_expr = f"%{q.keyword}%"
         kw_cond = or_(
             Employee.oa_user_id.ilike(like_expr),
             Employee.emp_name.ilike(like_expr),
         )
         query = query.where(kw_cond)
-        count_query = select(func.count()).select_from(query.subquery())
+        count_query = count_query.where(kw_cond)
 
-    if org_id:
-        query = query.where(Employee.org_id == org_id)
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.org_id:
+        query = query.where(Employee.org_id == q.org_id)
+        count_query = count_query.where(Employee.org_id == q.org_id)
 
-    if position_code:
+    if q.position_code:
         PosFilter = aliased(Position)
         query = query.join(PosFilter, Employee.position_id == PosFilter.id)
-        query = query.where(PosFilter.position_code == position_code)
-        count_query = select(func.count()).select_from(query.subquery())
+        query = query.where(PosFilter.position_code == q.position_code)
+        count_query = count_query.join(PosFilter, Employee.position_id == PosFilter.id)
+        count_query = count_query.where(PosFilter.position_code == q.position_code)
 
-    if status is not None and status != "":
-        statuses = [s.strip() for s in str(status).split(",") if s.strip() != ""]
-        if len(statuses) == 1:
-            query = query.where(Employee.status == int(statuses[0]))
-        elif statuses:
-            query = query.where(Employee.status.in_([int(s) for s in statuses]))
-        count_query = select(func.count()).select_from(query.subquery())
+    if q.status:
+        query = query.where(Employee.status.in_(q.status))
+        count_query = count_query.where(Employee.status.in_(q.status))
 
     total = (await db.execute(count_query)).scalar() or 0
 
@@ -294,6 +317,12 @@ async def employees_list(ctx: ExternalCallContext) -> dict:
 # 组织下员工
 # ═══════════════════════════════════════════
 
+class OrgEmployeesQuery(PageParamsMixin):
+    keyword: Optional[str] = Field(None, description="关键字（oa_user_id / emp_name 模糊匹配）")
+    position_code: Optional[str] = Field(None, description="岗位编码筛选")
+    status: IntCsv = Field(None, description="状态，多选逗号分隔（1-启用 0-禁用）")
+
+
 async def _get_descendant_org_codes(db, root_oa_org_id: str) -> Set[str]:
     """递归获取某组织及其所有子组织的 org_code 集合"""
     result = set()
@@ -323,38 +352,24 @@ async def _get_descendant_org_codes(db, root_oa_org_id: str) -> Set[str]:
     return result
 
 
+@org_router.get("/{oa_org_id}/employees",
+                response_model=ResponseModel[ExternalPage[EmployeeOut]],
+                summary="组织员工", description="endpoint_code: organizations.employees")
 @register_external(
-    "organizations.employees",
-    "组织员工",
-    method="GET",
+    "organizations.employees", "组织员工", method="GET",
     path="/organizations/{oa_org_id}/employees",
-    description="查询指定组织（含子组织）下的员工列表",
-    tags=["组织人员"],
+    description="查询指定组织（含子组织）下的员工列表", tags=["组织人员"],
 )
-async def organization_employees(ctx: ExternalCallContext) -> dict:
-    """组织下员工列表（外部定制版）
-
-    路径参数:
-        oa_org_id: 组织 oa_org_id
-
-    查询参数:
-        page, page_size: 分页
-        keyword: 关键字（oa_user_id / emp_name 模糊匹配）
-        position_code: 岗位编码筛选
-        status: 状态，多选逗号分隔
-    """
-    params = ctx.params
-    db = ctx.db
-    oa_org_id = params.get("oa_org_id")
-
-    if not oa_org_id:
-        return {"items": [], "total": 0, "page": 1, "page_size": 20}
-
-    page = max(int(params.get("page", 1) or 1), 1)
-    page_size = min(max(int(params.get("page_size", 20) or 20), 1), 200)
-    keyword = params.get("keyword")
-    position_code = params.get("position_code")
-    status = params.get("status")
+@log_external_call("organizations.employees", path_params=("oa_org_id",))
+async def organization_employees(
+    request: Request,
+    oa_org_id: Annotated[str, Path(description="组织 oa_org_id")],
+    q: Annotated[OrgEmployeesQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    key: DataSupplyApiKey = Depends(external_auth("organizations.employees")),
+):
+    page = max(q.page or 1, 1)
+    page_size = min(max(q.page_size if q.page_size is not None else 20, 1), 200)
 
     org_codes = await _get_descendant_org_codes(db, oa_org_id)
 
@@ -396,8 +411,8 @@ async def organization_employees(ctx: ExternalCallContext) -> dict:
             )
         )
 
-    if keyword:
-        like_expr = f"%{keyword}%"
+    if q.keyword:
+        like_expr = f"%{q.keyword}%"
         kw_cond = or_(
             Employee.oa_user_id.ilike(like_expr),
             Employee.emp_name.ilike(like_expr),
@@ -405,21 +420,16 @@ async def organization_employees(ctx: ExternalCallContext) -> dict:
         query = query.where(kw_cond)
         count_query_base = count_query_base.where(kw_cond)
 
-    if position_code:
+    if q.position_code:
         PosFilter = aliased(Position)
         query = query.join(PosFilter, Employee.position_id == PosFilter.id)
-        query = query.where(PosFilter.position_code == position_code)
+        query = query.where(PosFilter.position_code == q.position_code)
         count_query_base = count_query_base.join(PosFilter, Employee.position_id == PosFilter.id)
-        count_query_base = count_query_base.where(PosFilter.position_code == position_code)
+        count_query_base = count_query_base.where(PosFilter.position_code == q.position_code)
 
-    if status is not None and status != "":
-        statuses = [s.strip() for s in str(status).split(",") if s.strip() != ""]
-        if len(statuses) == 1:
-            query = query.where(Employee.status == int(statuses[0]))
-            count_query_base = count_query_base.where(Employee.status == int(statuses[0]))
-        elif statuses:
-            query = query.where(Employee.status.in_([int(s) for s in statuses]))
-            count_query_base = count_query_base.where(Employee.status.in_([int(s) for s in statuses]))
+    if q.status:
+        query = query.where(Employee.status.in_(q.status))
+        count_query_base = count_query_base.where(Employee.status.in_(q.status))
 
     count_query = select(func.count()).select_from(count_query_base.subquery())
     total = (await db.execute(count_query)).scalar() or 0

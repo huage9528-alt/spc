@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>中台登录布局稿 · 企业微信扫码登录</title>
+<style>
+  :root { --indigo:#6366f1; --indigo2:#818cf8; --violet:#8b5cf6; --ink:#0f172a; --muted:#94a3b8; }
+  * { box-sizing: border-box; }
+  html,body { margin:0; height:100%; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; color:var(--ink); }
+  body { overflow:auto; }
+
+  /* 模拟控制条（仅预览用，真实页面不存在） */
+  .mock-bar { position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:50;
+    display:flex; gap:6px; padding:6px; border-radius:999px;
+    background:rgba(15,23,42,.85); color:#fff; font-size:12px; box-shadow:0 8px 24px rgba(0,0,0,.2); }
+  .mock-bar button { border:0; background:transparent; color:#cbd5e1; padding:6px 12px; border-radius:999px; cursor:pointer; font:inherit; }
+  .mock-bar button.active { background:var(--indigo); color:#fff; }
+  .mock-note { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); z-index:50;
+    background:rgba(15,23,42,.82); color:#e2e8f0; font-size:11px; padding:6px 12px; border-radius:8px; }
+
+  /* 背景 */
+  .login-bg { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:64px 20px 40px;
+    background:linear-gradient(135deg,#e0e7ff 0%,#f0f4f8 40%,#e0f2fe 100%); position:relative; overflow:hidden; }
+  .login-bg::before { content:''; position:absolute; width:500px; height:500px; border-radius:50%;
+    background:radial-gradient(circle,rgba(99,102,241,.12),transparent 70%); top:-15%; right:-8%; }
+  .login-bg::after { content:''; position:absolute; width:400px; height:400px; border-radius:50%;
+    background:radial-gradient(circle,rgba(14,165,233,.10),transparent 70%); bottom:-10%; left:-5%; }
+
+  /* 卡片：PC 双栏 */
+  .login-card { position:relative; z-index:1; width:760px;
+    display:grid; grid-template-columns:1fr 1px 1fr; gap:0;
+    padding:40px 44px; border-radius:22px;
+    background:rgba(255,255,255,.72); backdrop-filter:blur(20px) saturate(1.6);
+    -webkit-backdrop-filter:blur(20px) saturate(1.6);
+    border:1px solid rgba(255,255,255,.5);
+    box-shadow:0 8px 40px rgba(0,0,0,.07),0 1px 3px rgba(0,0,0,.04); }
+  .login-col { min-width:0; }
+  .login-col.left  { padding-right:30px; }
+  .login-col.right { padding-left:30px; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  .divider { width:1px; align-self:stretch; background:linear-gradient(180deg,transparent,rgba(148,163,184,.35),transparent); }
+
+  /* 顶部 logo / 标题（跨左栏） */
+  .brand { display:flex; align-items:center; gap:12px; margin-bottom:18px; }
+  .logo { width:44px; height:44px; border-radius:13px; display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(135deg,var(--indigo),var(--indigo2)); color:#fff; font-size:20px; box-shadow:0 4px 16px rgba(99,102,241,.25); }
+  .brand h1 { margin:0; font-size:18px; font-weight:800; letter-spacing:.2px; }
+  .brand p  { margin:2px 0 0; font-size:11px; color:var(--muted); }
+
+  /* 身份切换胶囊 */
+  .role-switch { position:relative; display:grid; grid-template-columns:repeat(2,1fr); gap:4px;
+    min-height:60px; padding:5px; border:1px solid rgba(148,163,184,.22); border-radius:15px; margin-bottom:16px;
+    background:linear-gradient(180deg,rgba(248,250,252,.78),rgba(241,245,249,.64));
+    box-shadow:inset 0 1px 1px rgba(15,23,42,.04),0 10px 24px rgba(99,102,241,.05); }
+  .role-ind { position:absolute; top:5px; left:5px; width:calc((100% - 14px)/2); height:calc(100% - 10px);
+    border-radius:11px; background:linear-gradient(135deg,var(--indigo) 0%,var(--violet) 100%);
+    box-shadow:0 10px 22px rgba(99,102,241,.24); transition:transform .28s cubic-bezier(.2,.8,.2,1); }
+  .role-switch.supplier .role-ind { transform:translateX(calc(100% + 4px)); }
+  .role-opt { position:relative; z-index:1; display:flex; align-items:center; justify-content:center; gap:8px;
+    min-height:50px; border:0; background:transparent; color:#64748b; cursor:pointer; font:inherit; }
+  .role-opt .ic { width:26px; height:26px; border-radius:9px; background:rgba(15,23,42,.05); display:flex; align-items:center; justify-content:center; font-size:15px; }
+  .role-opt.active { color:#fff; }
+  .role-opt.active .ic { background:rgba(255,255,255,.22); }
+  .role-opt b { font-size:14px; } .role-opt span { font-size:10px; opacity:.8; display:block; }
+
+  /* 表单 */
+  .field { display:flex; align-items:center; gap:10px; height:44px; padding:0 14px; border-radius:11px;
+    background:rgba(255,255,255,.6); border:1px solid rgba(0,0,0,.08); margin-bottom:12px; color:#94a3b8; }
+  .field .fi { font-size:16px; }
+  .field input { border:0; outline:0; background:transparent; width:100%; height:100%; font-size:14px; color:var(--ink); }
+  .btn { height:44px; width:100%; border:0; border-radius:11px; font-size:15px; font-weight:700; color:#fff; cursor:pointer;
+    background:linear-gradient(135deg,var(--indigo),var(--indigo2)); box-shadow:0 8px 20px rgba(99,102,241,.3); margin-top:4px; }
+
+  /* 右栏：二维码 */
+  .qr-title { font-size:15px; font-weight:700; margin:0 0 4px; }
+  .qr-sub { font-size:12px; color:var(--muted); margin:0 0 18px; text-align:center; }
+  .qr-box { width:210px; height:210px; background:#fff; border-radius:14px; border:1px solid rgba(15,23,42,.06);
+    box-shadow:0 4px 18px rgba(15,23,42,.06); display:flex; align-items:center; justify-content:center; position:relative; }
+  .qr-box svg { width:180px; height:180px; display:block; }
+  .qr-logo { position:absolute; width:34px; height:34px; border-radius:9px; background:#fff; border:2px solid #fff;
+    box-shadow:0 0 0 1px rgba(15,23,42,.08); display:flex; align-items:center; justify-content:center; font-size:18px; }
+  .qr-hint { margin-top:14px; font-size:12px; color:#475569; display:flex; align-items:center; gap:6px; }
+  .qr-refresh { margin-top:14px; font-size:12px; color:var(--indigo); cursor:pointer; background:none; border:0; }
+  .qr-tag { margin-top:6px; font-size:11px; color:var(--muted); }
+
+  /* 窄屏：堆叠 */
+  body.stack .login-card { width:400px; grid-template-columns:1fr; gap:0; padding:36px 30px; }
+  body.stack .divider { width:auto; height:1px; margin:24px 0; background:linear-gradient(90deg,transparent,rgba(148,163,184,.35),transparent); }
+  body.stack .login-col.left { padding-right:0; }
+  body.stack .login-col.right { padding-left:0; }
+
+  /* 企微客户端态：隐藏右栏与分割线 */
+  body.inapp .login-card { width:400px; grid-template-columns:1fr; padding:44px 38px; }
+  body.inapp .divider, body.inapp .login-col.right { display:none; }
+  body.inapp .login-col.left { padding-right:0; }
+  .inapp-banner { display:none; }
+  body.inapp .inapp-banner { display:flex; margin-top:14px; align-items:center; justify-content:center; gap:8px;
+    font-size:12px; color:var(--muted); }
+
+  @media (max-width:520px) {
+    .login-card { width:calc(100vw - 32px)!important; grid-template-columns:1fr!important; padding:30px 22px!important; }
+    .divider { width:auto!important; height:1px; margin:24px 0; }
+    .login-col.left, .login-col.right { padding:0!important; }
+  }
+</style>
+</head>
+<body class="pc">
+
+<div class="mock-bar">
+  <button class="active" data-mode="pc">PC 浏览器 · 双栏扫码</button>
+  <button data-mode="stack">窄屏 · 堆叠</button>
+  <button data-mode="inapp">企微客户端 · 静默</button>
+</div>
+
+<div class="login-bg">
+  <div class="login-card">
+
+    <!-- 左：账号密码 -->
+    <div class="login-col left">
+      <div class="brand">
+        <div class="logo">🔒</div>
+        <div>
+          <h1>供应链与生产协同中台</h1>
+          <p>Supply Chain &amp; Production Collaboration</p>
+        </div>
+      </div>
+
+      <div class="role-switch" id="roleSwitch">
+        <div class="role-ind"></div>
+        <div class="role-opt active"><span class="ic">👥</span><div><b>内部员工</b><span>企业账号</span></div></div>
+        <div class="role-opt"><span class="ic">🏪</span><div><b>供应商</b><span>协作账号</span></div></div>
+      </div>
+
+      <div class="field"><span class="fi">👤</span><input placeholder="用户名" value="admin" /></div>
+      <div class="field"><span class="fi">🔒</span><input type="password" placeholder="密码" value="••••••" /></div>
+      <button class="btn">登 录</button>
+
+      <div class="inapp-banner">↻ 已在企业微信内，自动静默登录中…</div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- 右：扫码 -->
+    <div class="login-col right">
+      <p class="qr-title">扫码登录</p>
+      <p class="qr-sub">使用企业微信 App 扫码</p>
+      <div class="qr-box">
+        <!-- 伪二维码图案 -->
+        <svg viewBox="0 0 29 29" shape-rendering="crispEdges">
+          <rect width="29" height="29" fill="#fff"/>
+          <g fill="#0f172a">
+            <!-- 三个定位角 -->
+            <rect x="0" y="0" width="7" height="7"/><rect x="1" y="1" width="5" height="5" fill="#fff"/><rect x="2" y="2" width="3" height="3"/>
+            <rect x="22" y="0" width="7" height="7"/><rect x="23" y="1" width="5" height="5" fill="#fff"/><rect x="24" y="2" width="3" height="3"/>
+            <rect x="0" y="22" width="7" height="7"/><rect x="1" y="23" width="5" height="5" fill="#fff"/><rect x="2" y="24" width="3" height="3"/>
+            <!-- 随机模块 -->
+            <rect x="9" y="2" width="1" height="1"/><rect x="11" y="2" width="2" height="1"/><rect x="14" y="2" width="1" height="2"/><rect x="17" y="2" width="1" height="1"/><rect x="19" y="2" width="2" height="1"/>
+            <rect x="8" y="4" width="2" height="1"/><rect x="11" y="4" width="1" height="2"/><rect x="13" y="4" width="1" height="1"/><rect x="15" y="4" width="2" height="1"/><rect x="18" y="4" width="3" height="1"/>
+            <rect x="9" y="6" width="1" height="2"/><rect x="12" y="6" width="2" height="1"/><rect x="15" y="6" width="1" height="2"/><rect x="18" y="6" width="1" height="1"/><rect x="20" y="6" width="1" height="2"/>
+            <rect x="2" y="9" width="1" height="2"/><rect x="4" y="9" width="2" height="1"/><rect x="7" y="9" width="1" height="1"/><rect x="9" y="9" width="2" height="2"/><rect x="12" y="9" width="1" height="3"/><rect x="14" y="9" width="2" height="1"/><rect x="17" y="9" width="1" height="2"/><rect x="19" y="9" width="2" height="1"/><rect x="22" y="9" width="1" height="2"/><rect x="25" y="9" width="2" height="1"/>
+            <rect x="0" y="11" width="2" height="1"/><rect x="3" y="11" width="1" height="2"/><rect x="6" y="11" width="2" height="1"/><rect x="11" y="11" width="1" height="1"/><rect x="14" y="11" width="1" height="2"/><rect x="16" y="11" width="2" height="1"/><rect x="20" y="11" width="1" height="2"/><rect x="24" y="11" width="1" height="1"/><rect x="26" y="11" width="1" height="2"/>
+            <rect x="2" y="13" width="1" height="2"/><rect x="5" y="13" width="2" height="1"/><rect x="8" y="13" width="1" height="2"/><rect x="10" y="13" width="2" height="1"/><rect x="13" y="13" width="1" height="2"/><rect x="16" y="13" width="2" height="1"/><rect x="19" y="13" width="1" height="1"/><rect x="21" y="13" width="2" height="1"/><rect x="24" y="13" width="1" height="2"/><rect x="27" y="13" width="1" height="1"/>
+            <rect x="0" y="15" width="1" height="2"/><rect x="3" y="15" width="2" height="1"/><rect x="6" y="15" width="1" height="2"/><rect x="9" y="15" width="2" height="1"/><rect x="12" y="15" width="1" height="1"/><rect x="14" y="15" width="2" height="1"/><rect x="17" y="15" width="1" height="2"/><rect x="20" y="15" width="2" height="1"/><rect x="22" y="15" width="1" height="2"/><rect x="25" y="15" width="2" height="1"/>
+            <rect x="2" y="17" width="2" height="1"/><rect x="5" y="17" width="1" height="2"/><rect x="8" y="17" width="2" height="1"/><rect x="11" y="17" width="1" height="2"/><rect x="13" y="17" width="2" height="1"/><rect x="16" y="17" width="1" height="2"/><rect x="19" y="17" width="2" height="1"/><rect x="22" y="17" width="1" height="1"/><rect x="24" y="17" width="2" height="1"/><rect x="27" y="17" width="1" height="2"/>
+            <rect x="0" y="19" width="1" height="1"/><rect x="3" y="19" width="2" height="1"/><rect x="6" y="19" width="1" height="2"/><rect x="9" y="19" width="1" height="1"/><rect x="11" y="19" width="2" height="1"/><rect x="14" y="19" width="1" height="2"/><rect x="17" y="19" width="2" height="1"/><rect x="20" y="19" width="1" height="2"/><rect x="23" y="19" width="2" height="1"/><rect x="26" y="19" width="1" height="1"/>
+            <rect x="9" y="22" width="2" height="1"/><rect x="12" y="22" width="1" height="2"/><rect x="14" y="22" width="2" height="1"/><rect x="17" y="22" width="1" height="1"/><rect x="19" y="22" width="2" height="1"/><rect x="22" y="22" width="1" height="2"/><rect x="25" y="22" width="1" height="1"/><rect x="27" y="22" width="1" height="2"/>
+            <rect x="8" y="24" width="1" height="2"/><rect x="10" y="24" width="2" height="1"/><rect x="13" y="24" width="1" height="2"/><rect x="16" y="24" width="2" height="1"/><rect x="18" y="24" width="1" height="2"/><rect x="21" y="24" width="2" height="1"/><rect x="24" y="24" width="1" height="2"/><rect x="26" y="24" width="1" height="1"/>
+            <rect x="9" y="26" width="2" height="1"/><rect x="12" y="26" width="1" height="1"/><rect x="14" y="26" width="2" height="1"/><rect x="17" y="26" width="1" height="2"/><rect x="20" y="26" width="1" height="1"/><rect x="22" y="26" width="2" height="1"/><rect x="25" y="26" width="2" height="1"/>
+          </g>
+        </svg>
+        <div class="qr-logo">💬</div>
+      </div>
+      <div class="qr-hint">📱 打开 <b>企业微信</b> → 扫一扫</div>
+      <button class="qr-refresh">二维码刷新</button>
+      <div class="qr-tag">仅支持已绑定的内部员工</div>
+    </div>
+
+  </div>
+</div>
+
+<div class="mock-note">布局预览稿（非真实页面） · 右栏二维码为占位</div>
+
+<script>
+  // 模式切换
+  const body = document.body;
+  document.querySelector('.mock-bar').addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    document.querySelectorAll('.mock-bar button').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    body.classList.remove('pc','stack','inapp');
+    body.classList.add(b.dataset.mode);
+  });
+  // 身份切换（仅演示胶囊动画）
+  const rs = document.getElementById('roleSwitch');
+  rs.addEventListener('click', e=>{
+    const opt = e.target.closest('.role-opt'); if(!opt) return;
+    [...rs.querySelectorAll('.role-opt')].forEach(x=>x.classList.remove('active'));
+    opt.classList.add('active');
+    rs.classList.toggle('supplier', opt === rs.children[2]);
+  });
+</script>
+</body>
+</html>
