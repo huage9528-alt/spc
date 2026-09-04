@@ -232,10 +232,44 @@ export default function PriceChangeDetail() {
   }
 
   const items = r?.items || []
-  const logs = r?.approval_logs || []
+  // 审批日志按操作先后排序，并按 submit 切分轮次（每出现一次提交即新一轮）
+  const allLogs: any[] = (r?.approval_logs || []).slice().sort((a: any, b: any) => (a.id ?? 0) - (b.id ?? 0))
+  let _roundCounter = 0
+  const logs: any[] = allLogs.map((l: any) => {
+    if (l.action === 'submit') _roundCounter += 1
+    return { ...l, round: _roundCounter }
+  })
+  const approvalRound = Math.max(_roundCounter, 1)
+  const curLogs = logs.filter((l: any) => l.round === approvalRound)
   const s = r?.approval_status
   const snap = r?.approval_snapshot || []
   const currentLevel = r?.approval_level || 1
+
+  // 按轮次分组审批记录 + 每轮结论（历史轮根据驳回/撤回日志判定，最新一轮看单据当前状态）
+  const roundNumbers: number[] = [...new Set(logs.map((l: any) => l.round).filter((rn: number) => rn > 0))].sort((a: number, b: number) => a - b)
+  const roundOutcome = (rn: number): [string, string] => {
+    const lastRound = roundNumbers[roundNumbers.length - 1]
+    const rlogs = logs.filter((l: any) => l.round === rn)
+    if (rn === lastRound && s) {
+      const map: Record<string, [string, string]> = {
+        draft: ['草稿', 'default'], pending: ['审批中', 'processing'],
+        approved: ['已归档', 'success'], rejected: ['已驳回', 'error'], recalled: ['已撤回', 'warning'],
+      }
+      return map[s] || ['--', 'default']
+    }
+    if (rlogs.some((l: any) => l.action === 'reject')) return ['已驳回', 'error']
+    if (rlogs.some((l: any) => l.action === 'recall')) return ['已撤回', 'warning']
+    return ['已结束', 'default']
+  }
+  const roundLogAction = (log: any) => {
+    if (log.action === 'submit') return '提交审批'
+    if (log.action === 'approve') return '已通过'
+    if (log.action === 'auto_skip') return '自动通过(同人)'
+    if (log.action === 'revoked') return '已撤回审批'
+    if (log.action === 'recall') return '已撤回'
+    if (log.action === 'reject') return '已驳回'
+    return '--'
+  }
   // 用 seq 匹配当前级别，避免数组索引与 seq 不一致（条件过滤/跳过导致）
   const currentStep = snap.find((n: any) => n.seq === currentLevel) || snap[currentLevel - 1]
 
@@ -371,6 +405,7 @@ export default function PriceChangeDetail() {
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 6 }}>
               <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#334155' }}>{r.change_no || '-'}</span>
               <Tag color={(STATUS_TAG[s] || {}).color}>{(STATUS_TAG[s] || {}).label}</Tag>
+              {logs.length > 0 && <Tag color="blue">第 {approvalRound} 轮</Tag>}
               <Tag color="blue">{currentStep?.label || `第${currentLevel}级审批`}</Tag>
               <span style={{ fontSize: 12, color: '#64748b' }}>申请人 {r.applicant_display || r.applicant || '-'}</span>
             </div>
@@ -381,6 +416,12 @@ export default function PriceChangeDetail() {
               <>
                 <Button onClick={() => navigate(`/purchase/price-change/new?edit=${id}`)}>编辑</Button>
                 <Button type="primary" onClick={() => act('submit')} loading={submitting}>提交审批</Button>
+              </>
+            )}
+            {(s === 'rejected' || s === 'recalled') && (
+              <>
+                <Button onClick={() => navigate(`/purchase/price-change/new?edit=${id}`)}>编辑并重新提交</Button>
+                <Button type="primary" icon={<RollbackOutlined />} onClick={() => act('submit')} loading={submitting}>直接重新提交</Button>
               </>
             )}
             {s === 'pending' && <Button icon={<RollbackOutlined />} onClick={() => act('recall')} loading={submitting}>撤回</Button>}
@@ -397,11 +438,11 @@ export default function PriceChangeDetail() {
               )
             })()}
             {s === 'pending' && (() => {
-              // 判断当前用户能否反审核：最后一条 approve/auto_skip log 是当前用户审的（admin 也可）
+              // 判断当前用户能否反审核：当前轮次内最后一条 approve/auto_skip log 是当前用户审的（admin 也可）
               const currentUser = useAuthStore.getState().currentUser
               const isAdmin = !!(currentUser && 'role_code' in currentUser && currentUser.role_code === 'admin')
               const myName = (currentUser && 'username' in currentUser) ? currentUser.username : ''
-              const approveLogs = logs.filter((l: any) => l.action === 'approve' || l.action === 'auto_skip')
+              const approveLogs = curLogs.filter((l: any) => l.action === 'approve' || l.action === 'auto_skip')
               const lastApproveLog = approveLogs[approveLogs.length - 1]
               const canRevoke = lastApproveLog && (isAdmin || lastApproveLog.approver === myName)
               if (!canRevoke) return null
@@ -572,8 +613,8 @@ export default function PriceChangeDetail() {
                 status={s === 'rejected' ? 'error' : 'process'}
                 size="small"
                 items={snap.map((st: any, i: number) => {
-                  const rej = logs.find((l: any) => l.approval_level === i + 1 && l.action === 'reject')
-                  const app = logs.find((l: any) => l.approval_level === i + 1 && l.action === 'approve')
+                  const rej = curLogs.find((l: any) => l.approval_level === i + 1 && l.action === 'reject')
+                  const app = curLogs.find((l: any) => l.approval_level === i + 1 && l.action === 'approve')
                   const approvers = Array.isArray(st.approvers) ? st.approvers : null
                   const desc = approvers
                     ? (approvers.length > 0
@@ -622,23 +663,36 @@ export default function PriceChangeDetail() {
           <div style={sectionStyle}>
             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: '#0f172a' }}>审批记录</div>
             {logs.length === 0 ? <div style={{ color: '#94a3b8', fontSize: 13 }}>暂无审批记录</div> : (
-              <Timeline
-                items={logs.map((log: any, i: number) => ({
-                  color: log.action === 'reject' ? 'red' : log.action === 'approve' ? 'green' : 'blue',
-                  children: (
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <span style={{ fontSize: 14, fontWeight: 600 }}>{log.approver}</span>
-                        <Tag color={log.action === 'reject' ? 'red' : log.action === 'approve' ? 'green' : log.action === 'auto_skip' ? 'purple' : log.action === 'revoked' ? 'orange' : 'blue'}>
-                          {log.action === 'submit' ? '提交审批' : log.action === 'approve' ? '已通过' : log.action === 'auto_skip' ? '自动通过(同人)' : log.action === 'revoked' ? '已撤回' : log.action === 'recall' ? '已撤回' : '已驳回'}
-                        </Tag>
-                        <span style={{ fontSize: 12, color: '#94a3b8' }}>{log.operated_at ? dayjs(log.operated_at).format('YYYY-MM-DD HH:mm') : ''}</span>
-                      </div>
-                      {log.comment && <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>{log.comment}</div>}
+              roundNumbers.map(rn => {
+                const rlogs = logs.filter((l: any) => l.round === rn)
+                const [roundText, roundColor] = roundOutcome(rn)
+                return (
+                  <div key={rn} style={{ marginBottom: 18 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>第 {rn} 轮提交</span>
+                      <Tag color={roundColor}>{roundText}</Tag>
+                      {rn < roundNumbers[roundNumbers.length - 1] && <span style={{ fontSize: 12, color: '#94a3b8' }}>已存档历史记录</span>}
                     </div>
-                  ),
-                }))}
-              />
+                    <Timeline
+                      items={rlogs.map((log: any) => ({
+                        color: log.action === 'reject' ? 'red' : (log.action === 'approve' || log.action === 'auto_skip') ? 'green' : 'blue',
+                        children: (
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: 14, fontWeight: 600 }}>{log.approver}</span>
+                              <Tag color={log.action === 'reject' ? 'red' : (log.action === 'approve' || log.action === 'auto_skip') ? 'green' : log.action === 'revoked' ? 'orange' : 'blue'}>
+                                {roundLogAction(log)}
+                              </Tag>
+                              <span style={{ fontSize: 12, color: '#94a3b8' }}>{log.operated_at ? dayjs(log.operated_at).format('YYYY-MM-DD HH:mm') : ''}</span>
+                            </div>
+                            {log.comment && <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>{log.comment}</div>}
+                          </div>
+                        ),
+                      }))}
+                    />
+                  </div>
+                )
+              })
             )}
           </div>
         </Tabs.TabPane>
