@@ -21,6 +21,9 @@ export default function PriceChangeNew() {
   const watchedTaxRate = Form.useWatch('tax_rate', form)
 
   const [items, setItems] = useState<any[]>([])
+  // 行数据的最新引用（异步回调里校验"用户是否已改/清空该行"用，避免过期闭包误回填）
+  const itemsRef = useRef<any[]>([])
+  itemsRef.current = items
   const [saving, setSaving] = useState(false)
   const [loadingData, setLoadingData] = useState(false)
 
@@ -188,6 +191,13 @@ export default function PriceChangeNew() {
           label: `${m.material_code}  ${m.material_name}${m.purchase_price ? '  ¥' + m.purchase_price : ''}`,
           data: m,
         }))
+        // 兜底：输入/粘贴内容与 ERP 物料代码完全一致时，自动带出名称/规格/单位/报价（无需手动点选）
+        const curRow = itemsRef.current.find((i: any) => i.key === key)
+        const exact = list.find((o: any) => o.value === val)
+        if (exact?.data && curRow && String(curRow.material_code || '') === String(val)) {
+          selectMat(key, exact.value, { data: exact.data })
+          return
+        }
         setMatOptsMap((prev) => ({ ...prev, [key]: list }))
       } catch {
         setMatOptsMap((prev) => ({ ...prev, [key]: [] }))
