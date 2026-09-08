@@ -1,12 +1,17 @@
 import io
 from datetime import date
-from sqlalchemy import select
+from typing import Optional
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
 from app.models.order.sale_order import SaleOrder
 from app.models.exception.risk_issue import RiskIssue
+from app.models.basicdata import Material
+
+PROPERTY_LABEL = {1: "外购", 2: "自制", 3: "委外加工", 5: "虚拟件", 6: "特征类", 7: "配置类", 8: "规划类", 9: "组装件"}
+SOURCE_LABEL = {"erp": "ERP", "manual": "手工", "excel": "Excel"}
 
 
 class ExportService:
@@ -89,6 +94,66 @@ class ExportService:
             ws.cell(row=i, column=12, value=issue.status)
             ws.cell(row=i, column=13, value=str(issue.closed_at) if issue.closed_at else "")
             ws.cell(row=i, column=14, value=str(issue.created_at))
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return output
+
+    async def export_materials(
+        self,
+        keyword: Optional[str] = None,
+        material_type: Optional[str] = None,
+        status: Optional[str] = None,
+        material_property: Optional[str] = None,
+        data_source: Optional[str] = None,
+    ) -> io.BytesIO:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "物料主数据"
+        headers = ["物料编码", "物料名称", "规格型号", "物料分类", "物料属性", "计量单位",
+                    "品牌/厂商", "可采购", "可生产", "数据来源", "订货单价", "最近出库",
+                    "状态", "ERP物料ID", "更新时间"]
+        self._write_header(ws, headers)
+
+        query = select(Material).filter(Material.is_deleted == 0)
+        if keyword:
+            like = f"%{keyword}%"
+            query = query.where(or_(Material.material_code.ilike(like), Material.material_name.ilike(like), Material.spec_model.ilike(like)))
+        if material_type:
+            types = [t.strip() for t in material_type.split(",") if t.strip()]
+            if types:
+                query = query.where(Material.material_type.in_(types))
+        if status:
+            statuses = [int(s.strip()) for s in status.split(",") if s.strip().isdigit()]
+            if statuses:
+                query = query.where(Material.status.in_(statuses))
+        if material_property:
+            props = [int(p.strip()) for p in material_property.split(",") if p.strip().isdigit()]
+            if props:
+                query = query.where(Material.material_property.in_(props))
+        if data_source:
+            sources = [s.strip() for s in data_source.split(",") if s.strip()]
+            if sources:
+                query = query.where(Material.data_source.in_(sources))
+        query = query.order_by(Material.id)
+
+        result = await self.db.execute(query)
+        for i, m in enumerate(result.scalars().all(), start=2):
+            row = [
+                m.material_code, m.material_name, m.spec_model or "", m.material_type,
+                PROPERTY_LABEL.get(m.material_property, "") if m.material_property is not None else "",
+                m.unit_of_measure, m.brand or "",
+                "是" if m.is_purchase else "否", "是" if m.is_produce else "否",
+                SOURCE_LABEL.get(m.data_source or "", m.data_source or ""),
+                float(m.order_unit_price) if m.order_unit_price is not None else None,
+                str(m.last_outbound_date) if m.last_outbound_date else "",
+                "启用" if m.status == 1 else "停用",
+                m.erp_material_id,
+                str(m.update_time or "")[:19],
+            ]
+            for col, value in enumerate(row, start=1):
+                ws.cell(row=i, column=col, value=value)
 
         output = io.BytesIO()
         wb.save(output)

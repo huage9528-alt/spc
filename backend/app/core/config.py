@@ -18,11 +18,14 @@ class Settings(BaseSettings):
     VERSION: str = "1.0.0"
     API_PREFIX: str = "/api/v1"
 
-    # Database
-    DATABASE_URL: str = "postgresql+asyncpg://root:123456@192.168.0.127:5432/spc_db"
-    DATABASE_URL_SYNC: str = "postgresql+psycopg2://root:123456@192.168.0.127:5432/spc_db"
+    # Database（默认值仅为占位符；真实连接串必须由 .env / 环境变量注入）
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/spc_db"
+    DATABASE_URL_SYNC: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/spc_db"
     # 远程 DB 空闲连接会被防火墙/NAT 静默掐断(无 RST),必须 recycle+pre_ping 双保险
     DB_POOL_RECYCLE: int = 180
+
+    # 后端服务实例标识（同步日志溯源）；空则回退 hostname
+    SERVER_ID: str = ""
 
     # ERP 中间库连接（只读）
     ERP_DB_URL: str = ""  # e.g. "mssql+pyodbc://user:pass@host/erp_db?driver=ODBC+Driver+17+for+SQL+Server"
@@ -31,6 +34,13 @@ class Settings(BaseSettings):
     ERP_SYNC_QUERY_TIMEOUT: int = 600  # 单次 ERP 查询超时(秒)，防止无限挂起
     ERP_SYNC_ENABLED: bool = False  # 是否启用 ERP 同步
     ERP_SYNC_DEFAULT_PASSWORD: str = "admin123"  # 自动创建用户的默认密码
+    # K3 账套(链接服务器四段名前缀)。同步/读取(盘点单导入预览、物料单位等)用 K3_DB,
+    # 默认生产账套; 回写用 K3_WRITE_DB, 留空(或空串)回落 K3_DB。
+    # 测试验证期可保持同步读生产、只把回写指到测试账套:
+    #   K3_DB=k3sv.AIS20161019115614
+    #   K3_WRITE_DB=k3sv.AIS20240905142145
+    K3_DB: str = "k3sv.AIS20161019115614"
+    K3_WRITE_DB: Optional[str] = None
     UPPH_MATCH_MODE: str="bom_code"
 
     erp_db_url_write: Optional[str] = None
@@ -46,6 +56,12 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "your-secret-key-change-in-production"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours
+
+    # Deploy Agent（同机服务，默认 127.0.0.1:8901）
+    DEPLOY_AGENT_URL: str = "http://127.0.0.1:8901"
+    DEPLOY_AGENT_TIMEOUT_CONNECT: float = 5.0
+    # action 调用长时间（如 build 30 分钟），不限制 read 超时
+    DEPLOY_AGENT_TIMEOUT_ACTION: float = 600.0
 
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
@@ -113,3 +129,9 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def get_server_identity() -> str:
+    """后端服务实例标识：SERVER_ID 优先，未配置回退 hostname（Docker 内为容器ID）"""
+    import socket
+    return get_settings().SERVER_ID or socket.gethostname()

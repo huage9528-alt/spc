@@ -1,12 +1,14 @@
 """基础数据与集成中心 — 企业微信通讯录与分享推送 API。
 
 两个 router 分离以避免前缀冲突：
-- wecom_public_router (前缀 /wecom): /users, /test-connection
+- wecom_public_router (前缀 /wecom): /users, /test-connection, /jsapi-config
 - wecom_share_router (无前缀): /share/{share_id}/send-wecom
   留空以便在父 include_router 处复用既有 /share 前缀
 """
 
+import time
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -17,7 +19,11 @@ from app.core.dependencies import get_current_user
 from app.core.security import PermissionChecker
 from app.models.basicdata.share_link import ShareLink
 from app.schemas.common import ResponseModel
-from app.services.basicdata.wecom.client import get_wecom_client
+from app.services.basicdata.wecom.client import (
+    JSAPI_LIST_SCAN,
+    WecomClient,
+    get_wecom_client,
+)
 from app.services.basicdata.wecom.contact_service import (
     list_wecom_departments,
     list_wecom_users,
@@ -82,6 +88,61 @@ async def test_connection(
     except WecomError as e:
         raise _err(e) from e
     return ResponseModel(data={"user_count": len(users)})
+
+
+@wecom_public_router.get("/jsapi-config", response_model=ResponseModel)
+async def get_jsapi_config(
+    url: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """生成 wx.config 所需的签名（仅在企业微信客户端内 H5 调用）。"""
+    settings = get_wecom_client()._settings
+    corp_id = settings.wecom_corp_id
+    if not corp_id:
+        raise HTTPException(status_code=501, detail="企业微信未配置，无法调用 JSAPI")
+
+    normalized_url = _normalize_jsapi_url(url)
+    if not normalized_url:
+        raise HTTPException(status_code=400, detail={"code": 1010, "message": "url 非法"})
+
+    try:
+        client: WecomClient = get_wecom_client()
+        ticket = await client.get_jsapi_ticket()
+        timestamp = int(time.time())
+        nonce_str = WecomClient.new_nonce_str()
+        signature = WecomClient.generate_jsapi_signature(
+            ticket, normalized_url, timestamp, nonce_str
+        )
+    except WecomNotConfiguredError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    except WecomAPIError as e:
+        raise _err(e) from e
+
+    return ResponseModel(
+        data={
+            "appId": corp_id,
+            "timestamp": timestamp,
+            "nonceStr": nonce_str,
+            "signature": signature,
+            "jsApiList": list(JSAPI_LIST_SCAN),
+        }
+    )
+
+
+def _normalize_jsapi_url(raw: str) -> str | None:
+    """企业微信签名要求 url 含 query、不含 # 片段；空 host 拒绝。"""
+    if not raw:
+        return None
+    try:
+        p = urlparse(raw)
+    except ValueError:
+        return None
+    if p.scheme not in ("http", "https"):
+        return None
+    if not p.netloc:
+        return None
+    query = f"?{p.query}" if p.query else ""
+    return f"{p.scheme}://{p.netloc}{p.path}{query}"
 
 
 class SendWecomRequest(BaseModel):

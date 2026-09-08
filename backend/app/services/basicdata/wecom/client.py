@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import secrets
 import time
 from typing import Any, Literal
 
@@ -14,13 +16,20 @@ WECOM_BASE = "https://qyapi.weixin.qq.com"
 
 _TOKEN_TTL_SECONDS = 7000
 _TOKEN_BUFFER_SECONDS = 100
+_JSAPI_TICKET_TTL_SECONDS = 7000  # 官方 7200s，提前 200s 刷新
+
+JSAPI_LIST_SCAN = ["scanQRCode"]
 
 
 class WecomClient:
     def __init__(self):
         self._settings = get_settings()
         self._token_cache: dict[str, tuple[str, float]] = {}
+        self._jsapi_ticket_cache: tuple[str, float] | None = None
         self._lock = asyncio.Lock()
+        # jsapi_ticket 必须用独立锁：_request/get_access_token 也用 _lock，
+        # 同锁不可重入会导致冷启动时 get_jsapi_ticket 永久阻塞。
+        self._jsapi_ticket_lock = asyncio.Lock()
 
     def _require_secret(self, kind: Literal["app", "contact"]) -> str:
         corp_id = self._settings.wecom_corp_id
@@ -127,6 +136,46 @@ class WecomClient:
             params={"code": code},
         )
         return data
+
+    async def get_jsapi_ticket(self) -> str:
+        """获取企业 jsapi_ticket（用于 wx.config 签名；JS-SDK 全家桶含 scanQRCode）"""
+        cached = self._jsapi_ticket_cache
+        now = time.time()
+        if cached and cached[1] > now + _TOKEN_BUFFER_SECONDS:
+            return cached[0]
+
+        async with self._jsapi_ticket_lock:
+            cached = self._jsapi_ticket_cache
+            if cached and cached[1] > now + _TOKEN_BUFFER_SECONDS:
+                return cached[0]
+
+            data = await self._request(
+                "GET",
+                "/cgi-bin/get_jsapi_ticket",
+                "app",
+            )
+            ticket = data.get("ticket")
+            if not ticket:
+                raise WecomAPIError(
+                    data.get("errcode", -1),
+                    data.get("errmsg", "获取 jsapi_ticket 失败"),
+                    http_status=200,
+                )
+            self._jsapi_ticket_cache = (ticket, now + _JSAPI_TICKET_TTL_SECONDS)
+            return ticket
+
+    @staticmethod
+    def generate_jsapi_signature(ticket: str, url: str, timestamp: int, nonce_str: str) -> str:
+        """按企业微信官方算法生成 wx.config 签名（SHA1）"""
+        raw = (
+            f"jsapi_ticket={ticket}&noncestr={nonce_str}"
+            f"&timestamp={timestamp}&url={url}"
+        )
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def new_nonce_str(length: int = 16) -> str:
+        return secrets.token_urlsafe(length)
 
 
 _singleton: WecomClient | None = None

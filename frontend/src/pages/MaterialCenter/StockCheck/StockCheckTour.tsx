@@ -29,7 +29,7 @@ export const stockCheckIntroSteps: TourProps['steps'] = [
   },
   {
     title: '4. 按类型筛选',
-    description: '在最近盘点单列表中可切换:全部 / 订单盘点 / 手动盘点,快速定位历史记录。',
+    description: '在最近盘点单列表中可切换:全部 / 订单盘点 / 手动盘点 / 快捷盘点,快速定位历史记录。',
     target: dataTour('type-filter'),
   },
   {

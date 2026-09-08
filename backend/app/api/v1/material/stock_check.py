@@ -1,10 +1,11 @@
 """物料齐套中心 — 物料盘点 API (scm_inventory_check)"""
 
 import json
+import logging
 from datetime import date
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,25 +24,36 @@ from app.schemas.material.stock_check import (
     StockCheckItemUpdate,
     StockCheckItemBatchUpdate,
     CoCheckersUpdate,
+    QuickCountIn,
     PresenceUpdate,
     MaterialHistoryItem,
     MaterialCandidateOut,
+    ScanWarehouseOut,
+    ResolvedCodeOut,
     StockCheckCountedItemOut,
     StockCheckStats,
+    StockCheckKpi,
     StockCheckMyItemOut,
     StockCheckConflictOut,
     StockCheckActionBody,
     K3BillOut,
     K3ImportRequest,
     K3ImportResultOut,
+    StockCheckWritebackOut,
+    WritebackOverviewOut,
+    TaskCoverageOut,
+    StockCheckExportBody,
 )
 from app.models.material.inventory_check import StockCheck, StockCheckItem
 from app.services.material.stock_check_service import (
+    attach_list_extras,
     create_stock_check_from_order,
     create_stock_check_from_materials,
     list_material_candidates,
     list_counted_materials_ledger,
     list_counted_warehouses,
+    list_scan_warehouses,
+    resolve_material_by_code,
     update_stock_check_item,
     batch_update_items,
     complete_stock_check,
@@ -50,6 +62,9 @@ from app.services.material.stock_check_service import (
     refresh_order_bom,
     refresh_check_warehouses,
     add_items_to_check,
+    quick_count_material,
+    get_today_quick_check,
+    remove_quick_count_item,
     remove_item_from_check,
     get_stock_check_with_items,
     list_recent_stock_checks,
@@ -59,7 +74,9 @@ from app.services.material.stock_check_service import (
     enrich_items_assoc,
     enrich_live_qty,
     get_stock_check_stats,
+    get_stock_check_kpi,
     list_my_stock_check_items,
+    get_task_material_coverage,
     _user_can_edit,
     _current_user_id,
     _resolve_user_names,
@@ -70,7 +87,14 @@ from app.services.material.stock_check_k3_service import (
     list_k3_gain_loss_bills,
     import_k3_bills_as_stock_checks,
 )
+from app.services.material.stock_check_k3_writeback_service import (
+    plan_writebacks,
+    execute_pending_writebacks,
+    get_writeback_overview,
+)
 from app.services.material.stock_check_broker import subscribe_stream, set_presence, clear_presence
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -137,6 +161,7 @@ async def create_from_order(
                 if body.selected_products else None
             ),
             co_checker_user_ids=body.co_checker_user_ids,
+            recent_days=body.recent_days,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -166,6 +191,7 @@ async def create_from_materials(
             check_date=body.check_date,
             remark=body.remark,
             co_checker_user_ids=body.co_checker_user_ids,
+            recent_days=body.recent_days,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -193,6 +219,144 @@ async def list_material_candidates_view(
     ))
 
 
+@router.get("/stock-check/task-coverage", response_model=ResponseModel[TaskCoverageOut])
+async def get_task_stock_coverage_view(
+    start_date: date = Query(..., description="计划开工日期-起"),
+    end_date: date = Query(..., description="计划开工日期-止"),
+    status: str = Query("all", pattern="^(all|checked|unchecked)$"),
+    keyword: Optional[str] = Query(None, description="物料编码/名称/规格"),
+    wh_id: Optional[int] = Query(None, description="按仓库过滤行"),
+    wh_ids: Optional[str] = Query(None, description="按仓库多选过滤行(逗号分隔; -1 表示 (未入库) 合成行)"),
+    unstocked: bool = Query(False, description="仅看(未入库)合成行(wh_id 为空)"),
+    sort_by: Optional[str] = Query(None, description="排序列: material_code/material_name/spec_model/wh_name/system_qty/req_qty/task_count/recent_check_date"),
+    sort_order: str = Query("asc", pattern="^(asc|desc)$"),
+    include_sample: bool = Query(False, description="包含样品单(HJY开头销售订单)对应的任务，默认排除"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(PermissionChecker("materials.task_stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """生产任务单物料盘点覆盖: 按计划开工日期范围查未关闭任务单所需物料的已盘/未盘状态（平铺行 + 仓库汇总）。"""
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
+    allowed_sorts = ("material_code", "material_name", "spec_model", "wh_name", "system_qty", "req_qty", "task_count", "recent_check_date", "is_checked")
+    if sort_by is not None and sort_by not in allowed_sorts:
+        raise HTTPException(status_code=400, detail=f"sort_by 仅支持: {', '.join(allowed_sorts)}")
+    ids: Optional[List[int]] = None
+    if wh_ids:
+        parts = [p.strip() for p in wh_ids.split(",") if p.strip()]
+        try:
+            ids = [int(p) for p in parts]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="wh_ids 需为逗号分隔的仓库ID")
+    data = await get_task_material_coverage(
+        db, start_date=start_date, end_date=end_date,
+        status=status, keyword=keyword, page=page, page_size=page_size,
+        wh_id=None if unstocked else wh_id,
+        wh_ids=None if unstocked else ids,
+        unstocked=unstocked,
+        sort_by=sort_by, sort_order=sort_order,
+        include_sample=include_sample,
+    )
+    return ResponseModel(data=TaskCoverageOut(**data))
+
+
+TASK_COVERAGE_EXPORT_COLUMNS = [
+    ExportColumn("material_code", "物料编码", 18),
+    ExportColumn("material_name", "物料名称", 26),
+    ExportColumn("spec_model", "规格", 18),
+    ExportColumn("unit", "单位", 8),
+    ExportColumn("wh_name", "仓库", 16),
+    ExportColumn("system_qty", "当前库存", 12),
+    ExportColumn("req_qty", "需求总量", 12),
+    ExportColumn("is_checked", "盘点状态", 10),
+    ExportColumn("recent_check_no", "最近盘点单", 18),
+    ExportColumn("recent_check_date", "最近盘点日期", 14),
+    ExportColumn("task_nos", "关联任务单", 36),
+    ExportColumn("order_nos", "关联订单", 36),
+]
+
+
+@router.get("/stock-check/task-coverage/export")
+async def export_task_stock_coverage(
+    format: str = Query("xlsx", pattern="^(xlsx|csv)$"),
+    columns: Optional[str] = Query(None, description="要导出的列 key，逗号分隔；不传则导出全部列"),
+    start_date: date = Query(..., description="计划开工日期-起"),
+    end_date: date = Query(..., description="计划开工日期-止"),
+    status: str = Query("all", pattern="^(all|checked|unchecked)$"),
+    keyword: Optional[str] = Query(None, description="物料编码/名称/规格"),
+    wh_id: Optional[int] = Query(None, description="按仓库过滤行"),
+    wh_ids: Optional[str] = Query(None, description="按仓库多选过滤行(逗号分隔; -1 表示 (未入库) 合成行)"),
+    unstocked: bool = Query(False, description="仅看(未入库)合成行(wh_id 为空)"),
+    sort_by: Optional[str] = Query(None, description="排序列: material_code/material_name/spec_model/wh_name/system_qty/req_qty/task_count/recent_check_date"),
+    sort_order: str = Query("asc", pattern="^(asc|desc)$"),
+    include_sample: bool = Query(False, description="包含样品单(HJY开头销售订单)对应的任务，默认排除"),
+    current_user: dict = Depends(PermissionChecker("materials.task_stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """任务盘点覆盖导出（支持格式 xlsx/csv + 列选择，跟随与列表视图一致的筛选，不分页截断）。"""
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
+    allowed_sorts = ("material_code", "material_name", "spec_model", "wh_name", "system_qty", "req_qty", "task_count", "recent_check_date", "is_checked")
+    if sort_by is not None and sort_by not in allowed_sorts:
+        raise HTTPException(status_code=400, detail=f"sort_by 仅支持: {', '.join(allowed_sorts)}")
+    ids: Optional[List[int]] = None
+    if wh_ids:
+        parts = [p.strip() for p in wh_ids.split(",") if p.strip()]
+        try:
+            ids = [int(p) for p in parts]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="wh_ids 需为逗号分隔的仓库ID")
+    data = await get_task_material_coverage(
+        db, start_date=start_date, end_date=end_date,
+        status=status, keyword=keyword, page=1, page_size=1_000_000,
+        wh_id=None if unstocked else wh_id,
+        wh_ids=None if unstocked else ids,
+        unstocked=unstocked,
+        sort_by=sort_by, sort_order=sort_order,
+        include_sample=include_sample,
+    )
+
+    export_rows = []
+    for r in data["items"]:
+        export_rows.append({
+            "material_code": r["material_code"] or "",
+            "material_name": r["material_name"] or "",
+            "spec_model": r["spec_model"] or "",
+            "unit": r["unit"] or "",
+            "wh_name": r["wh_name"] or "",
+            "system_qty": float(r["system_qty"]) if r["system_qty"] is not None else "",
+            "req_qty": float(r["req_qty"]) if r["req_qty"] is not None else "",
+            "is_checked": "已盘" if r["is_checked"] else "未盘",
+            "recent_check_no": r["recent_check_no"] or "",
+            "recent_check_date": str(r["recent_check_date"]) if r["recent_check_date"] else "",
+            "task_nos": " ".join(r["task_nos"] or []),
+            "order_nos": " ".join(r["order_nos"] or []),
+        })
+
+    if columns:
+        selected_keys = [c.strip() for c in columns.split(",") if c.strip()]
+        export_columns = [col for col in TASK_COVERAGE_EXPORT_COLUMNS if col.key in selected_keys]
+    else:
+        export_columns = TASK_COVERAGE_EXPORT_COLUMNS
+
+    svc = GenericExportService(export_columns, export_rows, sheet_name="任务盘点")
+
+    if format == "csv":
+        output = svc.to_csv()
+        return StreamingResponse(
+            output,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": "attachment; filename=task_stock_coverage_export.csv"},
+        )
+    output = svc.to_xlsx()
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=task_stock_coverage_export.xlsx"},
+    )
+
+
 @router.get("/stock-check/counted-warehouses", response_model=ResponseModel[List[dict]])
 async def list_counted_warehouses_view(
     current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
@@ -203,6 +367,31 @@ async def list_counted_warehouses_view(
     return ResponseModel(data=items)
 
 
+@router.get("/stock-check/scan-warehouses", response_model=ResponseModel[List[ScanWarehouseOut]])
+async def list_scan_warehouses_view(
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """扫码盘点: 顶部仓库选择器选项(scm_inventory 去重仓库)。"""
+    items = await list_scan_warehouses(db)
+    return ResponseModel(data=[ScanWarehouseOut(**w) for w in items])
+
+
+@router.get("/stock-check/resolve-code", response_model=ResponseModel[ResolvedCodeOut])
+async def resolve_stock_check_code(
+    code: str = Query(..., description="扫出的编码(物料编码或SKU条码)"),
+    wh_id: Optional[int] = Query(None, description="仓库ID(可选)"),
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """扫码盘点: 编码精确解析为物料(+所选仓库系统库存)。未找到返回 404。"""
+    try:
+        data = await resolve_material_by_code(db, code=code, wh_id=wh_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return ResponseModel(data=ResolvedCodeOut(**data))
+
+
 @router.get("/stock-check/counted-ledger", response_model=ResponseModel[PageResult[StockCheckCountedItemOut]])
 async def list_counted_materials_view(
     page: int = Query(1, ge=1),
@@ -211,13 +400,15 @@ async def list_counted_materials_view(
     wh_id: Optional[str] = Query(None, description="仓库ID(int)或名称(string)"),
     date_from: Optional[date] = Query(None, description="盘点日期起点 (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="盘点日期终点 (YYYY-MM-DD)"),
-    check_type: Optional[str] = Query(None, description="盘点类型:order/manual"),
+    check_type: Optional[str] = Query(None, description="盘点类型:order/manual/quick"),
     status: Optional[str] = Query(None, description="状态筛选,逗号分隔(open/in_progress/completed)"),
     check_no: Optional[str] = Query(None, description="盘点单号模糊匹配"),
     counted_by: Optional[str] = Query(None, description="盘点人模糊匹配"),
     material_code: Optional[str] = Query(None, description="物料编码模糊匹配"),
     material_name: Optional[str] = Query(None, description="物料名称模糊匹配"),
     spec_model: Optional[str] = Query(None, description="规格型号模糊匹配"),
+    only_mine: Optional[bool] = Query(False, description="仅当前用户盘点过的行"),
+    diff_only: Optional[bool] = Query(False, description="仅差异行(diff_qty != 0)"),
     sort_by: Optional[str] = Query(None, description="排序字段:material_code/material_name/spec_model/unit/wh_name/system_qty/actual_qty/diff_qty/check_no/check_date/counted_by/counted_at/status"),
     sort_order: Optional[str] = Query(None, description="排序方向:asc/desc"),
     current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
@@ -240,6 +431,9 @@ async def list_counted_materials_view(
         material_code=material_code,
         material_name=material_name,
         spec_model=spec_model,
+        only_mine=bool(only_mine),
+        diff_only=bool(diff_only),
+        current_user_id=_current_user_id(current_user),
         sort_by=sort_by,
         sort_order=sort_order,
     )
@@ -267,11 +461,11 @@ async def recent(
     page_size: int = Query(20, ge=1, le=100),
     keyword: Optional[str] = Query(None, description="搜索盘点单号/订单号/标题"),
     status: Optional[str] = Query(None, description="状态筛选,逗号分隔(open/in_progress/completed/cancelled)"),
-    check_type: Optional[str] = Query(None, description="盘点类型:order/manual"),
+    check_type: Optional[str] = Query(None, description="盘点类型:order/manual/quick"),
     source: Optional[str] = Query(None, description="数据来源:k3/manual"),
     date_from: Optional[date] = Query(None, description="盘点日期起点 (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="盘点日期终点 (YYYY-MM-DD)"),
-    sort_by: Optional[str] = Query(None, description="排序字段:check_no/order_no/check_date/total_materials/checked_materials/total_diff_qty/created_at"),
+    sort_by: Optional[str] = Query(None, description="排序字段:check_no/order_no/check_date/total_materials/checked_materials/total_diff_qty/created_at/updated_at"),
     sort_order: Optional[str] = Query(None, description="asc/desc,默认 desc"),
     current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
     db: AsyncSession = Depends(get_db),
@@ -290,6 +484,7 @@ async def recent(
         sort_by=sort_by,
         sort_order=sort_order,
     )
+    await attach_list_extras(db, rows)
     filter_query = select(StockCheck)
     if keyword:
         like = f"%{keyword}%"
@@ -346,7 +541,7 @@ async def list_my_items(
     date_from: Optional[date] = Query(None, description="盘点日期起点 (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="盘点日期终点 (YYYY-MM-DD)"),
     check_no: Optional[str] = Query(None, description="盘点单号模糊匹配"),
-    check_type: Optional[str] = Query(None, description="盘点类型:order/manual"),
+    check_type: Optional[str] = Query(None, description="盘点类型:order/manual/quick"),
     status: Optional[str] = Query(None, description="状态筛选,逗号分隔(open/in_progress/completed)"),
     order_no: Optional[str] = Query(None, description="订单号模糊匹配"),
     material_code: Optional[str] = Query(None, description="物料编码模糊匹配"),
@@ -392,7 +587,7 @@ async def list_my_items(
 
 @router.get("/stock-check/stats", response_model=ResponseModel[StockCheckStats])
 async def stock_check_stats(
-    check_type: Optional[str] = Query(None, description="盘点类型:order/manual"),
+    check_type: Optional[str] = Query(None, description="盘点类型:order/manual/quick"),
     date_from: Optional[date] = Query(None, description="盘点日期起点 (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="盘点日期终点 (YYYY-MM-DD)"),
     status: Optional[str] = Query(None, description="状态筛选,逗号分隔(open/in_progress/completed);cancelled 始终排除"),
@@ -409,6 +604,15 @@ async def stock_check_stats(
         status=statuses,
     )
     return ResponseModel(data=StockCheckStats(**data))
+
+
+@router.get("/stock-check/kpi", response_model=ResponseModel[StockCheckKpi])
+async def stock_check_kpi(
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """盘点台账页 KPI 行(全局汇总,不带筛选)。"""
+    return ResponseModel(data=StockCheckKpi(**await get_stock_check_kpi(db)))
 
 
 @router.get("/stock-check/{check_id}", response_model=ResponseModel[StockCheckOut])
@@ -585,6 +789,7 @@ async def complete(
         head = await complete_stock_check(
             db, check_id, current_user, expected_version=body.expected_version,
         )
+        writebacks = await plan_writebacks(db, head)
     except StockCheckPermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except StockCheckConflictError as e:
@@ -598,9 +803,19 @@ async def complete(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # 完结+回写计划先落库;K3 写入 best-effort,失败不阻断完结
+    await db.commit()
+    summary = {"total": 0, "success": 0, "failed": 0, "pending": 0}
+    if writebacks:
+        try:
+            summary = await execute_pending_writebacks(db, check_id, current_user)
+        except Exception:
+            logger.exception(f"盘点单 {check_id} K3 回写异常(可稍后重试)")
+            summary = {"total": len(writebacks), "success": 0, "failed": 0, "pending": len(writebacks)}
     head_out = await get_stock_check_with_items(db, check_id)
-    await db.refresh(head_out)
-    return ResponseModel(data=await _to_check_out(db, head_out, current_user))
+    out = await _to_check_out(db, head_out, current_user)
+    out.writeback_summary = summary
+    return ResponseModel(data=out)
 
 
 @router.post("/stock-check/{check_id}/cancel", response_model=ResponseModel[StockCheckOut])
@@ -630,6 +845,40 @@ async def cancel(
     head_out = await get_stock_check_with_items(db, check_id)
     await db.refresh(head_out)
     return ResponseModel(data=await _to_check_out(db, head_out, current_user))
+
+
+@router.get("/stock-check/{check_id}/writebacks", response_model=ResponseModel[WritebackOverviewOut])
+async def get_writebacks(
+    check_id: int,
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """盘点单 K3 回写记录总览(含无仓库被跳过的盘差行清单)"""
+    head = await db.get(StockCheck, check_id)
+    if not head:
+        raise HTTPException(status_code=404, detail="盘点单不存在")
+    overview = await get_writeback_overview(db, check_id)
+    return ResponseModel(data=WritebackOverviewOut.model_validate(overview))
+
+
+@router.post("/stock-check/{check_id}/writebacks/retry", response_model=ResponseModel[WritebackOverviewOut])
+async def retry_writebacks(
+    check_id: int,
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """重试 pending/failed 的 K3 回写(success 不重复生成)"""
+    head = await db.get(StockCheck, check_id)
+    if not head:
+        raise HTTPException(status_code=404, detail="盘点单不存在")
+    if head.status != "completed":
+        raise HTTPException(status_code=400, detail="仅已完结的盘点单可重试 K3 回写")
+    try:
+        await execute_pending_writebacks(db, check_id, current_user)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    overview = await get_writeback_overview(db, check_id)
+    return ResponseModel(data=WritebackOverviewOut.model_validate(overview))
 
 
 @router.put("/stock-check/{check_id}/co-checkers", response_model=ResponseModel[StockCheckOut])
@@ -662,6 +911,180 @@ async def update_co_checkers(
     return ResponseModel(data=await _to_check_out(db, head_out, current_user))
 
 
+@router.post("/stock-check/quick-count", response_model=ResponseModel[dict])
+async def quick_count(
+    body: QuickCountIn,
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """快捷盘点: 搜索物料直接录入实盘数,自动写入当前用户当日的「快捷盘点」单。"""
+    try:
+        head, item = await quick_count_material(
+            db,
+            current_user,
+            material_id=body.material_id,
+            wh_id=body.wh_id,
+            actual_qty=body.actual_qty,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ResponseModel(data={
+        "check_id": head.id,
+        "check_no": head.check_no,
+        "item": {
+            "id": item.id,
+            "material_code": item.material_code,
+            "material_name": item.material_name,
+            "wh_name": item.wh_name,
+            "system_qty": float(item.system_qty or 0),
+            "actual_qty": float(item.actual_qty or 0),
+            "diff_qty": float(item.diff_qty or 0),
+        },
+    })
+
+
+@router.get("/stock-check/quick-count/today", response_model=ResponseModel[dict])
+async def quick_count_today(
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """当前用户当日快捷盘点单(含明细);无则 data 为 null。"""
+    found = await get_today_quick_check(db, current_user)
+    if found is None:
+        return ResponseModel(data=None)
+    head, items = found
+    return ResponseModel(data={
+        "check_id": head.id,
+        "check_no": head.check_no,
+        "title": head.title,
+        "items": [
+            {
+                "id": it.id,
+                "material_id": it.material_id,
+                "material_code": it.material_code,
+                "material_name": it.material_name,
+                "spec_model": it.spec_model,
+                "unit": it.unit,
+                "wh_id": it.wh_id,
+                "wh_name": it.wh_name,
+                "system_qty": float(it.system_qty or 0),
+                "actual_qty": float(it.actual_qty) if it.actual_qty is not None else None,
+                "diff_qty": float(it.diff_qty or 0),
+                "counted_by": it.counted_by,
+                "counted_at": it.counted_at.isoformat() if it.counted_at else None,
+            }
+            for it in items
+        ],
+    })
+
+
+@router.delete("/stock-check/quick-count/items/{item_id}", response_model=ResponseModel[dict])
+async def quick_count_remove_item(
+    item_id: int,
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """快捷盘点: 移除当日快捷盘点单中的一条已录入明细(仅限本人进行中的快捷单)。"""
+    try:
+        head = await remove_quick_count_item(db, item_id, current_user)
+    except StockCheckPermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ResponseModel(data={"removed": True, "check_id": head.id})
+
+
+@router.get("/stock-check/quick-count/import-template")
+async def quick_count_import_template(
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+):
+    """快捷盘点 Excel 导入模板下载。"""
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    from app.services.material.stock_check_excel_import import build_import_template
+
+    content = build_import_template()
+    filename = quote("快捷盘点导入模板.xlsx")
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
+
+
+@router.post("/stock-check/quick-count/import-preview", response_model=ResponseModel[dict])
+async def quick_count_import_preview(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
+):
+    """快捷盘点: Excel 导入前预览 — 只解析文件,返回各盘点日期的行数分布,
+    前端据此渲染日期勾选。不做任何 DB 校验/写入。"""
+    from fastapi.responses import JSONResponse
+
+    from app.services.material.stock_check_excel_import import (
+        summarize_dates,
+        parse_quick_import_excel,
+    )
+
+    try:
+        rows = parse_quick_import_excel(await file.read())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not rows:
+        raise HTTPException(status_code=400, detail="文件中没有数据行")
+    return ResponseModel(data={"total": len(rows), "dates": summarize_dates(rows)})
+
+
+@router.post("/stock-check/quick-count/import", response_model=ResponseModel[dict])
+async def quick_count_import(
+    file: UploadFile = File(...),
+    dates: str = Form("", description="逗号分隔 ISO 日期;留空=只导今日"),
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """快捷盘点: Excel 批量导入到当前用户当日快捷单(全部成功或全部回滚)。
+
+    dates: 逗号分隔的 ISO 日期列表(导入预览中勾选的日期);
+    留空=只导入今日(含未填日期行)。所选日期的数据均并入今日单。
+    校验失败返回 HTTP 200 + code=1 + data.errors(行级错误,全部给出);
+    前端请求带 skipErrorToast,由弹窗渲染错误列表。
+    """
+    from datetime import date as _date
+
+    from fastapi.responses import JSONResponse
+
+    from app.services.material.stock_check_excel_import import (
+        ExcelImportValidationError,
+        import_quick_count_excel,
+    )
+
+    selected_dates = None
+    if dates and dates.strip():
+        selected_dates = []
+        for token in dates.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                selected_dates.append(_date.fromisoformat(token))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"日期参数无效: {token}")
+
+    try:
+        result = await import_quick_count_excel(db, current_user, file, selected_dates)
+    except ExcelImportValidationError as e:
+        return JSONResponse(status_code=200, content={
+            "code": 1,
+            "message": f"导入失败,共 {len(e.errors)} 处错误,未导入任何数据",
+            "data": {"errors": e.errors},
+        })
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ResponseModel(data=result)
+
+
 @router.post("/stock-check/{check_id}/items", response_model=ResponseModel[dict])
 async def add_items(
     check_id: int,
@@ -669,7 +1092,8 @@ async def add_items(
     current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
     db: AsyncSession = Depends(get_db),
 ):
-    """为进行中的手动盘点单追加物料明细(仅 check_type=manual、open/in_progress)。"""
+    """为进行中的手动盘点单追加物料明细(仅 check_type=manual、open/in_progress)。
+    recent_days: 省略=不标记近期已盘;>=0=窗口天数;-1=不限。"""
     try:
         rows = await add_items_to_check(
             db,
@@ -677,6 +1101,7 @@ async def add_items(
             material_ids=body.material_ids,
             items=[(it.material_id, it.wh_id) for it in body.items] if body.items else None,
             current_user=current_user,
+            recent_days=body.recent_days,
         )
     except StockCheckPermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
@@ -701,20 +1126,18 @@ async def remove_item(
     return ResponseModel(data={"removed": True, "check_id": head.id})
 
 
-@router.get("/stock-check/{check_id}/export")
-async def export_stock_check(
+async def _export_check_file(
+    db: AsyncSession,
     check_id: int,
-    format: str = Query("xlsx", pattern="^(xlsx|csv)$"),
-    columns: Optional[str] = Query(None, description="逗号分隔的导出字段 key,省略=全部"),
-    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
-    db: AsyncSession = Depends(get_db),
-):
-    """导出单个盘点单的明细(支持 xlsx/csv 与字段选择)。"""
+    fmt: str,
+    selected_keys: List[str],
+    item_ids: Optional[List[int]] = None,
+) -> StreamingResponse:
+    """盘点单明细导出公共实现。item_ids 非空时只导出这些行(前端客户端筛选后的可见行)。"""
     head = await get_stock_check_with_items(db, check_id)
     if not head:
         raise HTTPException(status_code=404, detail="盘点单不存在")
 
-    selected_keys = [c.strip() for c in columns.split(",") if c.strip()] if columns else []
     allowed = {c.key for c in STOCK_CHECK_EXPORT_COLUMNS}
     invalid = [k for k in selected_keys if k not in allowed]
     if invalid:
@@ -723,8 +1146,15 @@ async def export_stock_check(
     if not selected_columns:
         raise HTTPException(status_code=400, detail="请选择至少一个有效导出字段")
 
+    export_items = head.items
+    if item_ids is not None:
+        id_set = {int(i) for i in item_ids}
+        export_items = [it for it in head.items if it.id in id_set]
+        if not export_items:
+            raise HTTPException(status_code=400, detail="所选明细行不存在或已被移除")
+
     export_rows = []
-    for it in head.items:
+    for it in export_items:
         snap_time = it.system_qty_time or head.created_at
         export_rows.append({
             "material_code": it.material_code or "",
@@ -740,14 +1170,15 @@ async def export_stock_check(
             "req_qty": it.req_qty if it.req_qty is not None else "",
             "actual_qty": it.actual_qty if it.actual_qty is not None else "",
             "diff_qty": it.diff_qty if it.diff_qty is not None else "",
-            "is_checked": "是" if it.is_checked == 1 else "否",
+            # 已盘口径与头表汇总一致: is_checked=1 或 近期已盘免盘行(recent 标记未撤销)
+            "is_checked": "是" if (it.is_checked == 1 or it.recent_checked_check_no) else "否",
             "checked_by": it.checked_by or "",
             "checked_at": it.checked_at.strftime("%Y-%m-%d %H:%M") if it.checked_at else "",
             "remark": it.remark or "",
         })
 
     svc = GenericExportService(selected_columns, export_rows, sheet_name="物料盘点明细")
-    if format == "csv":
+    if fmt == "csv":
         output = svc.to_csv()
         return StreamingResponse(
             output,
@@ -760,6 +1191,33 @@ async def export_stock_check(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=stock_check_{check_id}.xlsx"},
     )
+
+
+@router.get("/stock-check/{check_id}/export")
+async def export_stock_check(
+    check_id: int,
+    format: str = Query("xlsx", pattern="^(xlsx|csv)$"),
+    columns: Optional[str] = Query(None, description="逗号分隔的导出字段 key,省略=全部"),
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """导出单个盘点单的全部明细(支持 xlsx/csv 与字段选择)。"""
+    selected_keys = [c.strip() for c in columns.split(",") if c.strip()] if columns else []
+    return await _export_check_file(db, check_id, format, selected_keys)
+
+
+@router.post("/stock-check/{check_id}/export")
+async def export_stock_check_filtered(
+    check_id: int,
+    body: StockCheckExportBody,
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """导出单个盘点单的明细(POST 版): 页面筛选为客户端筛选,传 item_ids 只导出当前可见行。"""
+    if body.format not in ("xlsx", "csv"):
+        raise HTTPException(status_code=400, detail="format 仅支持 xlsx/csv")
+    selected_keys = [c.strip() for c in (body.columns or []) if c.strip()]
+    return await _export_check_file(db, check_id, body.format, selected_keys, item_ids=body.item_ids)
 
 
 @router.post("/stock-check/{check_id}/refresh-warehouses", response_model=ResponseModel[dict])
@@ -785,13 +1243,14 @@ async def refresh_warehouses(
 @router.post("/stock-check/{check_id}/refresh-bom", response_model=ResponseModel[StockCheckOut])
 async def refresh_bom(
     check_id: int,
+    recent_days: Optional[int] = Query(None, ge=-1, le=3650, description="近 N 天内已盘视为近期已盘(免盘);-1=不限(全部历史);省略=服务端配置默认"),
     current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
     db: AsyncSession = Depends(get_db),
 ):
     """补入订单盘点单缺失的子BOM物料（仅订单类、仅 open/in_progress）。
     已有明细及已录入数据保留；权限不足或状态不允许时返回 403/400。"""
     try:
-        await refresh_order_bom(db, check_id, current_user)
+        await refresh_order_bom(db, check_id, current_user, recent_days=recent_days)
     except StockCheckPermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:

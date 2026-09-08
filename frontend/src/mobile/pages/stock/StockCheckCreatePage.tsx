@@ -1,9 +1,13 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Tabs, Input, Button, List, Toast, Checkbox, TextArea, Dialog, SpinLoading } from 'antd-mobile'
+import { SpinLoading, Toast, Dialog } from 'antd-mobile'
 import { materialApi } from '@/services/api'
 import { useStockCheckPoolStore, poolKey, PoolMaterial } from '@/store/stockCheckPool'
 import NavBarSimple from '../../components/NavBarSimple'
+import SegTabs from '../../components/SegTabs'
+import MIcon from '../../components/MIcon'
+import { EmptyState } from '../../components/Feedback'
+import MDialog from '../../components/MDialog'
 
 interface Candidate {
   erp_material_id: number
@@ -28,6 +32,9 @@ export default function StockCheckCreatePage() {
   const [keyword, setKeyword] = useState('')
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [searching, setSearching] = useState(false)
+  const [searched, setSearched] = useState(false)
+  const [confirmOrder, setConfirmOrder] = useState(false)
+  const [confirmPool, setConfirmPool] = useState(false)
 
   async function search() {
     if (!keyword.trim()) return
@@ -35,6 +42,7 @@ export default function StockCheckCreatePage() {
     try {
       const res: any = await materialApi.listMaterialCandidates({ keyword: keyword.trim(), page: 1, page_size: 30 })
       setCandidates(res.data?.items || [])
+      setSearched(true)
     } catch {
       Toast.show('搜索失败')
     } finally {
@@ -63,6 +71,7 @@ export default function StockCheckCreatePage() {
   }
 
   async function createFromOrder() {
+    setConfirmOrder(false)
     if (!orderNo.trim()) { Toast.show('请输入订单号'); return }
     setCreating(true)
     try {
@@ -80,6 +89,7 @@ export default function StockCheckCreatePage() {
   }
 
   async function createFromPool() {
+    setConfirmPool(false)
     if (pool.items.length === 0) { Toast.show('请先搜索并加入物料'); return }
     setCreating(true)
     try {
@@ -98,77 +108,148 @@ export default function StockCheckCreatePage() {
     }
   }
 
-  const inPool = (c: Candidate) => pool.items.some((it) => poolKey(it) === poolKey({ erp_material_id: c.erp_material_id, wh_id: c.wh_id ?? null }))
+  const inPool = (c: Candidate) =>
+    pool.items.some((it) => poolKey(it) === poolKey({ erp_material_id: c.erp_material_id, wh_id: c.wh_id ?? null }))
 
   return (
-    <div className="mobile-page">
+    <div className="m-page m-page--full">
       <NavBarSimple title="新建盘点" onBack={() => navigate(-1)} />
-      <Tabs activeKey={tab} onChange={(k) => setTab(k as typeof tab)}>
-        <Tabs.Tab title="从订单" key="order" />
-        <Tabs.Tab title={`从物料${pool.items.length ? `(${pool.items.length})` : ''}`} key="materials" />
-      </Tabs>
 
-      <div className="mobile-card">
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>标题（可选）</div>
-          <Input value={title} onChange={setTitle} placeholder="如：3号线电子仓周盘" clearable />
+      <div className="m-page__scroll">
+        <div className="lk-tabs" style={{ padding: '12px 14px' }}>
+          <SegTabs
+            items={[
+              { key: 'order', label: '从订单' },
+              { key: 'materials', label: '从物料', count: pool.items.length || undefined },
+            ]}
+            active={tab}
+            onChange={(k) => setTab(k as typeof tab)}
+          />
         </div>
+
+        <div className="m-card">
+          <div className="m-field">
+            <label>盘点单标题</label>
+            <div className="inp">
+              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例如：8月末主材盘点" />
+            </div>
+          </div>
+          <div className="m-field" style={{ marginBottom: 0 }}>
+            <label>备注（可选）</label>
+            <textarea value={remark} onChange={(e) => setRemark(e.target.value)} maxLength={200} placeholder="补充说明…" />
+          </div>
+        </div>
+
         {tab === 'order' ? (
-          <>
-            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>订单号</div>
-            <Input value={orderNo} onChange={setOrderNo} placeholder="请输入订单号" clearable />
-            <Button block color="primary" size="large" loading={creating} disabled={creating} style={{ marginTop: 16, '--border-radius': '10px' } as any} onClick={createFromOrder}>
-              按订单建盘（自动载入 BOM 物料）
-            </Button>
-          </>
+          <div className="m-card">
+            <div className="m-field">
+              <label>订单号</label>
+              <div className="inp">
+                <input value={orderNo} onChange={(e) => setOrderNo(e.target.value)} placeholder="请输入销售订单号" />
+              </div>
+            </div>
+            <button
+              className="mbtn mbtn--primary mbtn--block"
+              disabled={creating}
+              onClick={() => {
+                if (!orderNo.trim()) { Toast.show('请输入订单号'); return }
+                setConfirmOrder(true)
+              }}
+            >
+              <MIcon name="box" size={17} />按订单建盘（自动载入 BOM 物料）
+            </button>
+          </div>
         ) : (
           <>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-              <div style={{ flex: 1 }}>
-                <Input value={keyword} onChange={setKeyword} placeholder="搜索物料编码/名称" clearable onEnterPress={search} />
+            <div className="m-card">
+              <div className="lk-search" style={{ padding: '0 0 10px' }}>
+                <div className="lk-search__box" style={{ border: '1.5px solid var(--spc-border)', background: '#fff' }}>
+                  <MIcon name="search" size={17} />
+                  <input
+                    value={keyword}
+                    onChange={(e) => setKeyword(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') search() }}
+                    placeholder="搜索物料编码 / 名称 / 规格"
+                  />
+                </div>
+                <button className="mbtn mbtn--primary mbtn--sm" onClick={search}>搜索</button>
               </div>
-              <Button color="primary" fill="outline" onClick={search}>搜索</Button>
-            </div>
-            {searching && <div style={{ textAlign: 'center', padding: 16 }}><SpinLoading color="primary" /></div>}
-            <List style={{ '--border-top': 'none' } as any}>
-              {candidates.map((c) => (
-                <List.Item
-                  key={`${c.erp_material_id}-${c.wh_id ?? 'all'}`}
-                  clickable
-                  onClick={() => toggleCandidate(c)}
-                  extra={<Checkbox checked={inPool(c)} onChange={() => toggleCandidate(c)} />}
-                  description={<span style={{ fontSize: 12, color: '#64748b' }}>{[c.spec_model, c.wh_name, c.system_qty != null ? `库存 ${c.system_qty}` : null].filter(Boolean).join(' · ')}</span>}
-                >
-                  {c.material_code} {c.material_name}
-                </List.Item>
+              {searching && <div style={{ textAlign: 'center', padding: 16 }}><SpinLoading color="primary" /></div>}
+              {!searching && candidates.length === 0 && (
+                <EmptyState icon="search" text={searched ? '没有匹配的物料' : '输入关键词搜索物料'} />
+              )}
+              {!searching && candidates.map((c) => (
+                <div className="cand" key={`${c.erp_material_id}-${c.wh_id ?? 'all'}`} onClick={() => toggleCandidate(c)}>
+                  <span className={`cbx${inPool(c) ? ' on' : ''}`}><MIcon name="check" size={12} /></span>
+                  <div className="c1">
+                    <div className="cc">
+                      {c.material_name || c.material_code || `物料${c.erp_material_id}`}
+                      <i>{c.material_code}</i>
+                    </div>
+                    <div className="cs">
+                      {[c.spec_model, c.wh_name, c.system_qty != null ? `库存 ${c.system_qty}` : null]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                  </div>
+                </div>
               ))}
-            </List>
-            {pool.items.length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>已加入 {pool.items.length} 项</div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+            </div>
+
+            <div className="m-card">
+              <div className="m-card__title">
+                已加入物料
+                <span className="m-chip m-chip--progress" style={{ marginLeft: 8 }}>{pool.items.length} 项</span>
+              </div>
+              {pool.items.length === 0 ? (
+                <div className="pool-empty">暂无物料，从上方候选列表点选加入（与 PC 端暂存池互通）</div>
+              ) : (
+                <div className="pool">
                   {pool.items.map((m) => (
-                    <span key={poolKey(m)} style={{ fontSize: 12, background: '#eef0ff', color: '#4f46e5', borderRadius: 6, padding: '3px 8px' }}
-                      onClick={() => pool.remove([m])}>
-                      {m.material_code || m.material_name} ✕
+                    <span className="pchip" key={poolKey(m)}>
+                      {m.material_code || m.material_name}
+                      <button onClick={() => pool.remove([m])}><MIcon name="close" size={12} /></button>
                     </span>
                   ))}
                 </div>
-                <Button block color="primary" size="large" loading={creating} disabled={creating} style={{ '--border-radius': '10px' } as any}
-                  onClick={() => {
-                    void Dialog.confirm({ title: `创建盘点单（${pool.items.length} 项物料）`, onConfirm: createFromPool })
-                  }}>
-                  按暂存池建盘
-                </Button>
-              </div>
-            )}
+              )}
+              <button
+                className="mbtn mbtn--primary mbtn--block"
+                style={{ marginTop: 12 }}
+                disabled={creating || pool.items.length === 0}
+                onClick={() => setConfirmPool(true)}
+              >
+                {pool.items.length ? `按暂存池建盘（${pool.items.length}）` : '按暂存池建盘'}
+              </button>
+            </div>
           </>
         )}
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>备注（可选）</div>
-          <TextArea value={remark} onChange={setRemark} rows={2} maxLength={200} placeholder="盘点原因/范围说明" />
-        </div>
+        <div style={{ height: 20 }} />
       </div>
+
+      <MDialog
+        visible={confirmOrder}
+        title="按订单创建盘点"
+        onClose={() => setConfirmOrder(false)}
+        actions={[
+          { label: '取消' },
+          { label: '确认创建', kind: 'primary', onClick: createFromOrder },
+        ]}
+      >
+        将按订单 <b>{orderNo.trim()}</b> 自动载入 BOM 物料创建盘点单，创建后即可开始协同盘点。
+      </MDialog>
+
+      <MDialog
+        visible={confirmPool}
+        title="按暂存池创建盘点"
+        onClose={() => setConfirmPool(false)}
+        actions={[
+          { label: '取消' },
+          { label: '确认创建', kind: 'primary', onClick: createFromPool },
+        ]}
+      >
+        将使用暂存池中的 <b>{pool.items.length}</b> 项物料创建盘点单，创建成功后暂存池将清空。
+      </MDialog>
     </div>
   )
 }

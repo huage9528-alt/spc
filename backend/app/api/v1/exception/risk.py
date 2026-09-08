@@ -46,7 +46,7 @@ async def assess_single_order(
 ):
     """评估单个订单的风险等级"""
     result = await db.execute(
-        select(SaleOrder).where(SaleOrder.order_no == order_no)
+        select(SaleOrder).where(SaleOrder.order_no == order_no).order_by(SaleOrder.id.desc()).limit(1)
     )
     order = result.scalar_one_or_none()
     if not order:
@@ -74,7 +74,7 @@ async def get_assessment_result(
 ):
     """查询单个订单的风险评估结果"""
     result = await db.execute(
-        select(SaleOrder).where(SaleOrder.order_no == order_no)
+        select(SaleOrder).where(SaleOrder.order_no == order_no).order_by(SaleOrder.id.desc()).limit(1)
     )
     order = result.scalar_one_or_none()
     if not order:

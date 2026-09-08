@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Button, Input, Form, Toast, SpinLoading } from 'antd-mobile'
+import { Toast } from 'antd-mobile'
 import { authApi } from '@/services/api'
 import { useAuthStore } from '@/store/auth'
 import { mobileAuth } from '../services/auth'
+import MIcon from '../components/MIcon'
 
 export default function MobileLoginPage() {
   const navigate = useNavigate()
@@ -11,6 +12,9 @@ export default function MobileLoginPage() {
   const hasToken = !!useAuthStore((s) => s.currentToken)
   const [phase, setPhase] = useState<'oauth' | 'password'>('oauth')
   const [error, setError] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
 
   async function loginByCode(code: string) {
     try {
@@ -63,46 +67,72 @@ export default function MobileLoginPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  async function onPasswordSubmit(values: { username: string; password: string }) {
+  async function onPasswordSubmit() {
+    if (!username.trim() || !password) {
+      Toast.show('请输入账号和密码')
+      return
+    }
+    setSubmitting(true)
     try {
-      const res: any = await mobileAuth.passwordLogin(values.username, values.password)
+      const res: any = await mobileAuth.passwordLogin(username.trim(), password)
       const token = res.data.access_token
       useAuthStore.getState().setAuth(token, null)
       const meRes: any = await authApi.getMe()
       setAuth(token, meRes.data)
       window.location.replace('/m/')
     } catch (e: any) {
-      Toast.show({ content: e?.response?.data?.detail || e?.message || '登录失败' })
+      setError(e?.response?.data?.detail || e?.message || '登录失败')
+      Toast.show(e?.response?.data?.detail || e?.message || '登录失败')
+    } finally {
+      setSubmitting(false)
     }
   }
 
-  if (phase === 'oauth') {
-    return (
-      <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 12 }}>
-        <SpinLoading color="primary" />
-        <div style={{ color: '#64748b', fontSize: 13 }}>正在跳转企业微信登录…</div>
-        {error && <div style={{ color: '#e11d48', fontSize: 13 }}>{error}</div>}
-      </div>
-    )
-  }
-
   return (
-    <div className="mobile-page" style={{ paddingTop: '18vh' }}>
-      <div style={{ textAlign: 'center', marginBottom: 32 }}>
-        <div style={{ fontSize: 20, fontWeight: 700, color: '#1e293b' }}>供应链与生产协同中台</div>
-        <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 6 }}>移动端</div>
+    <div className="m-page m-page--full">
+      <div className="login-wrap">
+        {phase === 'oauth' ? (
+          <div className="lp1">
+            <div className="brand-ic">
+              <MIcon name="cube" size={36} />
+            </div>
+            <div className="t">供应链与生产协同中台 · 移动端</div>
+            <div className="big-spin" />
+            <div className="s">正在跳转企业微信登录…</div>
+            {error && <div className="s" style={{ color: '#b91c1c' }}>{error}</div>}
+            <button className="lnk" onClick={() => setPhase('password')}>
+              使用账号密码登录
+            </button>
+          </div>
+        ) : (
+          <div className="lp2">
+            <div className="bt">供应链与生产协同中台</div>
+            <div className="bs">移动端 · 账号密码登录</div>
+            {error && <div className="lg-error">{error}</div>}
+            <div className="m-field">
+              <label>账号</label>
+              <div className="inp">
+                <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="请输入账号" />
+              </div>
+            </div>
+            <div className="m-field">
+              <label>密码</label>
+              <div className="inp">
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="请输入密码"
+                />
+              </div>
+            </div>
+            <button className="mbtn mbtn--deep mbtn--block lg-btn" disabled={submitting} onClick={onPasswordSubmit}>
+              {submitting ? '登录中…' : '登 录'}
+            </button>
+            <div className="lg-alt">未绑定企微？登录后可在 PC 端个人中心绑定</div>
+          </div>
+        )}
       </div>
-      {error && <div style={{ color: '#e11d48', fontSize: 13, marginBottom: 12 }}>{error}</div>}
-      <Form onFinish={onPasswordSubmit} footer={
-        <Button block type="submit" color="primary" size="large">登录</Button>
-      }>
-        <Form.Item name="username" label="账号" rules={[{ required: true, message: '请输入账号' }]}>
-          <Input placeholder="用户名" clearable />
-        </Form.Item>
-        <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
-          <Input type="password" placeholder="密码" clearable />
-        </Form.Item>
-      </Form>
     </div>
   )
 }

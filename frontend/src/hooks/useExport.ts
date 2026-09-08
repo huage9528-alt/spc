@@ -37,7 +37,28 @@ export function useExport() {
     }
   }
 
-  return { exporting, exportData }
+  const exportPostData = async (
+    url: string,
+    body: Record<string, any>,
+    filename: string,
+  ) => {
+    setExporting(true)
+    try {
+      const token = useAuthStore.getState().currentToken
+      const res = await axios.post(url, body, {
+        responseType: 'blob',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      downloadBlob(res.data, filename)
+      message.success('导出成功')
+    } catch {
+      message.error('导出失败')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  return { exporting, exportData, exportPostData }
 }
 
 export default useExport

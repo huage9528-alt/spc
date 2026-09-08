@@ -1,66 +1,67 @@
 import { useEffect, useState } from 'react'
-import { List, Button, Dialog, Toast } from 'antd-mobile'
-import { UserOutline } from 'antd-mobile-icons'
+import { Dialog, Toast } from 'antd-mobile'
 import { authApi } from '@/services/api'
 import { useAuthStore } from '@/store/auth'
+import MIcon from '../components/MIcon'
 
 export default function MePage() {
   const user = useAuthStore((s) => s.currentUser)
   const logout = useAuthStore((s) => s.logout)
   const [bindTip, setBindTip] = useState('')
+  const [bound, setBound] = useState(false)
 
   useEffect(() => {
     authApi.getMe().then((res: any) => {
-      setBindTip(res.data?.wecom_user_id ? `已绑定企微（${res.data.wecom_user_id}）` : '未绑定企微（请在 PC 端个人中心绑定）')
-    }).catch(() => setBindTip(''))
+      const wecomId = res.data?.wecom_user_id
+      setBound(!!wecomId)
+      setBindTip(wecomId ? String(wecomId) : '')
+    }).catch(() => setBound(false))
   }, [])
 
+  const displayName = user && 'display_name' in user ? user.display_name || user.username : '-'
+  const roleName = user && 'role_name' in user ? user.role_name : ''
+
   return (
-    <div className="mobile-page mobile-page--with-tabbar">
-      <div className="mobile-card" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: '50%',
-            background: '#6366f1',
-            color: '#fff',
-            fontSize: 22,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}
-        >
-          <UserOutline />
-        </div>
+    <div className="m-page m-page--with-tabbar">
+      <div className="me-hero">
+        <div className="avatar">{(displayName || '?').slice(0, 1)}</div>
         <div>
-          <div style={{ fontSize: 17, fontWeight: 700, color: '#1e293b' }}>
-            {user && 'display_name' in user ? user.display_name || user.username : '-'}
-          </div>
-          <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
-            {user && 'role_name' in user ? user.role_name : ''}
-          </div>
+          <div className="nm">{displayName}</div>
+          {roleName && <div className="rl">{roleName}</div>}
         </div>
       </div>
 
-      <div className="mobile-card" style={{ padding: 0 }}>
-        <List>
-          <List.Item extra={user && 'username' in user ? user.username : '-'}>账号</List.Item>
-          <List.Item extra={bindTip || '…'}>企业微信</List.Item>
-        </List>
+      <div className="m-card">
+        <div className="info-row">
+          <span className="lab">账号</span>
+          <span className="val">{user && 'username' in user ? user.username : '-'}</span>
+        </div>
+        <div className="info-row">
+          <span className="lab">角色</span>
+          <span className="val">{roleName || '-'}</span>
+        </div>
+        <div className="info-row">
+          <span className="lab">企业微信</span>
+          <span className="val" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {bound ? (
+              <>
+                <span className="m-chip m-chip--done">已绑定</span>
+                {bindTip && <span style={{ fontSize: 11, color: 'var(--spc-text3)' }}>{bindTip}</span>}
+              </>
+            ) : (
+              <span style={{ fontSize: 13, color: 'var(--spc-text2)' }}>未绑定企微（请在 PC 端个人中心绑定）</span>
+            )}
+          </span>
+        </div>
       </div>
 
-      <Button
-        block
-        color="danger"
-        fill="outline"
-        size="large"
-        style={{ marginTop: 24 }}
+      <button
+        className="mbtn mbtn--danger-o mbtn--block"
+        style={{ margin: '14px 14px 0', width: 'calc(100% - 28px)' }}
         onClick={() => {
           Dialog.confirm({
             title: '退出登录',
-            content: '确定退出当前账号？',
+            content: '确定要退出当前账号吗？',
             onConfirm: () => {
               logout()
               window.location.replace('/m/login')
@@ -69,8 +70,8 @@ export default function MePage() {
           })
         }}
       >
-        退出登录
-      </Button>
+        <MIcon name="logout" size={18} />退出登录
+      </button>
     </div>
   )
 }

@@ -125,12 +125,13 @@ export default api
 
 // ============ Auth (基础数据与集成中心) ============
 export const authApi = {
-  login: (username: string, password: string, loginType: 'employee' | 'supplier' = 'employee', channel?: string) => {
+  login: (username: string, password: string, loginType: 'employee' | 'supplier' = 'employee', channel?: string, rememberMe?: boolean) => {
     const formData = new URLSearchParams()
     formData.append('username', username)
     formData.append('password', password)
     formData.append('login_type', loginType)
     if (channel) formData.append('channel', channel)
+    if (rememberMe) formData.append('remember_me', 'true')
     return api.post('/basicdata/auth/login', formData, {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       skipErrorToast: true,
@@ -281,6 +282,7 @@ export const materialApi = {
     check_date?: string
     remark?: string
     selected_products?: Array<{ product_code?: string | null; bom_no?: string | null }>
+    recent_days?: number
   }) =>
     api.post(`/materials/stock-check/from-order/${orderNo}`, data || {}),
   getRecentStockChecks: (params: Record<string, any> = {}) =>
@@ -289,6 +291,21 @@ export const materialApi = {
     api.get('/materials/stock-check/my-items', { params }),
   getStockCheckStats: (params: { check_type?: string; date_from?: string; date_to?: string; status?: string } = {}) =>
     api.get('/materials/stock-check/stats', { params }),
+  getStockCheckKpi: () => api.get('/materials/stock-check/kpi'),
+  getTaskStockCoverage: (params: {
+    start_date: string
+    end_date: string
+    status?: 'all' | 'checked' | 'unchecked'
+    keyword?: string
+    wh_id?: number
+    wh_ids?: string
+    unstocked?: boolean
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
+    include_sample?: boolean
+    page?: number
+    page_size?: number
+  }) => api.get('/materials/stock-check/task-coverage', { params }),
   getStockChecksByOrder: (orderNo: string) =>
     api.get(`/materials/stock-check/by-order/${orderNo}`),
   getStockCheck: (checkId: number) =>
@@ -317,6 +334,10 @@ export const materialApi = {
     api.post(`/materials/stock-check/${checkId}/complete`, { expected_version }),
   cancelStockCheck: (checkId: number, expected_version?: number) =>
     api.post(`/materials/stock-check/${checkId}/cancel`, { expected_version }),
+  getStockCheckWritebacks: (checkId: number) =>
+    api.get(`/materials/stock-check/${checkId}/writebacks`),
+  retryStockCheckWritebacks: (checkId: number) =>
+    api.post(`/materials/stock-check/${checkId}/writebacks/retry`),
   getMaterialHistory: (params: { material_id: number }) =>
     api.get('/materials/stock-check/material-history', { params }),
   listMaterialCandidates: (params: { keyword?: string; wh_id?: string | number; page?: number; page_size?: number } = {}) =>
@@ -327,6 +348,10 @@ export const materialApi = {
     date_from?: string
     date_to?: string
     check_type?: string
+    only_mine?: boolean
+    diff_only?: boolean
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
     page?: number
     page_size?: number
   } = {}) => api.get('/materials/stock-check/counted-ledger', { params }),
@@ -338,11 +363,14 @@ export const materialApi = {
     check_date?: string
     remark?: string
     co_checker_user_ids?: number[]
+    recent_days?: number
   }) => api.post('/materials/stock-check/from-materials', data),
   updateStockCheckCoCheckers: (checkId: number, co_checker_user_ids: number[], expected_version?: number) =>
     api.put(`/materials/stock-check/${checkId}/co-checkers`, { co_checker_user_ids, expected_version }),
-  refreshStockCheckBom: (checkId: number) =>
-    api.post(`/materials/stock-check/${checkId}/refresh-bom`),
+  refreshStockCheckBom: (checkId: number, recentDays?: number) =>
+    api.post(`/materials/stock-check/${checkId}/refresh-bom`, null, {
+      params: recentDays != null ? { recent_days: recentDays } : {},
+    }),
   refreshStockCheckWarehouses: (checkId: number) =>
     api.post(`/materials/stock-check/${checkId}/refresh-warehouses`),
   getCoCheckerCandidates: () =>
@@ -352,7 +380,29 @@ export const materialApi = {
   addStockCheckItems: (checkId: number, data: {
     material_ids?: number[]
     items?: Array<{ material_id: number; wh_id?: number | null }>
+    recent_days?: number
   }) => api.post(`/materials/stock-check/${checkId}/items`, data),
+  resolveStockCheckCode: (code: string, whId?: number | null) =>
+    api.get('/materials/stock-check/resolve-code', { params: { code, wh_id: whId ?? undefined } }),
+  listScanWarehouses: () => api.get('/materials/stock-check/scan-warehouses'),
+  quickCountStockCheck: (data: {
+    material_id: number
+    wh_id?: number | null
+    actual_qty: number
+  }) => api.post('/materials/stock-check/quick-count', data),
+  getTodayQuickCheck: () =>
+    api.get('/materials/stock-check/quick-count/today'),
+  removeQuickCountItem: (itemId: number) =>
+    api.delete(`/materials/stock-check/quick-count/items/${itemId}`),
+  importQuickCountExcel: (file: File, dates?: string[]) => {
+    const fd = new FormData(); fd.append('file', file)
+    if (dates?.length) fd.append('dates', dates.join(','))
+    return api.post('/materials/stock-check/quick-count/import', fd, { skipErrorToast: true })
+  },
+  previewQuickCountExcel: (file: File) => {
+    const fd = new FormData(); fd.append('file', file)
+    return api.post('/materials/stock-check/quick-count/import-preview', fd, { skipErrorToast: true })
+  },
   removeStockCheckItem: (itemId: number) =>
     api.delete(`/materials/stock-check/items/${itemId}`),
   // K3 盘盈盘亏单导入
@@ -395,6 +445,13 @@ export const materialApi = {
     api.put(`/materials/subcontract-orders/${id}/details/${detailId}`, data),
   deleteSubcontractOrderDetail: (id: number, detailId: number) =>
     api.delete(`/materials/subcontract-orders/${id}/details/${detailId}`),
+  // 报废物料库存查询（无状态查询工具；导出走 useExport 的 blob POST）
+  queryScrapInventory: (codes: string[]) =>
+    api.post('/materials/scrap-inventory/query', { codes }),
+  queryScrapInventoryFile: (file: File) => {
+    const fd = new FormData(); fd.append('file', file)
+    return api.post('/materials/scrap-inventory/query-file', fd, { skipErrorToast: true })
+  },
 }
 
 // ============ 供应商即时沟通 ============
@@ -626,6 +683,7 @@ export const statusDictApi = {
 // ============ 审计日志 (基础数据与集成中心) ============
 export const auditApi = {
   list: (params: Record<string, any>) => api.get('/basicdata/audit/logs', { params }),
+  stats: (params: Record<string, any> = {}) => api.get('/basicdata/audit/logs/stats', { params }),
 }
 
 // ============ Pilot ============
@@ -692,6 +750,7 @@ export const assistantApi = {
 // ============ 公告管理 (基础数据与集成中心) ============
 export const announcementApi = {
   list: (params: Record<string, any> = {}) => api.get('/basicdata/announcements', { params }),
+  stats: () => api.get('/basicdata/announcements/stats'),
   create: (data: Record<string, any>) => api.post('/basicdata/announcements', data),
   update: (id: number, data: Record<string, any>) => api.put(`/basicdata/announcements/${id}`, data),
   remove: (id: number) => api.delete(`/basicdata/announcements/${id}`),
@@ -710,6 +769,7 @@ export const notificationApi = {
 // ============ 用户管理 (基础数据与集成中心) ============
 export const userApi = {
   list: (params?: any) => api.get('/basicdata/users', { params }),
+  stats: () => api.get('/basicdata/users/stats'),
   roles: (params?: Record<string, any>) => api.get('/basicdata/users/roles', { params }),
   employeeOptions: (params?: { keyword?: string }) => api.get('/basicdata/users/employee-options', { params }),
   createRole: (data: { role_code: string; role_name: string; permissions?: Record<string, string[]> }) =>
@@ -784,6 +844,11 @@ export const wecomApi = {
   listDepartments: () =>
     api.get<WecomDepartment[], WecomDepartment[]>('/wecom/departments'),
   testConnection: () => api.post('/wecom/test-connection'),
+  jsapiConfig: (url: string) =>
+    api.get<
+      { appId: string; timestamp: number; nonceStr: string; signature: string; jsApiList: string[] },
+      { appId: string; timestamp: number; nonceStr: string; signature: string; jsApiList: string[] }
+    >('/wecom/jsapi-config', { params: { url } }),
 }
 
 

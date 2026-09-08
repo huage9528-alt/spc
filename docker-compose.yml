@@ -5,6 +5,7 @@ services:
       - "8000:8000"
     environment:
       TZ: Asia/Shanghai
+      SERVER_ID: ${SERVER_ID:-spc-dev}
       DATABASE_URL: ${DATABASE_URL}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       ERP_DB_URL: ${ERP_DB_URL}
@@ -12,6 +13,9 @@ services:
       ERP_SYNC_ENABLED: ${ERP_SYNC_ENABLED:-false}
       ERP_SYNC_BATCH_SIZE: ${ERP_SYNC_BATCH_SIZE}
       ERP_SYNC_DEFAULT_PASSWORD: ${ERP_SYNC_DEFAULT_PASSWORD}
+      # K3 账套分离：K3_DB=同步/读取(默认生产)；K3_WRITE_DB=回写目标(空则回落 K3_DB)
+      K3_DB: ${K3_DB:-k3sv.AIS20161019115614}
+      K3_WRITE_DB: ${K3_WRITE_DB:-}
       REDIS_URL: ${REDIS_URL}
       SECRET_KEY: ${SECRET_KEY}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
@@ -25,6 +29,8 @@ services:
       AI_DASHSCOPE_MODEL: ${AI_DASHSCOPE_MODEL}
       AI_REQUEST_TIMEOUT: ${AI_REQUEST_TIMEOUT:-30}
       UPPH_MATCH_MODE: ${UPPH_MATCH_MODE}
+      # 部署运维：deploy_agent 服务地址（compose 内网）
+      DEPLOY_AGENT_URL: ${DEPLOY_AGENT_URL:-http://deploy-agent:8901}
       # WeCom (企业微信)
       WECOM_CORP_ID: ${WECOM_CORP_ID:-}
       WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
@@ -42,6 +48,36 @@ services:
       #python init_database.py &&
     command: >
       sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  deploy-agent:
+    # 独立轻量镜像：docker CLI + git + agent 依赖（不承载业务后端）
+    build:
+      context: ./backend
+      dockerfile: deploy_agent/Dockerfile
+    image: spc-v2-deploy-agent:latest
+    environment:
+      TZ: Asia/Shanghai
+      DEPLOY_AGENT_HOST: 0.0.0.0
+      DEPLOY_AGENT_PORT: 8901
+      DEPLOY_AGENT_WORK_DIR: /opt/spc-v2
+      DEPLOY_AGENT_SOURCE_DIR: /opt/spc-v2/source
+      DEPLOY_AGENT_GIT_URL: ${DEPLOY_AGENT_GIT_URL:-}
+      DEPLOY_AGENT_GIT_BRANCH: ${DEPLOY_AGENT_GIT_BRANCH:-main}
+      DEPLOY_AGENT_JWT_SECRET: ${SECRET_KEY}
+      DEPLOY_AGENT_RETAIN_COUNT: ${DEPLOY_AGENT_RETAIN_COUNT:-5}
+      DEPLOY_AGENT_BACKEND_IMAGE: spc-v2-backend
+      DEPLOY_AGENT_FRONTEND_IMAGE: spc-v2-frontend
+      DEPLOY_AGENT_COMPOSE_FILE: docker-compose-prod.yml
+      # agent 与 backend/frontend 同 compose 网络：用服务名访问健康检查
+      DEPLOY_AGENT_BACKEND_PING_URL: http://backend:8000/api/v1/common/ping
+      DEPLOY_AGENT_FRONTEND_URL: http://frontend:80/
+    volumes:
+      # 宿主 docker daemon（agent 驱动构建/加载/清理）
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 工作目录：versions/ + current.txt + compose 快照（模拟生产布局）
+      - ./data/deploy:/opt/spc-v2
+    # 不对外暴露端口（仅 compose 内网 backend 访问）
+    # 不对外暴露端口（仅 compose 内网 backend 访问）
 
   frontend:
     build: ./frontend

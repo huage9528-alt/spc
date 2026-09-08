@@ -200,6 +200,8 @@ class ShipmentBoardItem(BaseModel):
     owner: Optional[str] = None
     shipping_status_desc: Optional[str] = None
     status: Optional[str] = None
+    is_done: bool = False
+    completed_date: Optional[date] = None
 
 
 class ShipmentBoardData(BaseModel):

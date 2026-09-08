@@ -8,10 +8,7 @@ TTL：5 分钟（兜底，即使失效机制出问题也不会缓存太久）
 import json
 import time
 import threading
-import redis.asyncio as redis
-from app.core.config import get_settings
-
-settings = get_settings()
+from app.core.redis_client import get_command_client, note_failure, note_success
 
 PAYLOAD_CACHE_PREFIX = "perm:payload:"
 PAYLOAD_CACHE_TTL = 5 * 60  # 5 分钟
@@ -22,10 +19,8 @@ _local_lock = threading.Lock()
 
 
 async def _get_redis():
-    try:
-        return redis.from_url(settings.REDIS_URL, decode_responses=True, socket_connect_timeout=2)
-    except Exception:
-        return None
+    """共享命令客户端（熔断开启时返回 None）。调用方不要 aclose。"""
+    return get_command_client()
 
 
 def _cache_key(user_id: int, channel: str, login_version: int) -> str:
@@ -62,18 +57,15 @@ async def get_cached_user_payload(user_id: int, channel: str, login_version: int
         return None
     try:
         raw = await client.get(key)
+        note_success()
         if not raw:
             return None
         data = json.loads(raw)
         _local_set(key, data)  # 回写进程内
         return data
     except Exception:
+        note_failure()
         return None
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
 
 
 async def set_cached_user_payload(user_id: int, channel: str, login_version: int, payload: dict) -> None:
@@ -91,13 +83,10 @@ async def set_cached_user_payload(user_id: int, channel: str, login_version: int
         return
     try:
         await client.setex(key, PAYLOAD_CACHE_TTL, json.dumps(safe, default=str))
+        note_success()
     except Exception:
-        pass
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
+        note_failure()
+    # client 为共享客户端，不 aclose
 
 
 async def invalidate_user_payload(user_id: int, channel: str | None = None) -> None:
@@ -119,10 +108,7 @@ async def invalidate_user_payload(user_id: int, channel: str | None = None) -> N
     try:
         async for key in client.scan_iter(match=redis_pattern, count=100):
             await client.delete(key)
+        note_success()
     except Exception:
-        pass
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
+        note_failure()
+    # client 为共享客户端，不 aclose

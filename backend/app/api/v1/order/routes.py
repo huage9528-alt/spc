@@ -40,6 +40,7 @@ SORTABLE_COLUMNS = {
     'order_no': SaleOrder.order_no,
     'order_qty': SaleOrder.order_qty,
     'order_amount': SaleOrder.order_amount,
+    'completed_qty': SaleOrder.completed_qty,
     'order_date': SaleOrder.order_date,
     'promised_date': SaleOrder.promised_date,
     'shipping_plan': SaleOrder.shipping_plan,
@@ -1324,7 +1325,7 @@ async def get_order_product_materials_view(
 ):
     items = await get_order_product_materials(db, order_no=order_no, line_no=line_no)
     if not items:
-        exists = await db.execute(select(SaleOrder.id).where(SaleOrder.order_no == order_no))
+        exists = await db.execute(select(SaleOrder.id).where(SaleOrder.order_no == order_no).limit(1))
         if not exists.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="订单不存在")
     return ResponseModel(data=items)
@@ -1341,7 +1342,7 @@ async def get_order_detail(
     q = select(SaleOrder).options(selectinload(SaleOrder.lines)).where(SaleOrder.order_no == order_no)
     if line_no:
         q = q.where(SaleOrder.line_no == line_no)
-    result = await db.execute(q)
+    result = await db.execute(q.order_by(SaleOrder.id.desc()).limit(1))
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="订单不存在")
@@ -1457,9 +1458,12 @@ async def create_order(
     current_user: dict = Depends(PermissionChecker("orders.list", "create")),
     db: AsyncSession = Depends(get_db),
 ):
-    exists = await db.execute(select(SaleOrder).where(SaleOrder.order_no == data.sale_order.order_no))
-    if exists.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="订单号已存在")
+    if data.sale_order.erp_id is not None:
+        exists = await db.execute(
+            select(SaleOrder.id).where(SaleOrder.erp_id == data.sale_order.erp_id).limit(1)
+        )
+        if exists.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="ERP订单ID已存在")
 
     order = SaleOrder(**data.sale_order.model_dump())
     db.add(order)
@@ -1481,7 +1485,7 @@ async def update_order(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(SaleOrder).where(SaleOrder.order_no == order_no)
+        select(SaleOrder).where(SaleOrder.order_no == order_no).order_by(SaleOrder.id.desc()).limit(1)
     )
     order = result.scalar_one_or_none()
     if not order:

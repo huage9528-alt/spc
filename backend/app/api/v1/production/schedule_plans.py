@@ -181,11 +181,7 @@ async def _is_token_blacklisted_fast(jti: str) -> tuple[bool, dict[str, object]]
             "source": "redis_error_backoff",
             "duration_ms": round((perf_counter() - blacklist_started_at) * 1000, 2),
         }
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
+    # client 为进程共享客户端(redis_client.get_command_client)，不能 aclose
 
 
 async def _check_production_schedule_permission_fast(

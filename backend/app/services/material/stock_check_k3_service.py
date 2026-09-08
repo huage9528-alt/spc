@@ -32,7 +32,10 @@ from app.services.material.stock_check_service import _gen_check_no, _next_seq_f
 
 logger = logging.getLogger(__name__)
 
-K3_DB = "k3sv.AIS20161019115614"
+# 同步/读取账套(默认生产 k3sv.AIS20161019115614), 经 K3_DB 环境变量切换。
+# 回写账套独立于此值, 见 stock_check_k3_writeback_service.K3_WRITE_DB。
+# settings 为进程级缓存, 重启生效。
+K3_DB = get_settings().K3_DB
 
 TRAN_TYPE_GAIN = 40
 TRAN_TYPE_TRANSFER_LOSS = 41

@@ -122,6 +122,7 @@ async def import_inspection_csv(filepath: str, db: AsyncSession) -> dict:
 
         result = await db.execute(
             select(SaleOrder).where(SaleOrder.order_no == order_no, SaleOrder.line_no == '10')
+            .order_by(SaleOrder.id.desc()).limit(1)
         )
         existing = result.scalar_one_or_none()
 

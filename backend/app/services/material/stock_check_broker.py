@@ -3,7 +3,9 @@
 publish_event: 供 service 层在写库后调用,发到 Redis pub/sub。
 subscribe_stream: 供 SSE 端点使用,长连接订阅 channel 并 yield SSE 帧。
 
-Redis 不可用时 publish 静默丢弃、subscribe 降级为只发 snapshot + 心跳,不抛异常。
+Redis 不可用时 publish 静默丢弃；subscribe 降级为只发 snapshot + 心跳,不抛异常、
+不结束流（流一旦结束,浏览器 EventSource 会每 3s 重连重建快照,形成风暴）。
+命令走共享客户端(熔断+socket_timeout),订阅用独立连接(读等待由 get_message(timeout) 限时)。
 """
 from __future__ import annotations
 
@@ -14,9 +16,12 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import AsyncGenerator, Optional
 
-import redis.asyncio as redis
-
-from app.core.config import get_settings
+from app.core.redis_client import (
+    get_command_client,
+    make_pubsub_client,
+    note_failure,
+    note_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +42,6 @@ def _json_default(o):
     raise TypeError(f"not serializable: {type(o)}")
 
 
-def _make_client() -> Optional[redis.Redis]:
-    try:
-        return redis.from_url(
-            get_settings().REDIS_URL,
-            decode_responses=True,
-            socket_connect_timeout=2,
-        )
-    except Exception:
-        return None
-
-
 async def publish_event(
     check_id: int,
     event_type: str,
@@ -55,7 +49,7 @@ async def publish_event(
     origin_user_id: Optional[int],
 ) -> None:
     """发事件到 Redis channel。Redis 不可用则静默丢弃(warn)。"""
-    client = _make_client()
+    client = get_command_client()
     if client is None:
         logger.warning("stock_check_broker.publish: redis unavailable, event=%s dropped", event_type)
         return
@@ -70,13 +64,10 @@ async def publish_event(
             CHANNEL_FMT.format(check_id=check_id),
             json.dumps(envelope, default=_json_default, ensure_ascii=False),
         )
+        note_success()
     except Exception as e:
+        note_failure()
         logger.warning("stock_check_broker.publish failed: %s", e)
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
 
 
 def _sse_chunk(event_type: str, payload: dict, origin_user_id: Optional[int] = None) -> str:
@@ -91,7 +82,7 @@ def _sse_chunk(event_type: str, payload: dict, origin_user_id: Optional[int] = N
 
 async def set_presence(check_id: int, user_id: int, name: str, item_id: Optional[int]) -> None:
     """记录某用户正在编辑 item_id,写 Redis(TTL 60s)并广播 presence 事件。"""
-    client = _make_client()
+    client = get_command_client()
     if client is None:
         logger.warning("[presence] set_presence: redis unavailable")
         return
@@ -110,19 +101,16 @@ async def set_presence(check_id: int, user_id: int, name: str, item_id: Optional
             CHANNEL_FMT.format(check_id=check_id),
             json.dumps({"type": "presence", "payload": {"user_id": user_id, "name": name, "item_id": item_id}, "origin_user_id": user_id, "ts": datetime.utcnow().isoformat()}, default=_json_default, ensure_ascii=False),
         )
+        note_success()
         logger.info("[presence] published: check=%s user=%s item=%s", check_id, user_id, item_id)
     except Exception as e:
+        note_failure()
         logger.warning("[presence] set_presence failed: %s", e)
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
 
 
 async def clear_presence(check_id: int, user_id: int, name: Optional[str]) -> None:
     """清除某用户的编辑存在感并广播 idle。"""
-    client = _make_client()
+    client = get_command_client()
     if client is None:
         return
     try:
@@ -136,18 +124,15 @@ async def clear_presence(check_id: int, user_id: int, name: Optional[str]) -> No
             CHANNEL_FMT.format(check_id=check_id),
             json.dumps({"type": "presence", "payload": {"user_id": user_id, "name": name, "item_id": None}, "origin_user_id": user_id, "ts": datetime.utcnow().isoformat()}, default=_json_default, ensure_ascii=False),
         )
+        note_success()
     except Exception as e:
+        note_failure()
         logger.warning("clear_presence failed: %s", e)
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
 
 
 async def get_presence_map(check_id: int) -> list:
     """读取当前 check 的存在感列表(用于 snapshot)。自动清理已过期的 idx 项。"""
-    client = _make_client()
+    client = get_command_client()
     if client is None:
         return []
     try:
@@ -169,15 +154,12 @@ async def get_presence_map(check_id: int) -> list:
                 expired.append(uid)
         for uid in expired:
             await client.srem(idx, uid)
+        note_success()
         return result
     except Exception as e:
+        note_failure()
         logger.warning("get_presence_map failed: %s", e)
         return []
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
 
 
 async def build_snapshot_payload(check_id: int, db, current_user: dict) -> Optional[dict]:
@@ -213,6 +195,20 @@ async def build_snapshot_payload(check_id: int, db, current_user: dict) -> Optio
     return out_dict
 
 
+async def _close_pubsub(pubsub, client) -> None:
+    """释放订阅连接与专属客户端。"""
+    if pubsub is not None:
+        try:
+            await pubsub.aclose()
+        except Exception:
+            pass
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
 async def subscribe_stream(
     check_id: int,
     current_user: dict,
@@ -221,6 +217,8 @@ async def subscribe_stream(
 
     快照用短命会话构建后立刻归还,订阅循环只走 Redis:流可活几小时,
     持有 db 会话会占住连接池的一条连接。
+    订阅失败/订阅中断一律降级为心跳模式保活流,绝不让流异常结束:
+    流结束会触发浏览器 EventSource 3s 重连风暴(每轮重建快照)。
     """
     from app.core.database import AsyncSessionLocal
 
@@ -231,27 +229,38 @@ async def subscribe_stream(
     yield _sse_chunk("snapshot", snapshot)
 
     channel = CHANNEL_FMT.format(check_id=check_id)
-    client = _make_client()
-    if client is None:
-        logger.warning("stock_check_broker.subscribe: redis unavailable, heartbeat-only")
-        try:
-            while True:
+    pubsub = None
+    client = None
+    try:
+        client = make_pubsub_client()
+        pubsub = client.pubsub()
+        await pubsub.subscribe(channel)
+    except asyncio.CancelledError:
+        await _close_pubsub(pubsub, client)
+        raise
+    except Exception as e:
+        logger.warning("stock_check_broker.subscribe failed (%s), SSE 降级为心跳模式", e)
+        await _close_pubsub(pubsub, client)
+        pubsub = None
+        client = None
+
+    try:
+        degraded = pubsub is None
+        while True:
+            if degraded:
                 await asyncio.sleep(HEARTBEAT_SEC)
                 yield ": keep-alive\n\n"
-        except asyncio.CancelledError:
-            return
-        return
-
-    pubsub = client.pubsub()
-    try:
-        await pubsub.subscribe(channel)
-        while True:
+                continue
             try:
                 msg = await pubsub.get_message(
                     ignore_subscribe_messages=True, timeout=HEARTBEAT_SEC
                 )
             except asyncio.CancelledError:
                 break
+            except Exception as e:
+                logger.warning("stock_check_broker.subscribe loop error (%s), 降级为心跳模式", e)
+                degraded = True
+                continue
             if msg is None:
                 yield ": keep-alive\n\n"
                 continue
@@ -269,8 +278,6 @@ async def subscribe_stream(
             )
     except asyncio.CancelledError:
         pass
-    except Exception as e:
-        logger.warning("stock_check_broker.subscribe loop error: %s", e)
     finally:
         # 断开连接:清除该用户的存在感并广播 idle
         uid = current_user.get("user_id") if current_user else None
@@ -280,15 +287,4 @@ async def subscribe_stream(
                 await clear_presence(check_id, int(uid), uname)
             except Exception:
                 pass
-        try:
-            await pubsub.unsubscribe(channel)
-        except Exception:
-            pass
-        try:
-            await pubsub.close()
-        except Exception:
-            pass
-        try:
-            await client.aclose()
-        except Exception:
-            pass
+        await _close_pubsub(pubsub, client)

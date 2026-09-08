@@ -747,11 +747,22 @@ class ERPSyncService:
                     row_dict = self._map_row(row, mapping)
                     order_no = str(row_dict.get("order_no", "")).strip()
                     line_no = str(row_dict.get("line_no", "")).strip()
+                    raw_erp_id = row_dict.get("erp_id")
+                    try:
+                        erp_id = int(raw_erp_id) if raw_erp_id not in (None, "") else None
+                    except (TypeError, ValueError):
+                        erp_id = None
                     row_dict["order_no"] = order_no
                     row_dict["line_no"] = line_no
 
                     if not order_no:
                         stats["skipped"] += 1
+                        await self.spc_db.commit()
+                        continue
+
+                    if erp_id is None:
+                        stats["skipped"] += 1
+                        logger.warning(f"订单缺少 erp_id，跳过: {order_no}")
                         await self.spc_db.commit()
                         continue
 
@@ -766,7 +777,7 @@ class ERPSyncService:
 
                     result = await self.spc_db.execute(
                         select(SaleOrder).where(
-                            SaleOrder.order_no == order_no,
+                            SaleOrder.erp_id == erp_id,
                         )
                     )
                     existing = result.scalar_one_or_none()
@@ -871,9 +882,18 @@ class ERPSyncService:
                         row_dict["line_no"] = line_no
 
                     # 查找关联的 SaleOrder 以获取 sale_order_id
-                    sale_order_result = await self.spc_db.execute(
-                        select(SaleOrder).where(SaleOrder.order_no == order_no).limit(1)
-                    )
+                    # 重号场景: 明细行带 erp_id(订单头主键)则精确匹配, 否则按 order_no 取最新一张
+                    raw_header_erp_id = row_dict.get("erp_id")
+                    try:
+                        header_erp_id = int(raw_header_erp_id) if raw_header_erp_id not in (None, "") else None
+                    except (TypeError, ValueError):
+                        header_erp_id = None
+                    header_query = select(SaleOrder).where(SaleOrder.order_no == order_no)
+                    if header_erp_id is not None:
+                        header_query = header_query.where(SaleOrder.erp_id == header_erp_id)
+                    else:
+                        header_query = header_query.order_by(SaleOrder.id.desc())
+                    sale_order_result = await self.spc_db.execute(header_query.limit(1))
                     sale_order = sale_order_result.scalar_one_or_none()
                     if not sale_order:
                         stats["skipped"] += 1
@@ -1051,7 +1071,7 @@ class ERPSyncService:
                             select(SaleOrder).where(
                                 SaleOrder.order_no == order_no,
                                 SaleOrder.line_no == line_no,
-                            )
+                            ).limit(1)
                         )
                         if not order_exists.scalar_one_or_none():
                             stats["skipped"] += 1

@@ -124,6 +124,25 @@ class SupplierOut(SupplierBase):
     model_config = {"from_attributes": True}
 
 
+class SupplierMatchRequest(BaseModel):
+    names: List[str]
+
+
+class SupplierMatchItem(BaseModel):
+    input_name: str
+    supplier_id: int
+    supplier_name: str
+    supplier_code: Optional[str] = None
+    supplier_short: Optional[str] = None
+    erp_supply_id: Optional[int] = None
+    ambiguous: bool = False
+
+
+class SupplierMatchResult(BaseModel):
+    matched: List[SupplierMatchItem]
+    unmatched: List[str]
+
+
 # ── Material ──
 class MaterialBase(BaseModel):
     erp_material_id: int
@@ -169,6 +188,10 @@ class MaterialUpdate(BaseModel):
 
 class MaterialOut(MaterialBase):
     id: int
+    data_source: Optional[str] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+    supplier_name: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -190,6 +213,8 @@ class MaterialTreeNode(BaseModel):
     supplier_id: Optional[int] = None
     order_unit_price: Optional[Decimal] = None
     last_outbound_date: Optional[date] = None
+    data_source: Optional[str] = None
+    erp_sync_flag: int = 0
     children: List["MaterialTreeNode"] = []
 
     model_config = {"from_attributes": True}

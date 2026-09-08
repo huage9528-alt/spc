@@ -70,3 +70,26 @@ async def export_issues(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=issues.xlsx"},
     )
+
+
+@router.get("/materials")
+async def export_materials(
+    keyword: str | None = None,
+    material_type: str | None = None,
+    status: str | None = None,
+    material_property: str | None = None,
+    data_source: str | None = None,
+    current_user: dict = Depends(PermissionChecker("basicdata.data.materials", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """物料主数据导出（与列表同款筛选）"""
+    service = ExportService(db)
+    output = await service.export_materials(
+        keyword=keyword, material_type=material_type, status=status,
+        material_property=material_property, data_source=data_source,
+    )
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=materials.xlsx"},
+    )

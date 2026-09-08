@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from fastapi import APIRouter, Depends, Form, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -72,6 +72,7 @@ async def login(
         form: OAuth2PasswordRequestForm = Depends(),
         login_type: str = Form("employee"),
         channel: str = Form("web"),
+        remember_me: bool = Form(False),
         db: AsyncSession = Depends(get_db),
 ):
     login_type = (login_type or "employee").strip().lower()
@@ -136,7 +137,8 @@ async def login(
         token_payload["supplier_code"] = supplier_code
 
     token = create_access_token(
-        data=token_payload
+        data=token_payload,
+        expires_delta=timedelta(days=7) if remember_me else None,
     )
 
     await db.commit()

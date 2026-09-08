@@ -1,0 +1,270 @@
+/* ============================================================
+   供应链驾驶舱 · 复刻原型 docs/prototype/redesign/dashboard.html
+   所有样式作用于 .spc-dash 作用域，不污染全局
+   ============================================================ */
+
+.spc-dash {
+  /* ---- 品牌色阶 (indigo) ---- */
+  --brand-50: #eef0fe;
+  --brand-100: #e0e2fd;
+  --brand-200: #c6cbfa;
+  --brand-300: #a3a9f5;
+  --brand-400: #7a7de6;
+  --brand-500: #5b5bd6;
+  --brand-600: #4c4dc2;
+  --brand-700: #3f3f9f;
+  --brand-800: #34347e;
+  --brand-900: #2a2a63;
+
+  /* ---- 语义色 ---- */
+  --success: #16a34a;  --success-bg: #f0fdf4;  --success-bd: #bbf7d0;
+  --warning: #d97706;  --warning-bg: #fffbeb;  --warning-bd: #fde68a;
+  --danger:  #dc2626;  --danger-bg:  #fef2f2;  --danger-bd:  #fecaca;
+  --info:    #0284c7;  --info-bg:    #f0f9ff;  --info-bd:    #bae6fd;
+
+  /* ---- 风险四级 ---- */
+  --risk-high: #dc2626;    --risk-high-bg: #fef2f2;
+  --risk-midhigh: #ea580c; --risk-midhigh-bg: #fff7ed;
+  --risk-mid: #d97706;     --risk-mid-bg: #fffbeb;
+  --risk-low: #16a34a;     --risk-low-bg: #f0fdf4;
+
+  /* ---- 中性色阶 (slate) ---- */
+  --gray-50: #f8fafc;  --gray-100: #f1f5f9; --gray-200: #e2e8f0;
+  --gray-300: #cbd5e1; --gray-400: #94a3b8; --gray-500: #64748b;
+  --gray-600: #475569; --gray-700: #334155; --gray-800: #1e293b;
+  --gray-900: #0f172a;
+
+  /* ---- 圆角 ---- */
+  --r-sm: 6px; --r-md: 8px; --r-lg: 10px; --r-full: 999px;
+
+  /* ---- 阴影 ---- */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, .04);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, .08);
+
+  /* ---- 表面 ---- */
+  --bg: var(--gray-50);
+  --surface: #ffffff;
+  --border: var(--gray-200);
+  --text-1: var(--gray-900);
+  --text-2: var(--gray-600);
+  --text-3: var(--gray-400);
+
+  font-family: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: calc(13px * var(--font-size-scale, 1));
+  color: var(--text-1);
+  line-height: 1.5;
+}
+
+.spc-dash * { box-sizing: border-box; }
+
+/* ---------- 卡片 ---------- */
+.spc-dash .card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+.spc-dash .card-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px; border-bottom: 1px solid var(--gray-100);
+}
+.spc-dash .card-head h3 { font-size: calc(14px * var(--font-size-scale, 1)); font-weight: 600; margin: 0; }
+.spc-dash .card-head .hint { font-size: calc(12px * var(--font-size-scale, 1)); color: var(--text-3); }
+.spc-dash .card-head .more { margin-left: auto; font-size: calc(12px * var(--font-size-scale, 1)); color: var(--text-3); cursor: pointer; }
+.spc-dash .card-head .more:hover { color: var(--brand-600); }
+.spc-dash .card-body { padding: 16px; }
+.spc-dash .card-body.p0 { padding: 0; }
+
+/* ---------- stat 统计卡 ---------- */
+.spc-dash .stat-card {
+  display: flex; gap: 12px; align-items: center;
+  padding: 14px 16px;
+  position: relative; overflow: hidden;
+}
+.spc-dash .stat-card::before {
+  content: ""; position: absolute; left: 0; top: 12px; bottom: 12px;
+  width: 3px; border-radius: 0 3px 3px 0;
+  background: var(--accent, var(--brand-500));
+}
+.spc-dash .stat-icon {
+  width: 36px; height: 36px; border-radius: var(--r-md);
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-bg, var(--brand-50));
+  color: var(--accent, var(--brand-500));
+  flex-shrink: 0;
+}
+.spc-dash .stat-icon svg { width: 18px; height: 18px; }
+.spc-dash .stat-main .label { font-size: calc(12px * var(--font-size-scale, 1)); color: var(--text-3); }
+.spc-dash .stat-main .value {
+  font-size: calc(24px * var(--font-size-scale, 1)); font-weight: 650; letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums; line-height: 1.25;
+}
+.spc-dash .stat-main .value small { font-size: calc(13px * var(--font-size-scale, 1)); font-weight: 500; color: var(--text-3); margin-left: 2px; }
+.spc-dash .stat-main .delta { font-size: calc(11.5px * var(--font-size-scale, 1)); font-weight: 500; display: inline-flex; align-items: center; gap: 2px; }
+.spc-dash .delta.up { color: var(--success); }
+.spc-dash .delta.down { color: var(--danger); }
+.spc-dash .delta .bad { color: var(--danger); }
+.spc-dash .delta .warn { color: var(--warning); }
+.spc-dash .delta.flat { color: var(--text-3); }
+
+/* ---------- 按钮 ---------- */
+.spc-dash .btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 32px; padding: 0 14px;
+  border-radius: var(--r-md);
+  font-size: calc(13px * var(--font-size-scale, 1)); font-family: inherit; font-weight: 500;
+  border: 1px solid transparent; cursor: pointer;
+  white-space: nowrap; transition: background .12s, border-color .12s;
+}
+.spc-dash .btn svg { width: 14px; height: 14px; }
+.spc-dash .btn-sm { height: 28px; padding: 0 10px; font-size: calc(12px * var(--font-size-scale, 1)); }
+.spc-dash .btn-secondary { background: var(--surface); color: var(--gray-700); border-color: var(--border); }
+.spc-dash .btn-secondary:hover { background: var(--gray-50); border-color: var(--gray-300); }
+
+.spc-dash .icon-btn {
+  width: 30px; height: 30px; border-radius: var(--r-md);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-2); cursor: pointer; position: relative;
+  border: 1px solid transparent; background: none;
+}
+.spc-dash .icon-btn:hover { background: var(--gray-100); }
+.spc-dash .icon-btn svg { width: 16px; height: 16px; }
+.spc-dash .icon-btn.spinning svg { animation: spc-dash-rotate 1s linear infinite; }
+@keyframes spc-dash-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* ---------- 标签 ---------- */
+.spc-dash .tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 20px; padding: 0 8px;
+  border-radius: var(--r-sm);
+  font-size: calc(11.5px * var(--font-size-scale, 1)); font-weight: 500;
+  white-space: nowrap;
+}
+.spc-dash .tag .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+
+.spc-dash .tag-risk-high { color: var(--risk-high); background: var(--risk-high-bg); }
+.spc-dash .tag-risk-midhigh { color: var(--risk-midhigh); background: var(--risk-midhigh-bg); }
+.spc-dash .tag-risk-mid { color: var(--risk-mid); background: var(--risk-mid-bg); }
+.spc-dash .tag-risk-low { color: var(--risk-low); background: var(--risk-low-bg); }
+.spc-dash .tag-risk-none { color: var(--gray-500); background: var(--gray-100); }
+.spc-dash .tag-risk-blue { color: var(--info); background: var(--info-bg); }
+
+/* ---------- 进度条 ---------- */
+.spc-dash .progress {
+  height: 6px; border-radius: var(--r-full);
+  background: var(--gray-200); overflow: hidden; min-width: 48px;
+}
+.spc-dash .progress > i {
+  display: block; height: 100%; border-radius: var(--r-full);
+  background: var(--brand-500);
+}
+.spc-dash .progress > .v-good { background: var(--success); }
+.spc-dash .progress > .v-mid { background: var(--warning); }
+.spc-dash .progress > .v-bad { background: var(--danger); }
+
+/* ---------- 表格 ---------- */
+.spc-dash .tbl-wrap { overflow-x: auto; }
+.spc-dash table.tbl { width: 100%; border-collapse: collapse; font-size: calc(12.5px * var(--font-size-scale, 1)); }
+.spc-dash .tbl th {
+  text-align: left; font-size: calc(11px * var(--font-size-scale, 1)); font-weight: 500;
+  color: var(--gray-500); letter-spacing: .03em;
+  background: var(--gray-50);
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.spc-dash .tbl td {
+  padding: 8px 12px; border-bottom: 1px solid var(--gray-100);
+  color: var(--text-2); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.spc-dash .tbl tbody tr { transition: background .1s; }
+.spc-dash .tbl tbody tr:hover { background: #f4f6fb; }
+.spc-dash .tbl tbody tr:hover .row-actions { opacity: 1; }
+.spc-dash .tbl .strong { color: var(--text-1); font-weight: 500; }
+.spc-dash .tbl .num { text-align: right; }
+.spc-dash .tbl th.num { text-align: right; }
+.spc-dash .tbl .mono { font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+
+.spc-dash .row-actions { display: inline-flex; gap: 2px; opacity: 0; transition: opacity .1s; }
+.spc-dash .row-actions a, .spc-dash .row-actions .link-btn {
+  padding: 2px 7px; border-radius: 5px;
+  font-size: calc(12px * var(--font-size-scale, 1)); color: var(--text-2);
+  cursor: pointer; background: none; border: none; font-family: inherit;
+}
+.spc-dash .row-actions a:hover, .spc-dash .row-actions .link-btn:hover { background: var(--gray-100); color: var(--brand-600); }
+
+.spc-dash tr.aggregate td {
+  background: var(--gray-50); border-top: 1px solid var(--border);
+  color: var(--text-1); font-weight: 600;
+  border-bottom: none;
+}
+.spc-dash tr.aggregate .lbl { color: var(--gray-500); font-weight: 500; }
+
+.spc-dash .tbl-empty { padding: 48px 0; text-align: center; color: var(--text-3); }
+.spc-dash .tbl-empty p { font-size: calc(13px * var(--font-size-scale, 1)); margin: 0; }
+
+/* ---------- Tabs（自定义，替代 AntD Tabs） ---------- */
+.spc-dash .tabs { display: flex; gap: 2px; align-items: center; }
+.spc-dash .tab {
+  padding: 9px 14px; font-size: calc(13px * var(--font-size-scale, 1)); color: var(--text-2);
+  cursor: pointer; position: relative;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.spc-dash .tab:hover { color: var(--text-1); }
+.spc-dash .tab.active { color: var(--brand-600); font-weight: 600; }
+.spc-dash .tab.active::after {
+  content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px;
+  height: 2px; border-radius: 2px; background: var(--brand-500);
+}
+.spc-dash .tab .n {
+  font-size: calc(10.5px * var(--font-size-scale, 1)); padding: 0 6px; line-height: 16px;
+  background: var(--gray-100); border-radius: var(--r-full); color: var(--gray-500);
+  font-variant-numeric: tabular-nums;
+}
+.spc-dash .tab.active .n { background: var(--brand-50); color: var(--brand-600); }
+
+/* ---------- 工具条 ---------- */
+.spc-dash .toolbar { margin-left: auto; display: flex; gap: 10px; align-items: center; padding: 6px 8px 6px 0; }
+.spc-dash .toolbar .meta { font-size: calc(11.5px * var(--font-size-scale, 1)); color: var(--text-3); }
+
+/* ---------- 网格 ---------- */
+.spc-dash .grid { display: grid; gap: 12px; }
+.spc-dash .g4 { grid-template-columns: repeat(4, 1fr); }
+.spc-dash .g2-1 { grid-template-columns: 2fr 1fr; }
+.spc-dash .mt12 { margin-top: 12px; }
+.spc-dash .mb12 { margin-bottom: 12px; }
+
+@media (max-width: 1200px) {
+  .spc-dash .g4 { grid-template-columns: repeat(2, 1fr); }
+  .spc-dash .g2-1 { grid-template-columns: 1fr; }
+}
+
+/* ---------- 图例 ---------- */
+.spc-dash .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: calc(12px * var(--font-size-scale, 1)); color: var(--text-2); }
+.spc-dash .legend i {
+  width: 8px; height: 8px; border-radius: 2px;
+  display: inline-block; margin-right: 5px; vertical-align: 0;
+}
+.spc-dash .legend b { font-variant-numeric: tabular-nums; color: var(--text-1); font-weight: 500; }
+
+/* ---------- 待处理事项 ---------- */
+.spc-dash .todo-list .row {
+  display: flex; align-items: center; gap: 10px; padding: 9px 0;
+  border-bottom: 1px solid var(--gray-100); cursor: pointer;
+  color: inherit; text-decoration: none;
+}
+.spc-dash .todo-list .row:last-child { border-bottom: none; padding-bottom: 2px; }
+.spc-dash .todo-list .row:hover .name { color: var(--brand-600); }
+.spc-dash .todo-list .ico {
+  width: 28px; height: 28px; border-radius: 7px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.spc-dash .todo-list .name { font-size: calc(13px * var(--font-size-scale, 1)); color: var(--text-1); }
+.spc-dash .todo-list .desc { font-size: calc(11px * var(--font-size-scale, 1)); color: var(--text-3); }
+.spc-dash .todo-list .n { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+.spc-dash .todo-list .n.hot { color: var(--danger); }
+
+/* ---------- 图表 ---------- */
+.spc-dash .chart-note { font-size: calc(11px * var(--font-size-scale, 1)); color: var(--text-3); }
+.spc-dash .chart-svg text { font-family: inherit; }

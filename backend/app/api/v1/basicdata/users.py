@@ -145,7 +145,9 @@ async def list_users(
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
     role_code: Optional[str] = None,
+    user_type: Optional[str] = Query(None, description="用户类型筛选：employee=内部员工 / supplier=供应商账号"),
     is_active: Optional[bool] = None,
+    is_default_password: Optional[bool] = Query(None, description="是否仍为默认密码"),
     keyword: Optional[str] = None,
     org_name: Optional[str] = None,
     position_name: Optional[str] = None,
@@ -182,8 +184,14 @@ async def list_users(
         codes = [c.strip() for c in role_code.split(",") if c.strip()]
         if codes:
             query = query.where(SysRole.role_code.in_(codes))
+    if user_type == "employee":
+        query = query.where(SysRole.role_code != "supplier")
+    elif user_type == "supplier":
+        query = query.where(SysRole.role_code == "supplier")
     if is_active is not None:
         query = query.where(SysUser.is_active == is_active)
+    if is_default_password is not None:
+        query = query.where(SysUser.is_default_password == is_default_password)
     if org_name:
         names = [n.strip() for n in org_name.split(",") if n.strip()]
         if names:
@@ -225,10 +233,6 @@ async def list_users(
     result = await db.execute(query.order_by(*order_clauses).offset(offset).limit(page_size))
     rows = result.all()
 
-    # 通过校验数据库密码哈希判断是否为默认密码
-    settings = get_settings()
-    default_pwd = settings.ERP_SYNC_DEFAULT_PASSWORD
-
     return ResponseModel(data={
         "items": [
             {
@@ -247,7 +251,7 @@ async def list_users(
                 "supplier_name": user.supplier_name,
                 "wecom_user_id": user.wecom_user_id,
                 "is_active": user.is_active,
-                "is_default_password": verify_password(default_pwd, user.hashed_password),
+                "is_default_password": bool(user.is_default_password),
                 "last_login_time": user.last_login_time.strftime("%Y-%m-%d %H:%M") if user.last_login_time else None,
                 "created_at": user.created_at.strftime("%Y-%m-%d %H:%M") if user.created_at else None,
                 "updated_at": user.updated_at.strftime("%Y-%m-%d %H:%M") if user.updated_at else None,
@@ -258,6 +262,36 @@ async def list_users(
     })
 
 
+# ---------- 用户统计（KPI 带 / 筛选 chips 计数） ----------
+@router.get("/stats", response_model=ResponseModel[dict])
+async def user_stats(
+    current_user: dict = Depends(PermissionChecker("users", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    base_q = (
+        select(
+            func.count(SysUser.id).label("total"),
+            func.count().filter(SysUser.is_active.is_(True)).label("active"),
+            func.count().filter(SysRole.role_code == "supplier").label("suppliers"),
+            func.count().filter(SysUser.is_default_password.is_(True)).label("default_password"),
+            func.count().filter(SysUser.wecom_user_id.is_(None)).label("wecom_unbound"),
+        )
+        .join(SysRole, SysUser.role_id == SysRole.id)
+    )
+    row = (await db.execute(base_q)).one()
+    total = row.total or 0
+    suppliers = row.suppliers or 0
+    return ResponseModel(data={
+        "total": total,
+        "active": row.active or 0,
+        "disabled": total - (row.active or 0),
+        "employees": total - suppliers,
+        "suppliers": suppliers,
+        "default_password": row.default_password or 0,
+        "wecom_unbound": row.wecom_unbound or 0,
+    })
+
+
 @router.get("/export")
 async def export_users(
     format: str = Query("xlsx", pattern="^(xlsx|csv)$"),
@@ -265,7 +299,9 @@ async def export_users(
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
     role_code: Optional[str] = None,
+    user_type: Optional[str] = Query(None, description="用户类型筛选：employee=内部员工 / supplier=供应商账号"),
     is_active: Optional[bool] = None,
+    is_default_password: Optional[bool] = Query(None, description="是否仍为默认密码"),
     keyword: Optional[str] = None,
     org_name: Optional[str] = None,
     position_name: Optional[str] = None,
@@ -298,8 +334,14 @@ async def export_users(
         codes = [c.strip() for c in role_code.split(",") if c.strip()]
         if codes:
             query = query.where(SysRole.role_code.in_(codes))
+    if user_type == "employee":
+        query = query.where(SysRole.role_code != "supplier")
+    elif user_type == "supplier":
+        query = query.where(SysRole.role_code == "supplier")
     if is_active is not None:
         query = query.where(SysUser.is_active == is_active)
+    if is_default_password is not None:
+        query = query.where(SysUser.is_default_password == is_default_password)
     if org_name:
         names = [n.strip() for n in org_name.split(",") if n.strip()]
         if names:
@@ -343,10 +385,6 @@ async def export_users(
     if invalid_columns:
         raise HTTPException(status_code=400, detail=f"无效导出字段: {', '.join(invalid_columns)}")
 
-    # 通过校验数据库密码哈希判断是否为默认密码
-    settings = get_settings()
-    default_pwd = settings.ERP_SYNC_DEFAULT_PASSWORD
-
     export_rows = []
     for user, role, employee, position, org in rows:
         export_rows.append({
@@ -359,7 +397,7 @@ async def export_users(
             "role_name": role.role_name,
             "supplier_name": user.supplier_name or "",
             "is_active": "启用" if user.is_active else "停用",
-            "is_default_password": "是" if verify_password(default_pwd, user.hashed_password) else "否",
+            "is_default_password": "是" if user.is_default_password else "否",
             "last_login_time": user.last_login_time.strftime("%Y-%m-%d %H:%M") if user.last_login_time else "",
             "created_at": user.created_at.strftime("%Y-%m-%d %H:%M") if user.created_at else "",
             "updated_at": user.updated_at.strftime("%Y-%m-%d %H:%M") if user.updated_at else "",
@@ -843,7 +881,9 @@ async def delete_user(
 # ---------- 批量操作 Schemas ----------
 class BatchFilterParams(BaseModel):
     role_code: Optional[str] = None
+    user_type: Optional[str] = None
     is_active: Optional[bool] = None
+    is_default_password: Optional[bool] = None
     keyword: Optional[str] = None
     org_name: Optional[str] = None
     position_name: Optional[str] = None
@@ -891,8 +931,14 @@ def _build_filtered_user_ids(
             codes = [c.strip() for c in flt.role_code.split(",") if c.strip()]
             if codes:
                 query = query.where(SysRole.role_code.in_(codes))
+        if flt.user_type == "employee":
+            query = query.where(SysRole.role_code != "supplier")
+        elif flt.user_type == "supplier":
+            query = query.where(SysRole.role_code == "supplier")
         if flt.is_active is not None:
             query = query.where(SysUser.is_active == flt.is_active)
+        if flt.is_default_password is not None:
+            query = query.where(SysUser.is_default_password == flt.is_default_password)
         if flt.org_name:
             names = [n.strip() for n in flt.org_name.split(",") if n.strip()]
             if names:

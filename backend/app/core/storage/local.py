@@ -19,6 +19,32 @@ from app.core.storage.base import StorageBackend, StoredFile
 
 
 _SAFE_NS = re.compile(r"^[a-zA-Z0-9_\-]+$")
+_SAFE_EXT = re.compile(r"^[a-z0-9]{1,8}$")
+
+
+class _StaticSecurityHeaders:
+    """为静态附件响应附加安全头的 ASGI 包装。
+
+    /uploads 静态挂载按扩展名推断 Content-Type（如 .html -> text/html），
+    nosniff + CSP sandbox 可阻止历史遗留或绕过校验的文件在浏览器中同源执行脚本。
+    """
+
+    def __init__(self, asgi_app):
+        self.asgi_app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.asgi_app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = message.setdefault("headers", [])
+                headers.append((b"x-content-type-options", b"nosniff"))
+                headers.append((b"content-security-policy", b"sandbox"))
+            await send(message)
+
+        await self.asgi_app(scope, receive, send_with_headers)
 
 
 class LocalStorageBackend(StorageBackend):
@@ -30,8 +56,11 @@ class LocalStorageBackend(StorageBackend):
     def _build_key(self, namespace: str, original_name: str) -> str:
         ns = namespace if _SAFE_NS.match(namespace or "") else "misc"
         now = datetime.now()
-        ext = Path(original_name or "").suffix.lower()
-        fname = f"{uuid.uuid4().hex}{ext}"
+        ext = Path(original_name or "").suffix.lower().lstrip(".")
+        # 纵深防御：扩展名落地前再清洗一次（上游已有 MIME->扩展名白名单校验）
+        if not _SAFE_EXT.match(ext):
+            ext = ""
+        fname = f"{uuid.uuid4().hex}.{ext}" if ext else uuid.uuid4().hex
         return f"{ns}/{now:%Y}/{now:%m}/{fname}"
 
     def _full_path(self, key: str) -> Path:
@@ -70,5 +99,9 @@ class LocalStorageBackend(StorageBackend):
         return open(self._full_path(key), "rb")
 
     def mount_static(self, app: FastAPI) -> None:
-        # 挂载至 /uploads 静态路由
-        app.mount(self.url_prefix, StaticFiles(directory=str(self.root)), name="uploads")
+        # 挂载至 /uploads 静态路由（附加 nosniff + CSP sandbox 安全头）
+        app.mount(
+            self.url_prefix,
+            _StaticSecurityHeaders(StaticFiles(directory=str(self.root))),
+            name="uploads",
+        )

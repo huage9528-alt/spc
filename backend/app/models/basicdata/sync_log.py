@@ -15,6 +15,7 @@ class SyncLog(Base):
     sync_type = Column(String(32), nullable=False, index=True, comment="同步类型(orders/materials等)")
     trigger_mode = Column(String(16), nullable=False, default="manual", comment="触发方式(manual/scheduled)")
     triggered_by = Column(String(64), comment="操作人username")
+    server_id = Column(String(64), comment="执行同步的后端服务标识(SERVER_ID或hostname)")
     status = Column(String(16), nullable=False, default="pending", index=True, comment="pending/running/success/failed")
 
     started_at = Column(DateTime, comment="开始时间")

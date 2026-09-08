@@ -13,10 +13,20 @@ ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
         "rules.order_standards": FULL_ACTIONS,
         "rules.work_instructions": FULL_ACTIONS,
         "finance.data": ["read"],
+        "materials.scrap_inventory": ["read"],
+        "materials.task_stock_check": ["read"],
+        # 部署版本管理：admin 全量（其它角色按需在角色管理授权 read / manage）
+        "deploy_versions": ["read", "manage"],
     },
     "planner": {
         "production.schedule_plans": ["read", "update"],
         "exceptions.product_samples": ["read", "update"],
+        "materials.scrap_inventory": ["read"],
+        "materials.task_stock_check": ["read"],
+    },
+    "purchaser": {
+        "materials.scrap_inventory": ["read"],
+        "materials.task_stock_check": ["read"],
     },
     "manager": {
         "production.schedule_plans": ["read", "update"],
@@ -28,12 +38,17 @@ ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
         "roles": ["read", "update"],
         "materials.subcontract_orders": ["read"],
         "finance.data": ["read"],
+        "materials.scrap_inventory": ["read"],
+        "materials.task_stock_check": ["read"],
     },
     "warehouse_Keeper": {
         "materials.subcontract_orders": ["read"],
     },
     "quality": {
         "materials.subcontract_orders": ["read"],
+    },
+    "purchase_manager": {
+        "materials.task_stock_check": ["read"],
     },
 }
 

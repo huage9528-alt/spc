@@ -1,7 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { TabBar } from 'antd-mobile'
-import { AppOutline, UserOutline } from 'antd-mobile-icons'
 import { useAuthStore } from '@/store/auth'
+import MIcon from './components/MIcon'
 import MobileLoginPage from './pages/MobileLoginPage'
 import WorkbenchPage from './pages/WorkbenchPage'
 import MePage from './pages/MePage'
@@ -10,6 +9,7 @@ import StockCheckCreatePage from './pages/stock/StockCheckCreatePage'
 import StockCheckDetailPage from './pages/stock/StockCheckDetailPage'
 import StockCheckEntryPage from './pages/stock/StockCheckEntryPage'
 import StockCheckManagePage from './pages/stock/StockCheckManagePage'
+import ScanCountPage from './pages/stock/ScanCountPage'
 
 function AuthGuard() {
   const token = useAuthStore((s) => s.currentToken)
@@ -22,8 +22,8 @@ function AuthGuard() {
 }
 
 const TABS = [
-  { key: '/', title: '工作台', icon: <AppOutline /> },
-  { key: '/me', title: '我的', icon: <UserOutline /> },
+  { key: '/', title: '工作台', icon: 'home' },
+  { key: '/me', title: '我的', icon: 'user' },
 ]
 
 function TabLayout() {
@@ -35,13 +35,18 @@ function TabLayout() {
       <div style={{ flex: 1, overflowY: 'auto' }}>
         <Outlet />
       </div>
-      <div style={{ borderTop: '1px solid #eee', background: '#fff', paddingBottom: 'env(safe-area-inset-bottom)' }}>
-        <TabBar activeKey={activeKey} onChange={(k) => navigate(k)}>
-          {TABS.map((t) => (
-            <TabBar.Item key={t.key} icon={t.icon} title={t.title} />
-          ))}
-        </TabBar>
-      </div>
+      <nav className="m-tabbar">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            className={`m-tabbar__item${activeKey === t.key ? ' active' : ''}`}
+            onClick={() => navigate(t.key)}
+          >
+            <MIcon name={t.icon} size={22} />
+            {t.title}
+          </button>
+        ))}
+      </nav>
     </div>
   )
 }
@@ -61,6 +66,7 @@ export default function AppMobile() {
           <Route path="/stock-check/:checkId" element={<StockCheckDetailPage />} />
           <Route path="/stock-check/:checkId/items/:itemId" element={<StockCheckEntryPage />} />
           <Route path="/stock-check/:checkId/manage" element={<StockCheckManagePage />} />
+          <Route path="/scan-count" element={<ScanCountPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

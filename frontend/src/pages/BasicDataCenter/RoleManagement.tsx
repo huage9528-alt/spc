@@ -1,10 +1,14 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Table, Tag, Button, Modal, Form, Input, Space, message, Popconfirm, Row, Col, Checkbox, Tree, Radio, Divider, Alert } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, SafetyOutlined, ThunderboltOutlined, SearchOutlined } from '@ant-design/icons'
+import {
+  Table, Tag, Button, Modal, Form, Input, Select, Space, message, Checkbox, Tree, Radio, Divider, Alert,
+} from 'antd'
+import { PlusOutlined, DeleteOutlined, ReloadOutlined, ThunderboltOutlined, SearchOutlined, LockOutlined, SafetyOutlined, TeamOutlined, ClockCircleOutlined, AuditOutlined } from '@ant-design/icons'
 import { userApi } from '../../services/api'
 import { useAuthStore } from '../../store/auth'
 import { usePermissionStore, PermNode } from '../../store/permission'
+import KpiBand, { type KpiItem } from './components/KpiBand'
+import ChipsFilter, { type ChipOption } from './components/ChipsFilter'
 
 const roleColorMap: Record<string, string> = {
   admin: 'purple',
@@ -13,6 +17,17 @@ const roleColorMap: Record<string, string> = {
   manager: 'cyan',
   purchase_manager: 'gold',
   supplier: 'green',
+}
+
+const ROLE_TAG_CLASS: Record<string, string> = {
+  admin: 'sc-tag-purple',
+  planner: 'sc-tag-kit',
+  purchaser: 'sc-tag-amber',
+  manager: 'sc-tag-cyan',
+  purchase_manager: 'sc-tag-warn',
+  supplier: 'sc-tag-done',
+  qc_inspector: 'sc-tag-plain',
+  wh_keeper: 'sc-tag-kit',
 }
 
 interface PermTreeNode {
@@ -148,9 +163,6 @@ function flattenAll(nodes: PermTreeNode[]): string[] {
   return result
 }
 
-const ALL_PERM_KEYS = flattenAll(FALLBACK_PERMISSION_TREE)
-const ALL_LEAF_KEYS = flattenLeaves(FALLBACK_PERMISSION_TREE)
-
 // 通用操作列：所有页面普遍具备的增删改查等能力
 const PERMISSION_ACTIONS = [
   { key: 'create', label: '新增' },
@@ -205,7 +217,6 @@ interface RoleItem {
 }
 
 function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<string, string[]>; onChange: (v: Record<string, string[]>) => void; permissionTree: PermTreeNode[] }) {
-  const currentAllPermKeys = useMemo(() => flattenAll(permissionTree), [permissionTree])
   const currentAllLeafKeys = useMemo(() => flattenLeaves(permissionTree), [permissionTree])
   // 结构判断：该父节点下挂的是「专属动作」子节点（如 users→重置密码、问题反馈→处理）→ 属于自带动作父节点，
   // 勾选应写自身 key；与运行时值无关，避免首次勾选被误判为纯分组父节点而写入子节点 key
@@ -307,15 +318,15 @@ function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<s
     const rowIndeterminate = isOwnParent
       ? (actions.length > 0 && !allChecked)
       : (hasChildren
-          ? PERMISSION_ACTIONS.some(a => getIndeterminate(a.key, node.children) || (node.children!.some(c => (value[c.key] || []).includes(a.key)) && !node.children!.every(c => (value[c.key] || []).includes(a.key)))) && !allChecked
+          ? PERMISSION_ACTIONS.some(a => getIndeterminate(a.key, node.children)) && !allChecked
           : (actions.length > 0 && !allChecked))
 
     const rows: React.ReactNode[] = []
     rows.push(
-      <tr key={node.key} style={{ background: depth === 0 && hasChildren ? '#fafafa' : 'transparent' }}>
-        <td style={{ padding: '6px 8px', paddingLeft: 8 + depth * 20, borderBottom: '1px solid #f0f0f0', whiteSpace: 'nowrap', fontWeight: hasChildren ? 500 : 400 }}>
+      <tr key={node.key} style={{ background: depth === 0 && hasChildren ? '#f8fafc' : 'transparent' }}>
+        <td style={{ padding: '5px 10px', paddingLeft: 8 + depth * 20, borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap', fontWeight: hasChildren ? 600 : 400, color: '#0f172a', fontSize: 'calc(13px * var(--font-size-scale))' }}>
           {hasChildren ? (
-            <span onClick={() => toggleExpand(node.key)} style={{ cursor: 'pointer', marginRight: 4, display: 'inline-block', width: 14, textAlign: 'center', color: '#999', fontSize: 12, userSelect: 'none' }}>
+            <span onClick={() => toggleExpand(node.key)} style={{ cursor: 'pointer', marginRight: 4, display: 'inline-block', width: 14, textAlign: 'center', color: '#94a3b8', fontSize: 12, userSelect: 'none' }}>
               {isExpanded ? '▼' : '▶'}
             </span>
           ) : (
@@ -325,7 +336,8 @@ function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<s
           <span style={{ marginLeft: 6 }}>{node.label}</span>
         </td>
         {specialActs.length > 0 ? (
-          <td colSpan={PERMISSION_ACTIONS.length} style={{ textAlign: 'center', padding: '6px 4px', borderBottom: '1px solid #f0f0f0' }}>
+          <td colSpan={PERMISSION_ACTIONS.length} style={{ textAlign: 'left', padding: '6px 10px', borderBottom: '1px solid #f1f5f9', background: '#f0fdf4' }}>
+            <span style={{ color: '#16a34a', fontSize: 11, fontWeight: 600, marginRight: 10 }}>专属子权限</span>
             {specialActs.map(a => (
               <Checkbox key={a} checked={actions.includes(a)} onChange={e => toggleLeaf(node.key, a)}>
                 {SPECIAL_ACTION_LABELS[a] || a}
@@ -336,7 +348,7 @@ function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<s
           const checked = actions.includes(a.key)
           const indeterminate = (hasChildren && !isOwnParent) ? getIndeterminate(a.key, node.children) : false
           return (
-            <td key={a.key} style={{ textAlign: 'center', padding: '6px 4px', borderBottom: '1px solid #f0f0f0' }}>
+            <td key={a.key} style={{ textAlign: 'center', padding: '6px 4px', borderBottom: '1px solid #f1f5f9' }}>
               <Checkbox
                 checked={checked}
                 indeterminate={indeterminate}
@@ -356,22 +368,28 @@ function PermissionMatrix({ value, onChange, permissionTree }: { value: Record<s
   }
 
   return (
-    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-      <thead>
-        <tr>
-          <th style={{ textAlign: 'left', padding: '6px 8px', borderBottom: '2px solid #e5e7eb', minWidth: 200 }}>菜单 / 功能模块</th>
-          {PERMISSION_ACTIONS.map(a => (
-            <th key={a.key} style={{ textAlign: 'center', padding: '6px 4px', borderBottom: '2px solid #e5e7eb', width: 60 }}>
-              <Checkbox checked={colAllChecked(a.key)} indeterminate={colSomeChecked(a.key) && !colAllChecked(a.key)} onChange={e => toggleCol(a.key, e.target.checked)} />
-              {' '}{a.label}
+    <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 8, background: '#fff' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'calc(13px * var(--font-size-scale))' }}>
+        <thead>
+          <tr style={{ background: '#f8fafc' }}>
+            <th style={{ textAlign: 'left', padding: '7px 10px', borderBottom: '1px solid #e2e8f0', minWidth: 240, fontSize: 'calc(11.5px * var(--font-size-scale))', fontWeight: 500, color: '#64748b', letterSpacing: '0.03em' }}>
+              权限项（按模块分组）
             </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {permissionTree.map(node => renderRow(node, 0))}
-      </tbody>
-    </table>
+            {PERMISSION_ACTIONS.map(a => (
+              <th key={a.key} style={{ textAlign: 'center', padding: '7px 4px', borderBottom: '1px solid #e2e8f0', width: 68, fontSize: 'calc(11.5px * var(--font-size-scale))', fontWeight: 500, color: '#64748b', letterSpacing: '0.03em' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                  <Checkbox checked={colAllChecked(a.key)} indeterminate={colSomeChecked(a.key) && !colAllChecked(a.key)} onChange={e => toggleCol(a.key, e.target.checked)} />
+                  {a.label}
+                </div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {permissionTree.map(node => renderRow(node, 0))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
@@ -403,17 +421,19 @@ export default function RoleManagement() {
   useEffect(() => {
     if (!permLoaded) fetchTree()
   }, [permLoaded, fetchTree])
+
   const [roles, setRoles] = useState<RoleItem[]>([])
   const [roleLoading, setRoleLoading] = useState(false)
-  const [rolePage, setRolePage] = useState(1)
-  const [rolePageSize, setRolePageSize] = useState(20)
-  const [roleTotal, setRoleTotal] = useState(0)
-  const [roleQuery, setRoleQuery] = useState<{ sortBy?: string; sortOrder?: string; filters?: Record<string, string[]> }>({})
+  const [chip, setChip] = useState<string | number>('all')
   const [keyword, setKeyword] = useState('')
+  const [orgSel, setOrgSel] = useState<string | undefined>()
+  const [posSel, setPosSel] = useState<string | undefined>()
   const [roleModalOpen, setRoleModalOpen] = useState(false)
   const [editingRole, setEditingRole] = useState<RoleItem | null>(null)
   const [roleForm] = Form.useForm()
   const [rolePermissions, setRolePermissions] = useState<Record<string, string[]>>({})
+  const [deleteTarget, setDeleteTarget] = useState<RoleItem | null>(null)
+  const [deleting, setDeleting] = useState(false)
   // 批量授权弹窗
   const [bgOpen, setBgOpen] = useState(false)
   const [bgKeys, setBgKeys] = useState<string[]>([])
@@ -423,32 +443,12 @@ export default function RoleManagement() {
   const [bgSubmitting, setBgSubmitting] = useState(false)
   const [bgRoles, setBgRoles] = useState<RoleItem[]>([])
 
-  const fetchRoles = async (opts?: { page?: number; pageSize?: number; sortBy?: string; sortOrder?: string; filters?: Record<string, string[]>; keyword?: string }) => {
-    const p = opts?.page ?? rolePage
-    const ps = opts?.pageSize ?? rolePageSize
-    const sortBy = opts?.sortBy ?? roleQuery.sortBy
-    const sortOrder = opts?.sortOrder ?? roleQuery.sortOrder
-    const filters = opts?.filters ?? roleQuery.filters
-    const kw = opts?.keyword ?? keyword
-    setRoleQuery({ sortBy, sortOrder, filters })
+  const fetchRoles = async () => {
     setRoleLoading(true)
     try {
-      const params: any = { page: p, page_size: ps }
-      if (sortBy) params.sort_by = sortBy
-      if (sortOrder) params.sort_order = sortOrder
-      if (kw?.trim()) params.keyword = kw.trim()
-      if (filters?.role_code?.length) params.role_code = filters.role_code.join(',')
-      if (filters?.org_name?.length) params.org_name = filters.org_name.join(',')
-      if (filters?.position_name?.length) params.position_name = filters.position_name.join(',')
-      const res: any = await userApi.roles(params)
+      const res: any = await userApi.roles({ page: 1, page_size: 500 })
       const payload = res?.data
-      if (Array.isArray(payload)) {
-        setRoles(payload)
-        setRoleTotal(payload.length)
-      } else {
-        setRoles(payload?.items || [])
-        setRoleTotal(payload?.total ?? 0)
-      }
+      setRoles(Array.isArray(payload) ? payload : payload?.items || [])
     } catch {
       // 错误已由全局拦截器提示
     } finally {
@@ -467,12 +467,49 @@ export default function RoleManagement() {
     if (roleCode) {
       urlSearchAppliedRef.current = true
       setKeyword(roleCode)
-      fetchRoles({ page: 1, keyword: roleCode })
       const newParams = new URLSearchParams(searchParams)
       newParams.delete('role_code')
       setSearchParams(newParams, { replace: true })
     }
   }, [searchParams, setSearchParams])
+
+  // ---------- 统计 / 过滤 ----------
+  const stats = useMemo(() => {
+    const used = roles.filter(r => r.user_count > 0).length
+    const protectedCount = roles.filter(r => r.role_code === 'admin').length
+    return { total: roles.length, used, unused: roles.length - used, protected: protectedCount }
+  }, [roles])
+
+  const viewRoles = useMemo(() => {
+    const kw = keyword.trim().toLowerCase()
+    return roles
+      .filter(r => {
+        if (chip === 'used' && r.user_count <= 0) return false
+        if (chip === 'unused' && r.user_count > 0) return false
+        if (chip === 'protected' && r.role_code !== 'admin') return false
+        if (orgSel && r.org_name !== orgSel) return false
+        if (posSel && r.position_name !== posSel) return false
+        if (kw && !r.role_code.toLowerCase().includes(kw) && !r.role_name.toLowerCase().includes(kw)) return false
+        return true
+      })
+  }, [roles, chip, keyword, orgSel, posSel])
+
+  const kpiItems: KpiItem[] = [
+    { label: '角色总数', value: stats.total.toLocaleString(), sub: '按「岗位 → 角色」映射分配', accent: 'brand', icon: <SafetyOutlined />, onClick: () => setChip('all') },
+    { label: '使用中', value: stats.used.toLocaleString(), sub: '至少 1 名用户绑定', accent: 'info', icon: <TeamOutlined />, onClick: () => setChip('used') },
+    { label: '未使用 / 无权限', value: stats.unused.toLocaleString(), go: '闲置角色待梳理 · 查看 →', accent: 'warning', icon: <ClockCircleOutlined />, onClick: () => setChip('unused') },
+    { label: '系统保护', value: stats.protected.toLocaleString(), sub: '内置 admin · 不可删除', accent: 'purple', icon: <LockOutlined />, onClick: () => setChip('protected') },
+  ]
+
+  const chipOptions: ChipOption[] = [
+    { label: '全部', value: 'all', count: stats.total },
+    { label: '使用中', value: 'used', count: stats.used },
+    { label: '未使用', value: 'unused', count: stats.unused, hot: true },
+    { label: '系统保护', value: 'protected', count: stats.protected },
+  ]
+
+  const orgOptions = useMemo(() => [...new Set(roles.map(r => r.org_name).filter(Boolean) as string[])].sort(), [roles])
+  const posOptions = useMemo(() => [...new Set(roles.map(r => r.position_name).filter(Boolean) as string[])].sort(), [roles])
 
   const openAddRole = () => {
     setEditingRole(null)
@@ -505,13 +542,18 @@ export default function RoleManagement() {
     }
   }
 
-  const handleDeleteRole = async (id: number) => {
+  const handleDeleteRole = async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
     try {
-      await userApi.deleteRole(id)
+      await userApi.deleteRole(deleteTarget.id)
       message.success('角色已删除')
+      setDeleteTarget(null)
       fetchRoles()
     } catch (e: any) {
       // 错误已由全局拦截器提示
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -560,223 +602,288 @@ export default function RoleManagement() {
 
   const getPermSummary = (permissions: Record<string, string[]>) => {
     const entries = Object.entries(permissions).filter(([, v]) => v && v.length > 0)
-    if (entries.length === 0) return <Tag>无权限</Tag>
-    if (entries.length >= currentAllPermKeys.length) return <Tag color="green">全部权限</Tag>
-    return <Tag color="blue">{entries.length} 个模块</Tag>
+    if (entries.length === 0) return <span className="sc-tag sc-tag-wait">无权限</span>
+    if (entries.length >= currentAllPermKeys.length) return <span className="sc-tag sc-tag-done"><span className="dot" />全部模块</span>
+    return <span className="sc-tag sc-tag-kit">{entries.length} 个模块</span>
   }
 
-  const roleColumns = [
-    { title: '角色编码', dataIndex: 'role_code', key: 'role_code', width: 180, sorter: true,
-      filters: [...new Set(roles.map(r => r.role_code).filter(Boolean))].map(v => ({ text: v, value: v })),
-      filterSearch: true,
-      render: (code: string) => <Tag color={roleColorMap[code] || 'default'}>{code}</Tag>,
-    },
-    { title: '角色名称', dataIndex: 'role_name', key: 'role_name', width: 200, sorter: true },
+  const renderCode = (r: RoleItem) => (
+    <span className={`sc-tag ${ROLE_TAG_CLASS[r.role_code] || 'sc-tag-plain'}`} style={{ fontVariantNumeric: 'tabular-nums' }}>{r.role_code}</span>
+  )
+
+  const roleColumns: any[] = [
     {
-      title: '部门', dataIndex: 'org_name', key: 'org_name', width: 120,
-      filters: [...new Set(roles.map(r => r.org_name).filter(Boolean))].map(v => ({ text: v, value: v! })),
-      filterSearch: true,
-      render: (v: string | null) => v || <span style={{ color: '#cbd5e1' }}>-</span>,
+      title: '角色编码', dataIndex: 'role_code', key: 'role_code', width: 150,
+      sorter: (a: RoleItem, b: RoleItem) => a.role_code.localeCompare(b.role_code),
+      render: (code: string, r: RoleItem) => renderCode(r),
     },
     {
-      title: '岗位', dataIndex: 'position_name', key: 'position_name', width: 120,
-      filters: [...new Set(roles.map(r => r.position_name).filter(Boolean))].map(v => ({ text: v, value: v! })),
-      filterSearch: true,
-      render: (v: string | null) => v || <span style={{ color: '#cbd5e1' }}>-</span>,
+      title: '角色名称', dataIndex: 'role_name', key: 'role_name', width: 240,
+      sorter: (a: RoleItem, b: RoleItem) => a.role_name.localeCompare(b.role_name),
+      render: (name: string, r: RoleItem) => (
+        <span style={{ color: '#0f172a', fontWeight: 500 }}>
+          {name}
+          {r.role_code === 'admin' && (
+            <>
+              <LockOutlined style={{ color: '#d97706', marginLeft: 6, fontSize: 11 }} />
+              <span className="sc-tag sc-tag-warn" style={{ marginLeft: 6, height: 18, fontSize: 'calc(11px * var(--font-size-scale))' }}>内置</span>
+            </>
+          )}
+        </span>
+      ),
     },
     {
-      title: '使用人数', dataIndex: 'user_count', key: 'user_count', width: 100, sorter: true,
-      render: (count: number) => count > 0 ? <Tag color="blue">{count} 人</Tag> : <Tag>未使用</Tag>,
+      title: '部门', dataIndex: 'org_name', key: 'org_name', width: 140,
+      render: (v: string | null) => v || <span className="sc-note">—</span>,
     },
     {
-      title: '权限概览', dataIndex: 'permissions', key: 'permissions', width: 140,
+      title: '岗位', dataIndex: 'position_name', key: 'position_name', width: 140,
+      render: (v: string | null) => v || <span className="sc-note">—</span>,
+    },
+    {
+      title: '使用人数', dataIndex: 'user_count', key: 'user_count', width: 110, align: 'center' as const,
+      sorter: (a: RoleItem, b: RoleItem) => (a.user_count || 0) - (b.user_count || 0),
+      render: (count: number) => count > 0
+        ? <span className="sc-tag sc-tag-kit">{count} 人</span>
+        : <span className="sc-tag sc-tag-wait">未使用</span>,
+    },
+    {
+      title: '权限概览', dataIndex: 'permissions', key: 'permissions', width: 150,
       render: (perms: Record<string, string[]>) => getPermSummary(perms),
     },
     {
-      title: '操作', key: 'action', width: 160, fixed: 'right' as const,
+      title: '操作', key: 'action', width: 120, fixed: 'right' as const,
       render: (_: any, record: RoleItem) => (
-        <Space size="small">
-          <Button size="small" icon={<EditOutlined />} onClick={() => openEditRole(record)}>权限</Button>
+        <span className="sc-row-act">
+          <a onClick={() => openEditRole(record)}>权限</a>
           {record.role_code !== 'admin' && (isAdmin || hasRolesDelete) && (
-            <Popconfirm
-              title="确认删除该角色？"
-              description={record.user_count > 0 ? `该角色当前有 ${record.user_count} 个用户使用中` : '删除后不可恢复'}
-              onConfirm={() => handleDeleteRole(record.id)}
-            >
-              <Button size="small" icon={<DeleteOutlined />} danger />
-            </Popconfirm>
+            <a style={{ color: '#dc2626' }} onClick={() => setDeleteTarget(record)}>删除</a>
           )}
-        </Space>
+        </span>
       ),
     },
   ]
 
   if (!hasRolesRead && !isAdmin) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 'calc(100vh - 130px)' }}>
+      <div className="sc-page" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 480 }}>
         <div style={{ color: '#94a3b8', fontSize: 16 }}>无角色权限管理权限</div>
       </div>
     )
   }
 
   return (
-    <div style={{ height: 'calc(100vh - 130px)', display: 'flex', flexDirection: 'column' }}>
-      <div className="card-modern" style={{ padding: '16px 20px', marginBottom: 16 }}>
-        <Row gutter={12} align="middle">
-          <Col flex="auto">
-            <Input
-              prefix={<SearchOutlined />}
-              placeholder="搜索角色编码 / 角色名称"
-              value={keyword}
-              allowClear
-              onChange={(e) => {
-                setKeyword(e.target.value)
-                if (!e.target.value) {
-                  setRolePage(1)
-                  fetchRoles({ page: 1, keyword: '' })
-                }
-              }}
-              onPressEnter={() => { setRolePage(1); fetchRoles({ page: 1 }) }}
-              style={{ width: 280 }}
-            />
-          </Col>
-          <Col><Space>
-            <Button icon={<ReloadOutlined />} onClick={() => fetchRoles()}>刷新</Button>
-            <Button icon={<ThunderboltOutlined />} onClick={openBatchGrant}>批量授权</Button>
-            {(isAdmin || hasRolesCreate) && <Button type="primary" icon={<PlusOutlined />} onClick={openAddRole}>新增角色</Button>}
-          </Space></Col>
-        </Row>
+    <div className="sc-page">
+      <KpiBand items={kpiItems} />
+
+      <div className="sc-toolbar">
+        <span className="sc-search">
+          <Input
+            allowClear
+            prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
+            placeholder="角色编码 / 名称"
+            style={{ width: 220 }}
+            value={keyword}
+            onChange={(e) => { setKeyword(e.target.value); setChip('all') }}
+          />
+        </span>
+        <Select
+          allowClear
+          placeholder="全部部门"
+          style={{ width: 140 }}
+          value={orgSel}
+          onChange={setOrgSel}
+          options={orgOptions.map(v => ({ label: v, value: v }))}
+        />
+        <Select
+          allowClear
+          placeholder="全部岗位"
+          style={{ width: 140 }}
+          value={posSel}
+          onChange={setPosSel}
+          options={posOptions.map(v => ({ label: v, value: v }))}
+        />
+        <ChipsFilter options={chipOptions} value={chip} onChange={(v) => { setChip(v); setKeyword('') }} />
+        <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+          <Button icon={<ReloadOutlined />} onClick={fetchRoles}>刷新</Button>
+          <Button icon={<ThunderboltOutlined />} onClick={openBatchGrant}>批量授权</Button>
+          {(isAdmin || hasRolesCreate) && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={openAddRole}>新增角色</Button>
+          )}
+        </span>
       </div>
-      <div className="card-modern" style={{ padding: '0 0 4px' }}>
-        <Table columns={roleColumns} dataSource={roles} rowKey="id" loading={roleLoading} size="small" scroll={{ x: 1140, y: 'calc(100vh - 360px)' }}
-          onChange={(pag: any, tableFilters: any, sorter: any) => {
-            const sortField = sorter.field
-            const sortOrder = sorter.order === 'ascend' ? 'asc' : sorter.order === 'descend' ? 'desc' : undefined
-            const newFilters: Record<string, string[]> = {}
-            if (tableFilters.role_code?.length) newFilters.role_code = tableFilters.role_code
-            if (tableFilters.org_name?.length) newFilters.org_name = tableFilters.org_name
-            if (tableFilters.position_name?.length) newFilters.position_name = tableFilters.position_name
-            const newPage = typeof pag?.current === 'number' ? pag.current : rolePage
-            const newPageSize = typeof pag?.pageSize === 'number' ? pag.pageSize : rolePageSize
-            setRolePage(newPage)
-            setRolePageSize(newPageSize)
-            fetchRoles({ page: newPage, pageSize: newPageSize, sortBy: sortField, sortOrder, filters: newFilters })
+
+      <div className="sc-card" style={{ padding: '0 0 4px' }}>
+        <Table
+          columns={roleColumns}
+          dataSource={viewRoles}
+          rowKey="id"
+          loading={roleLoading}
+          size="small"
+          scroll={{ x: 1050 }}
+          key={`${chip}-${keyword}-${orgSel ?? ''}-${posSel ?? ''}`}
+          pagination={{
+            pageSize: 20,
+            showSizeChanger: true,
+            showTotal: (t: number) => `共 ${t} 条`,
+            pageSizeOptions: [10, 20, 50, 100],
           }}
-          pagination={{ current: rolePage, pageSize: rolePageSize, total: roleTotal, showSizeChanger: true, showTotal: (t: number) => `共 ${t} 条`, pageSizeOptions: [20, 50, 100], showQuickJumper: true }} />
+        />
       </div>
 
       {/* 新增/编辑角色 + 权限矩阵 */}
       <Modal
         title={editingRole ? `编辑角色权限 — ${editingRole.role_name}` : '新增角色'}
-        open={roleModalOpen} onOk={handleSaveRole} onCancel={() => setRoleModalOpen(false)} width={780} destroyOnClose
+        open={roleModalOpen}
+        onOk={handleSaveRole}
+        onCancel={() => setRoleModalOpen(false)}
+        width={1000}
+        destroyOnClose
+        okText="保存角色"
+        rootClassName="sc-page"
       >
         <Form form={roleForm} layout="vertical">
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item name="role_code" label="角色编码" rules={[{ required: true, message: '请输入角色编码' }]}>
-                <Input placeholder="如: planner" disabled={!!editingRole} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="role_name" label="角色名称" rules={[{ required: true, message: '请输入角色名称' }]}>
-                <Input placeholder="如: 生产计划员" />
-              </Form.Item>
-            </Col>
-          </Row>
+          <div style={{ display: 'flex', gap: 16 }}>
+            <Form.Item name="role_code" label="角色编码" rules={[{ required: true, message: '请输入角色编码' }]} style={{ flex: 1 }}>
+              <Input placeholder="如: planner" disabled={!!editingRole} />
+            </Form.Item>
+            <Form.Item name="role_name" label="角色名称" rules={[{ required: true, message: '请输入角色名称' }]} style={{ flex: 1 }}>
+              <Input placeholder="如: 生产计划员" />
+            </Form.Item>
+          </div>
         </Form>
-        <div style={{ marginTop: 8, padding: '12px', border: '1px solid #f0f0f0', borderRadius: 6, background: '#fafafa' }}>
-          <div style={{ fontWeight: 500, marginBottom: 8 }}>权限配置</div>
+        <div style={{ marginTop: 4 }}>
+          <div className="sc-toolbar-hint" style={{ marginBottom: 8, fontWeight: 500, color: '#334155' }}>
+            权限配置
+            <span style={{ fontWeight: 400, color: '#94a3b8', marginLeft: 8 }}>
+              行 = 权限节点（父行级联子节点） · 列 = 通用动作 · 绿底行 = 专属子权限
+            </span>
+          </div>
           <PermissionMatrix value={rolePermissions} onChange={setRolePermissions} permissionTree={currentPermissionTree} />
+          <div className="f-note" style={{ marginTop: 10 }}>
+            保存后约影响该角色下全部用户；受影响账号登录版本将递增，需重新登录后生效。专属子权限（重置密码 / 处理等）随所属节点一并保存。
+          </div>
         </div>
       </Modal>
 
       {/* 批量授权 */}
       <Modal
-        title={<span><ThunderboltOutlined /> 批量授权 — 一次将权限分配给多个角色</span>}
+        title={<span><ThunderboltOutlined /> 批量授权</span>}
         open={bgOpen}
         onOk={handleBatchGrant}
         onCancel={() => setBgOpen(false)}
         confirmLoading={bgSubmitting}
-        width={880}
+        width={900}
         destroyOnClose
-        okText="确认应用"
+        okText="提交批量授权"
+        rootClassName="sc-page"
       >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="操作说明"
-          description={
-            <div style={{ fontSize: 13 }}>
-              选择要分配的「权限项」+「操作」，再勾选「目标角色」，点击应用即可一次完成多角色赋权。<br />
-              <b>追加</b>：在角色已有权限上并集合并；<b>撤销</b>：从角色权限中移除指定操作；<b>覆盖</b>：以本次操作集合替换这些权限项。<br />
-              重置密码、处理等页面专属子权限不参与批量授权，请在角色权限矩阵中单独配置。<br />
-              admin 角色自动跳过（默认全权限）。
+        <div style={{ maxHeight: '68vh', overflowY: 'auto', paddingRight: 4 }}>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="四步：选择权限 → 勾选动作 → 指定目标角色 → 选择模式；提交后所有受影响用户强制重登"
+          />
+          <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 14px', marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <span className="sys-step-no" style={{ width: 20, height: 20, borderRadius: '50%', background: '#5b5bd6', color: '#fff', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>1</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 500, marginBottom: 6 }}>选择权限项 <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: 'calc(12px * var(--font-size-scale))' }}>含子权限的节点将同步应用其专属子权限</span></div>
+                <div style={{ border: '1px solid #f1f5f9', borderRadius: 6, padding: 8, maxHeight: 240, overflow: 'auto' }}>
+                  <Tree
+                    checkable
+                    selectable={false}
+                    defaultExpandAll
+                    treeData={currentPermTreeData}
+                    checkedKeys={bgKeys}
+                    onCheck={(checked: any) => {
+                      const keys = Array.isArray(checked) ? checked : checked.checked
+                      setBgKeys(keys.map((k: any) => String(k)))
+                    }}
+                  />
+                </div>
+              </div>
             </div>
-          }
-        />
-        <Row gutter={16}>
-          <Col span={12}>
-            <div style={{ fontWeight: 500, marginBottom: 6 }}>① 权限项（菜单/子页面）</div>
-            <div style={{ border: '1px solid #f0f0f0', borderRadius: 4, padding: 8, maxHeight: 360, overflow: 'auto' }}>
-              <Tree
-                checkable
-                selectable={false}
-                defaultExpandAll
-                treeData={currentPermTreeData}
-                checkedKeys={bgKeys}
-                onCheck={(checked: any) => {
-                  const keys = Array.isArray(checked) ? checked : checked.checked
-                  setBgKeys(keys.map((k: any) => String(k)))
-                }}
-              />
+          </div>
+
+          <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 14px', marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <span className="sys-step-no" style={{ width: 20, height: 20, borderRadius: '50%', background: '#5b5bd6', color: '#fff', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>2</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 500, marginBottom: 6 }}>授权动作 <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: 'calc(12px * var(--font-size-scale))' }}>默认仅授予「查看」</span></div>
+                <Checkbox.Group value={bgActions} onChange={(v) => setBgActions(v as string[])} options={PERMISSION_ACTIONS.map(a => ({ value: a.key, label: a.label }))} />
+              </div>
             </div>
-            <Divider style={{ margin: '12px 0 8px' }} />
-            <div style={{ fontWeight: 500, marginBottom: 6 }}>② 操作</div>
-            <Checkbox.Group
-              value={bgActions}
-              onChange={(v) => setBgActions(v as string[])}
-              options={PERMISSION_ACTIONS.map(a => ({ value: a.key, label: a.label }))}
-            />
-          </Col>
-          <Col span={12}>
-            <div style={{ fontWeight: 500, marginBottom: 6 }}>
-              ③ 目标角色
-              <Button
-                size="small"
-                type="link"
-                onClick={() => {
-                  const allIds = bgRoles.filter(r => r.role_code !== 'admin').map(r => r.id)
-                  setBgRoleIds(bgRoleIds.length === allIds.length ? [] : allIds)
-                }}
-              >
-                全选 / 反选
-              </Button>
+          </div>
+
+          <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 14px', marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <span className="sys-step-no" style={{ width: 20, height: 20, borderRadius: '50%', background: '#5b5bd6', color: '#fff', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>3</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 500, marginBottom: 6 }}>
+                  目标角色
+                  <Button size="small" type="link" style={{ padding: 0, marginLeft: 8 }} onClick={() => {
+                    const allIds = bgRoles.filter(r => r.role_code !== 'admin').map(r => r.id)
+                    setBgRoleIds(bgRoleIds.length === allIds.length ? [] : allIds)
+                  }}>全选 / 反选</Button>
+                  <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: 'calc(12px * var(--font-size-scale))', marginLeft: 8 }}>admin 自动跳过</span>
+                </div>
+                <div style={{ border: '1px solid #f1f5f9', borderRadius: 6, padding: 8, maxHeight: 180, overflow: 'auto' }}>
+                  <Checkbox.Group value={bgRoleIds} onChange={(v) => setBgRoleIds(v as number[])} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {bgRoles.map(r => (
+                      <Checkbox key={r.id} value={r.id} disabled={r.role_code === 'admin'}>
+                        <span className={`sc-tag ${ROLE_TAG_CLASS[r.role_code] || 'sc-tag-plain'}`} style={{ marginRight: 4, height: 18, fontSize: 'calc(11px * var(--font-size-scale))' }}>{r.role_code}</span>
+                        {r.role_name}
+                        {r.role_code === 'admin' && <span style={{ color: '#94a3b8', marginLeft: 6, fontSize: 12 }}>（默认全权限，自动跳过）</span>}
+                      </Checkbox>
+                    ))}
+                  </Checkbox.Group>
+                </div>
+              </div>
             </div>
-            <div style={{ border: '1px solid #f0f0f0', borderRadius: 4, padding: 8, maxHeight: 240, overflow: 'auto' }}>
-              <Checkbox.Group
-                value={bgRoleIds}
-                onChange={(v) => setBgRoleIds(v as number[])}
-                style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
-              >
-                {bgRoles.map(r => (
-                  <Checkbox key={r.id} value={r.id} disabled={r.role_code === 'admin'}>
-                    <Tag color={roleColorMap[r.role_code] || 'default'} style={{ marginRight: 4 }}>{r.role_code}</Tag>
-                    {r.role_name}
-                    {r.role_code === 'admin' && <span style={{ color: '#999', marginLeft: 6, fontSize: 12 }}>（默认全权限，自动跳过）</span>}
-                  </Checkbox>
-                ))}
-              </Checkbox.Group>
+          </div>
+
+          <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 14px' }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <span className="sys-step-no" style={{ width: 20, height: 20, borderRadius: '50%', background: '#5b5bd6', color: '#fff', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>4</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 500, marginBottom: 6 }}>授权模式 <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: 'calc(12px * var(--font-size-scale))' }}>覆盖 = 目标角色将只保留本次所选权限</span></div>
+                <Radio.Group value={bgMode} onChange={e => setBgMode(e.target.value)}>
+                  <Radio value="grant">追加（并集）</Radio>
+                  <Radio value="revoke">撤销</Radio>
+                  <Radio value="replace">覆盖</Radio>
+                </Radio.Group>
+              </div>
             </div>
-            <Divider style={{ margin: '12px 0 8px' }} />
-            <div style={{ fontWeight: 500, marginBottom: 6 }}>④ 应用模式</div>
-            <Radio.Group value={bgMode} onChange={e => setBgMode(e.target.value)}>
-              <Radio value="grant">追加（并集）</Radio>
-              <Radio value="revoke">撤销</Radio>
-              <Radio value="replace">覆盖</Radio>
-            </Radio.Group>
-          </Col>
-        </Row>
+          </div>
+        </div>
+      </Modal>
+
+      {/* 删除二次确认 */}
+      <Modal
+        title={<span style={{ color: '#dc2626' }}>删除角色</span>}
+        open={!!deleteTarget}
+        onOk={handleDeleteRole}
+        confirmLoading={deleting}
+        onCancel={() => setDeleteTarget(null)}
+        okText={deleteTarget?.user_count ? '删除并收回用户权限' : '确认删除'}
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        width={480}
+        rootClassName="sc-page"
+      >
+        <p style={{ fontSize: 'calc(13.5px * var(--font-size-scale))', color: '#475569', lineHeight: 1.8 }}>
+          确认删除角色 <b style={{ color: '#0f172a' }}>{deleteTarget?.role_name}（{deleteTarget?.role_code}）</b>？
+          {deleteTarget && deleteTarget.user_count > 0
+            ? <>该角色当前分配给 <b style={{ color: '#dc2626' }}>{deleteTarget.user_count}</b> 名用户，删除前请先在「用户管理」中更换这些用户的角色（后端将拦截带用户的角色删除）。</>
+            : <>删除后不可恢复，操作将记入审计日志。</>}
+        </p>
+        {deleteTarget && deleteTarget.user_count > 0 && (
+          <div className="f-note" style={{ background: '#fffbeb', borderColor: '#fde68a', color: '#92400e' }}>
+            提示：若仅是想临时收回权限，建议改用「权限」编辑矩阵，而非删除角色。
+          </div>
+        )}
       </Modal>
     </div>
   )

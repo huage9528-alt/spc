@@ -22,6 +22,7 @@ class SubcontractOrderDetail(Base):
     delivery_qty = Column(Numeric(15, 2), nullable=True, comment="交货数量")
     received_qty = Column(Numeric(15, 2), nullable=True, comment="收货数量")
     returned_qty = Column(Numeric(15, 2), nullable=True, comment="退货数量")
+    price = Column(Numeric(15, 4), nullable=True, comment="单价")
     amount = Column(Numeric(15, 2), nullable=True, comment="金额")
     mrp_closed_flag = Column(Integer, nullable=True, comment="MRP关闭标志 0/1")
     sale_order_line_no = Column(Integer, nullable=True, comment="销售订单行号")

@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<!--
+  PROTOTYPE (throwaway) — 数据集成页面设计 第3轮
+  反馈: 操作太复杂、信息太乱。核心场景不变: 盯状态 + 手动补数。
+  原则: 每行 ≤3 个信息 + 1 个按钮; 无徽标无方块无批量无行内展开; 颜色只用 绿/红/灰 + 蓝色主按钮。
+  方向:
+    G 极简清单 — 一张干净的表: 类型 | 上次同步(带色点) | 结果 | 同步
+    H 摘要优先 — 打开即答案: 大字"全部正常/2个问题"; 问题逐条+按钮; 全部类型默认折叠
+    I 调度台   — 左侧发起同步(单选列表+一个运行区) 右侧一条时间流; 无表格
+  切换: 底部悬浮条或 ←/→。纯静态 mock, 双击打开。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据集成 · 重设计原型 v3</title>
+<style>
+  :root{
+    --acc:#1668dc; --ok:#16a34a; --err:#dc2626; --warn:#d97706;
+    --ink:#1e2532; --sub:#8a94a6; --bd:#e8ecf2; --bg:#fbfcfd;
+    --mono:Consolas,"SF Mono",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);font-size:13.5px;overflow-x:hidden;}
+  button{font-family:inherit;cursor:pointer;border:none;background:none;}
+  ::-webkit-scrollbar{width:8px;} ::-webkit-scrollbar-thumb{background:rgba(100,116,139,.25);border-radius:4px;}
+  .num{font-variant-numeric:tabular-nums;}
+
+  .proto-tag{position:fixed;top:10px;right:16px;z-index:300;background:rgba(15,23,42,.78);color:#cbd5e1;padding:2px 10px;border-radius:99px;font-size:11px;}
+  #switcher{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:300;background:#0f172a;color:#fff;border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:10px;box-shadow:0 8px 24px rgba(15,23,42,.4);user-select:none;}
+  #switcher .arrow{width:28px;height:28px;border-radius:6px;background:rgba(255,255,255,.1);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;}
+  #switcher .arrow:hover{background:rgba(255,255,255,.25);}
+  #switcher .vlabel{font-size:12.5px;font-weight:600;min-width:180px;text-align:center;}
+  #switcher .vlabel small{display:block;font-weight:400;color:#94a3b8;font-size:10.5px;}
+
+  .toast-wrap{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:400;display:flex;flex-direction:column;gap:6px;align-items:center;}
+  .toast{background:#111827;color:#fff;padding:6px 16px;border-radius:6px;font-size:12.5px;box-shadow:0 8px 24px rgba(0,0,0,.25);animation:tIn .2s ease;display:flex;gap:8px;align-items:center;max-width:70vw;}
+  .toast.ok::before{content:"✓";color:#34d399;font-weight:700;}
+  .toast.warn::before{content:"!";color:#fbbf24;font-weight:700;}
+  @keyframes tIn{from{opacity:0;transform:translateY(-6px);}to{opacity:1;}}
+
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none;}
+  .dot.ok{background:var(--ok);} .dot.err{background:var(--err);} .dot.warn{background:var(--warn);}
+  .dot.gray{background:#c3cbd8;} .dot.run{background:var(--acc);animation:pulse 1.1s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+
+  .btn{padding:5px 16px;border-radius:6px;font-size:13px;font-weight:500;transition:all .12s;line-height:20px;}
+  .btn.primary{background:var(--acc);color:#fff;}
+  .btn.primary:hover{background:#3c82e8;}
+  .btn.line{background:#fff;color:#475569;border:1px solid #d3d9e3;}
+  .btn.line:hover{color:var(--acc);border-color:var(--acc);}
+  .btn:disabled{opacity:.45;cursor:not-allowed;}
+
+  /* ============ G 极简清单 ============ */
+  .vg-bar{background:#fff;border-bottom:1px solid var(--bd);padding:12px 28px;display:flex;align-items:center;gap:14px;}
+  .vg-bar h1{font-size:16px;font-weight:700;}
+  .vg-bar .sum{color:var(--sub);font-size:12.5px;display:flex;align-items:center;gap:6px;}
+  .vg-wrap{max-width:980px;margin:0 auto;padding:20px 28px 120px;}
+  .vg-problem{background:#fff;border:1px solid #f6cfcf;border-radius:10px;margin-bottom:14px;overflow:hidden;}
+  .vg-problem .p-row{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid #f7e6e6;font-size:13px;}
+  .vg-problem .p-row:last-child{border-bottom:none;}
+  .vg-problem .p-row .why{color:var(--sub);flex:1;font-size:12.5px;}
+  .vg-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--bd);border-radius:10px;overflow:hidden;}
+  .vg-table td{padding:0;}
+  .vg-sec{background:#fff;padding:14px 18px 4px;font-size:12px;color:var(--sub);font-weight:600;}
+  .vg-row{display:flex;align-items:center;gap:12px;padding:0 18px;border-top:1px solid #f2f4f8;height:42px;cursor:pointer;}
+  .vg-row:hover{background:#f8fafd;}
+  .vg-row .nm{flex:1;font-weight:500;}
+  .vg-row .tm{width:120px;color:var(--sub);font-size:12.5px;display:flex;align-items:center;gap:7px;}
+  .vg-row .rs{width:120px;color:var(--sub);font-size:12px;font-family:var(--mono);}
+  .vg-row .rs b{color:var(--ink);font-weight:600;}
+  .vg-row .go{width:64px;text-align:right;}
+  .vg-row .sbtn{font-size:12.5px;color:var(--acc);padding:3px 10px;border-radius:5px;}
+  .vg-row .sbtn:hover{background:#eaf2fd;}
+  .vg-row.running{background:#f7faff;}
+  .vg-prog{width:90px;height:4px;border-radius:2px;background:#e2ecfa;overflow:hidden;}
+  .vg-prog i{display:block;height:100%;background:var(--acc);transition:width .5s;}
+
+  /* ============ H 摘要优先 ============ */
+  .vh-wrap{max-width:860px;margin:0 auto;padding:28px 28px 120px;}
+  .vh-hero{background:#fff;border:1px solid var(--bd);border-radius:14px;padding:26px 30px;text-align:center;}
+  .vh-hero.bad{border-color:#f6cfcf;}
+  .vh-hero .icon{font-size:34px;line-height:1;}
+  .vh-hero h2{font-size:19px;margin-top:10px;}
+  .vh-hero .sub{color:var(--sub);font-size:12.5px;margin-top:6px;}
+  .vh-tasks{margin-top:14px;}
+  .vh-item{background:#fff;border:1px solid var(--bd);border-radius:10px;padding:12px 18px;display:flex;align-items:center;gap:12px;margin-top:8px;}
+  .vh-item.err{border-color:#f6cfcf;}
+  .vh-item .nm{font-weight:600;font-size:13.5px;}
+  .vh-item .why{color:var(--sub);font-size:12.5px;flex:1;}
+  .vh-fold{margin-top:22px;}
+  .vh-fold .fh{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;color:var(--ink);cursor:pointer;padding:6px 2px;}
+  .vh-fold .fh .arr{color:var(--sub);font-size:11px;transition:transform .15s;}
+  .vh-fold.open .fh .arr{transform:rotate(90deg);}
+  .vh-fold .cnt{color:var(--sub);font-weight:400;font-size:12px;}
+  .vh-list{display:none;margin-top:8px;}
+  .vh-fold.open .vh-list{display:block;}
+
+  /* ============ I 调度台 ============ */
+  .vi-wrap{display:flex;gap:18px;max-width:1180px;margin:0 auto;padding:22px 28px 120px;align-items:flex-start;}
+  .vi-left{flex:1.1;background:#fff;border:1px solid var(--bd);border-radius:12px;padding:18px 20px;}
+  .vi-left h3{font-size:13px;color:var(--sub);font-weight:600;margin-bottom:10px;}
+  .vi-pick{max-height:300px;overflow-y:auto;border:1px solid #f0f2f6;border-radius:8px;}
+  .vi-pick .pi{display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid #f5f7fa;cursor:pointer;font-size:13px;}
+  .vi-pick .pi:last-child{border-bottom:none;}
+  .vi-pick .pi:hover{background:#f8fafd;}
+  .vi-pick .pi.on{background:#eef4fd;color:var(--acc);font-weight:600;}
+  .vi-pick .pi .tm{margin-left:auto;color:var(--sub);font-size:11.5px;}
+  .vi-run{margin-top:16px;border-top:1px solid #f0f2f6;padding-top:16px;}
+  .vi-run .sel{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:700;margin-bottom:12px;}
+  .vi-run .hint{font-size:12px;color:var(--sub);margin-top:10px;}
+  .vi-w{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .vi-w .wl{font-size:12.5px;color:var(--sub);}
+  .vi-seg{display:inline-flex;background:#eef1f5;border-radius:6px;padding:2px;gap:2px;}
+  .vi-seg button{padding:3px 12px;border-radius:4px;font-size:12px;color:#64748b;}
+  .vi-seg button.on{background:#fff;color:var(--acc);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.1);}
+  .vi-run .big{margin-left:auto;padding:9px 28px;font-size:14px;border-radius:8px;}
+  .vi-now{margin-top:16px;}
+  .vi-now .nr{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px dashed #f0f2f6;font-size:12.5px;}
+  .vi-now .bar{flex:1;height:4px;background:#eef1f5;border-radius:2px;overflow:hidden;}
+  .vi-now .bar i{display:block;height:100%;background:var(--acc);transition:width .5s;}
+  .vi-right{flex:1;background:#fff;border:1px solid var(--bd);border-radius:12px;padding:18px 20px;}
+  .vi-feed{margin-top:4px;}
+  .vi-feed .fi{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid #f5f7fa;font-size:12.5px;align-items:baseline;}
+  .vi-feed .fi:last-child{border-bottom:none;}
+  .vi-feed .t{color:var(--sub);font-size:11.5px;font-family:var(--mono);width:44px;flex:none;}
+  .vi-feed .m{color:var(--ink);}
+  .vi-feed .m .r{color:var(--sub);font-family:var(--mono);font-size:11.5px;}
+
+  /* modal */
+  .mmask{position:fixed;inset:0;background:rgba(15,23,42,.4);z-index:350;display:flex;align-items:center;justify-content:center;}
+  .mbox{background:#fff;border-radius:10px;width:400px;box-shadow:0 24px 60px rgba(0,0,0,.25);overflow:hidden;}
+  .mbox header{padding:14px 20px;font-size:14.5px;font-weight:600;border-bottom:1px solid #f0f2f6;display:flex;justify-content:space-between;align-items:center;}
+  .mbox .body{padding:14px 20px;}
+  .mbox footer{padding:12px 20px;border-top:1px solid #f0f2f6;display:flex;justify-content:flex-end;gap:8px;}
+  .mrow{display:flex;gap:10px;padding:5px 0;font-size:12.5px;color:var(--sub);align-items:center;}
+  .mrow b{color:var(--ink);font-weight:500;}
+</style>
+</head>
+<body>
+<div class="proto-tag">设计原型 v3 · G/H/I · ←/→ 切换</div>
+<div id="app"></div>
+<div class="toast-wrap" id="toasts"></div>
+<div id="switcher">
+  <button class="arrow" id="prev">◀</button>
+  <div class="vlabel" id="vlabel"></div>
+  <button class="arrow" id="next">▶</button>
+</div>
+
+<script>
+/* ============ mock ============ */
+const GROUPS=[
+  {key:'sales',label:'订单销售'},{key:'purchase',label:'采购协同'},{key:'production',label:'生产制造'},
+  {key:'master',label:'基础主数据'},{key:'org',label:'组织人员'},{key:'quality',label:'品质库存'},{key:'finance',label:'委外财务'},
+];
+const T=(key,label,group,o={})=>Object.assign({key,label,group,lastMin:null,status:'ok',last:{c:0,u:0},note:'',running:false},o);
+const TYPES=[
+  T('orders','销售订单','sales',{lastMin:12,last:{c:8,u:23}}),
+  T('order_details','订单明细','sales',{lastMin:12,last:{c:8,u:31}}),
+  T('materials','物料需求','sales',{lastMin:79,last:{c:14,u:52}}),
+  T('purchase_orders','采购订单','purchase',{lastMin:25,last:{c:5,u:17}}),
+  T('purchase_invoices','采购发票','purchase',{lastMin:1570,status:'stale',note:'上次同步在 26 小时前，超出调度间隔'}),
+  T('payment_applies','付款申请','purchase',{lastMin:49,last:{c:2,u:9}}),
+  T('mrp_plan_orders','MRP计划订单','production',{lastMin:52,last:{c:36,u:18}}),
+  T('production_task_orders','生产任务单','production',{lastMin:55,last:{c:12,u:40}}),
+  T('production_daily_reports','生产日报','production',{status:'never',note:'同步 SQL 未配置'}),
+  T('labor_price_audits','工价审核','production',{lastMin:4390,status:'stale',note:'上次同步在 3 天前'}),
+  T('customers','客户','master',{lastMin:110,last:{c:1,u:6}}),
+  T('suppliers','供应商','master',{lastMin:110,last:{c:0,u:2}}),
+  T('materials_masterdata','物料主数据','master',{lastMin:109,last:{c:24,u:203}}),
+  T('skus','SKU','master',{lastMin:108,last:{c:3,u:11}}),
+  T('products','产品','master',{lastMin:121,last:{c:0,u:4}}),
+  T('boms','BOM','master',{lastMin:341,last:{c:2,u:15}}),
+  T('bom_details','BOM明细','master',{lastMin:341,last:{c:18,u:64}}),
+  T('warehouses','仓库','master',{lastMin:3120,status:'stale',note:'自动同步已关闭'}),
+  T('locations','库位','master',{lastMin:3120,status:'stale',note:'自动同步已关闭'}),
+  T('processes','工序','master',{lastMin:2760,last:{c:0,u:2}}),
+  T('organizations','组织架构','org',{lastMin:1480,last:{c:0,u:0}}),
+  T('positions','岗位','org',{lastMin:1480,last:{c:0,u:1}}),
+  T('employees','员工','org',{lastMin:121,status:'error',note:'ERP 连接超时'}),
+  T('employee_organizations','员工组织关系','org',{lastMin:1480,last:{c:0,u:3}}),
+  T('quality_issues','品质异常','quality',{lastMin:35,last:{c:1,u:4}}),
+  T('inventory','库存','quality',{lastMin:20,last:{c:214,u:0}}),
+  T('subcontract_orders','委外订单','finance',{lastMin:178,last:{c:2,u:7}}),
+  T('subcontract_order_details','委外订单明细','finance',{lastMin:178,last:{c:9,u:22}}),
+  T('subject_balances','科目余额','finance',{lastMin:7120,status:'stale',note:'上次同步在 5 天前'}),
+];
+const typeByKey=k=>TYPES.find(t=>t.key===k);
+const FEED=[
+  {t:'12:03',type:'inventory',ok:true,txt:'同步完成',res:'+214 ~0'},
+  {t:'11:41',type:'orders',ok:true,txt:'同步完成',res:'+8 ~23'},
+  {t:'10:12',type:'employees',ok:false,txt:'同步失败 · ERP 连接超时',res:''},
+  {t:'09:55',type:'purchase_orders',ok:true,txt:'同步完成',res:'+5 ~17'},
+  {t:'08:30',type:'materials',ok:true,txt:'手动同步 · planner01',res:'+14 ~52'},
+  {t:'08:02',type:'suppliers',ok:true,txt:'同步完成',res:'+0 ~2'},
+  {t:'08:01',type:'customers',ok:true,txt:'同步完成',res:'+1 ~6'},
+  {t:'07:44',type:'quality_issues',ok:true,txt:'同步完成',res:'+1 ~4'},
+  {t:'06:30',type:'materials_masterdata',ok:true,txt:'同步完成',res:'+24 ~203'},
+];
+const state={variant:'G',onlyBad:false,foldOpen:false,sel:'orders',hours:24,detail:null};
+let tasks=[
+  {id:'T-a1b2c3',type:'inventory',by:'admin',progress:62,sec:41},
+];
+
+/* ============ helpers ============ */
+const $=s=>document.querySelector(s);
+function fmtRel(min){if(min==null)return'未同步';if(min<1)return'刚刚';if(min<60)return Math.round(min)+' 分钟前';if(min<1440)return Math.round(min/60)+' 小时前';return Math.round(min/1440)+' 天前';}
+function dotOf(t){if(t.running)return'run';if(t.status==='error')return'err';if(t.status==='never')return'warn';if(t.status==='stale')return'warn';return t.lastMin==null?'gray':'ok';}
+function toast(msg,kind='ok'){const el=document.createElement('div');el.className='toast '+kind;el.textContent=msg;$('#toasts').appendChild(el);setTimeout(()=>{el.style.opacity='0';el.style.transition='opacity .3s';setTimeout(()=>el.remove(),320);},2600);}
+function taskOf(k){return tasks.find(x=>x.type===k);}
+
+/* ============ engine ============ */
+function triggerSync(k){
+  const t=typeByKey(k);
+  if(t.status==='never'){toast(t.label+'：SQL 未配置，无法同步','warn');return;}
+  if(taskOf(k))return;
+  tasks.push({id:'T-'+Math.random().toString(16).slice(2,8),type:k,by:'admin',progress:4,sec:0});
+  t.running=true;
+  toast('已提交同步：'+t.label);
+  render();
+}
+setInterval(()=>{
+  let ch=false;
+  tasks.forEach(tk=>{
+    tk.sec++;tk.progress+=7+Math.random()*15;ch=true;
+    if(tk.progress>=100){
+      const t=typeByKey(tk.type);t.running=false;
+      if(t.status==='error'){tk.fail=true;toast(t.label+' 同步失败：'+t.note,'warn');FEED.unshift({t:nowStr(),type:t.key,ok:false,txt:'同步失败 · '+t.note,res:''});}
+      else{tk.fail=false;tk.c=Math.floor(Math.random()*15);tk.u=Math.floor(Math.random()*40);t.lastMin=0;t.last={c:tk.c,u:tk.u};toast(t.label+' 同步完成');FEED.unshift({t:nowStr(),type:t.key,ok:true,txt:'同步完成',res:'+'+tk.c+' ~'+tk.u});}
+      tasks=tasks.filter(x=>x!==tk);
+    }
+  });
+  if(ch)render();
+},900);
+function nowStr(){const d=new Date();return [d.getHours(),d.getMinutes()].map(x=>String(x).padStart(2,'0')).join(':');}
+
+/* ============ 简单行 (G/H共用) ============ */
+function simpleRow(t){
+  const running=taskOf(t.key);
+  return '<div class="vg-row '+(running?'running':'')+'" data-row="'+t.key+'">'+
+    '<span class="dot '+dotOf(t)+'"></span>'+
+    '<span class="nm">'+t.label+'</span>'+
+    (running
+      ?'<span class="tm">同步中</span><span class="vg-prog"><i style="width:'+running.progress+'%"></i></span><span class="num" style="color:var(--acc);font-size:12px;width:40px">'+Math.round(running.progress)+'%</span>'
+      :'<span class="tm">'+fmtRel(t.lastMin)+'</span>'+
+       '<span class="rs">'+(t.lastMin!=null?'<b>+'+t.last.c+'</b> ~'+t.last.u:'—')+'</span>'+
+       '<span class="go"><button class="sbtn" data-sync="'+t.key+'">同步</button></span>')+
+  '</div>';
+}
+function bindRows(){
+  document.querySelectorAll('[data-sync]').forEach(b=>b.onclick=e=>{e.stopPropagation();triggerSync(b.dataset.sync);});
+  document.querySelectorAll('[data-row]').forEach(r=>r.onclick=()=>{state.detail=r.dataset.row;openDetail(state.detail);});
+}
+function openDetail(k){
+  const t=typeByKey(k);
+  const box=document.createElement('div');
+  box.className='mmask';
+  box.innerHTML='<div class="mbox">'+
+    '<header><span><span class="dot '+dotOf(t)+'"></span> '+t.label+'</span><span style="cursor:pointer;color:#94a3b8" id="dm-x">✕</span></header>'+
+    '<div class="body">'+
+      '<div class="mrow">上次同步 <b>'+fmtRel(t.lastMin)+'</b></div>'+
+      '<div class="mrow">上次结果 <b>'+(t.lastMin!=null?'新增 '+t.last.c+' · 更新 '+t.last.u:'—')+'</b></div>'+
+      (t.note?'<div class="mrow" style="color:var(--err)">⚠ '+t.note+'</div>':'')+
+      '<div style="height:8px"></div>'+
+      '<div class="mrow" style="color:#94a3b8;font-size:11.5px">SQL / 映射配置请前往「同步SQL配置」页面</div>'+
+    '</div>'+
+    '<footer><button class="btn line" id="dm-c">关闭</button><button class="btn primary" id="dm-s">立即同步</button></footer>'+
+  '</div>';
+  document.body.appendChild(box);
+  const close=()=>box.remove();
+  box.onclick=e=>{if(e.target===box)close();};
+  box.querySelector('#dm-x').onclick=close;
+  box.querySelector('#dm-c').onclick=close;
+  box.querySelector('#dm-s').onclick=()=>{close();triggerSync(k);};
+}
+
+/* ============ G ============ */
+function renderG(){
+  const bad=TYPES.filter(t=>t.status==='error'||t.status==='never');
+  const shown=state.onlyBad?bad:TYPES;
+  const byG=GROUPS.map(g=>({g,ts:shown.filter(t=>t.group===g.key)})).filter(x=>x.ts.length);
+  const okCnt=TYPES.length-bad.length-TYPES.filter(t=>t.status==='stale').length;
+  $('#app').innerHTML=
+  '<div class="vg-bar"><h1>数据集成</h1>'+
+    '<span class="sum"><span class="dot '+(bad.length?'err':'ok')+'"></span>'+(bad.length?bad.length+' 个类型异常':okCnt+' 个类型全部正常')+'</span>'+
+    '<div style="flex:1"></div>'+
+    '<button class="btn line" id="g-bad">'+(state.onlyBad?'显示全部':'只看异常')+'</button>'+
+    '<button class="btn primary" id="g-all">全部同步</button>'+
+  '</div>'+
+  '<div class="vg-wrap">'+
+    (bad.length?'<div class="vg-problem">'+
+      bad.map(t=>'<div class="p-row"><span class="dot err"></span><b>'+t.label+'</b><span class="why">'+t.note+'</span>'+(t.status==='error'?'<button class="btn primary" style="padding:3px 14px;font-size:12px" data-sync="'+t.key+'">重试同步</button>':'<button class="btn line" style="padding:3px 14px;font-size:12px" id="g-cfg">去配置</button>')+'</div>').join('')+
+    '</div>':'')+
+    '<table class="vg-table"><tr><td style="padding:0">'+
+      byG.map(x=>'<div class="vg-sec">'+x.g.label+'</div>'+x.ts.map(simpleRow).join('')).join('')+
+    '</td></tr></table>'+
+  '</div>';
+  document.querySelectorAll('[data-sync]').forEach(b=>b.onclick=e=>{e.stopPropagation();triggerSync(b.dataset.sync);});
+  bindRows();
+  $('#g-bad').onclick=()=>{state.onlyBad=!state.onlyBad;render();};
+  $('#g-all').onclick=()=>toast('已提交全部同步（原型演示）');
+  const c=$('#g-cfg');if(c)c.onclick=()=>toast('原型：跳转「同步SQL配置」');
+}
+
+/* ============ H ============ */
+function renderH(){
+  const bad=TYPES.filter(t=>t.status==='error'||t.status==='never');
+  const stale=TYPES.filter(t=>t.status==='stale');
+  const allGood=!bad.length&&!stale.length;
+  const running=tasks;
+  $('#app').innerHTML=
+  '<div class="vh-wrap">'+
+    '<div class="vh-hero '+(allGood?'':'bad')+'">'+
+      '<div class="icon">'+(allGood?'✅':'⚠️')+'</div>'+
+      '<h2>'+(allGood?'数据同步一切正常':bad.length+' 个类型失败，'+stale.length+' 个类型过期')+'</h2>'+
+      '<div class="sub">ERP 连接正常 · 最近调度 08:00 · 下次调度 08:30</div>'+
+    '</div>'+
+    (running.length?'<div class="vh-tasks">'+running.map(tk=>{
+      const t=typeByKey(tk.type);
+      return '<div class="vh-item"><span class="dot run"></span><span class="nm">'+t.label+'</span><span class="vi-now" style="flex:1"><span class="bar" style="display:block;height:4px;background:#eef1f5;border-radius:2px;overflow:hidden"><i style="display:block;height:100%;width:'+tk.progress+'%;background:var(--acc)"></i></span></span><span class="num" style="color:var(--acc);font-size:12px">'+Math.round(tk.progress)+'%</span></div>';
+    }).join('')+'</div>':'')+
+    '<div class="vh-tasks">'+
+      bad.map(t=>'<div class="vh-item err"><span class="dot err"></span><span class="nm">'+t.label+'</span><span class="why">'+t.note+'</span>'+(t.status==='error'?'<button class="btn primary" style="padding:4px 14px;font-size:12.5px" data-sync="'+t.key+'">重试同步</button>':'<button class="btn line" style="padding:4px 14px;font-size:12.5px" id="h-cfg">去配置</button>')+'</div>').join('')+
+      stale.map(t=>'<div class="vh-item"><span class="dot warn"></span><span class="nm">'+t.label+'</span><span class="why">'+t.note+'（'+fmtRel(t.lastMin)+'）</span><button class="btn line" style="padding:4px 14px;font-size:12.5px" data-sync="'+t.key+'">立即同步</button></div>').join('')+
+    '</div>'+
+    '<div class="vh-fold '+(state.foldOpen?'open':'')+'" id="h-fold">'+
+      '<div class="fh"><span class="arr">▶</span>全部类型 <span class="cnt">'+TYPES.length+' 个 · 点击展开</span></div>'+
+      '<div class="vh-list"><table class="vg-table"><tr><td style="padding:0">'+
+        GROUPS.map(g=>{const ts=TYPES.filter(t=>t.group===g.key);return ts.length?'<div class="vg-sec">'+g.label+'</div>'+ts.map(simpleRow).join(''):'';}).join('')+
+      '</td></tr></table></div>'+
+    '</div>'+
+  '</div>';
+  document.querySelectorAll('[data-sync]').forEach(b=>b.onclick=e=>{e.stopPropagation();triggerSync(b.dataset.sync);});
+  bindRows();
+  $('#h-fold .fh').onclick=()=>{state.foldOpen=!state.foldOpen;render();};
+  const c=$('#h-cfg');if(c)c.onclick=()=>toast('原型：跳转「同步SQL配置」');
+}
+
+/* ============ I ============ */
+function renderI(){
+  const sel=typeByKey(state.sel);
+  const running=tasks;
+  $('#app').innerHTML=
+  '<div class="vi-wrap">'+
+    '<div class="vi-left">'+
+      '<h3>发起同步</h3>'+
+      '<div class="vi-pick">'+
+        TYPES.map(t=>'<div class="pi '+(state.sel===t.key?'on':'')+'" data-sel="'+t.key+'"><span class="dot '+dotOf(t)+'"></span>'+t.label+'<span class="tm">'+fmtRel(t.lastMin)+'</span></div>').join('')+
+      '</div>'+
+      '<div class="vi-run">'+
+        '<div class="sel"><span class="dot '+dotOf(sel)+'"></span>'+sel.label+(sel.note?'<span style="font-size:12px;color:var(--err);font-weight:400">⚠ '+sel.note+'</span>':'')+'</div>'+
+        '<div class="vi-w">'+
+          '<span class="wl">同步范围：最近</span>'+
+          '<div class="vi-seg">'+[1,4,24,72].map(h=>'<button data-h="'+h+'" class="'+(state.hours===h?'on':'')+'">'+(h<24?h+'小时':(h/24)+'天')+'</button>').join('')+'</div>'+
+          '<span class="wl">内的变动数据</span>'+
+          '<button class="btn primary big" id="i-run" '+(sel.status==='never'?'disabled':'')+'>'+(sel.status==='never'?'SQL 未配置':'▶ 同步')+'</button>'+
+        '</div>'+
+        ((state.sel==='orders'||state.sel==='materials')?'<div class="hint">💡 需要只同步指定订单？<a style="color:var(--acc);cursor:pointer" id="i-adv">指定订单号</a></div>':'')+
+      '</div>'+
+      (running.length?'<div class="vi-now"><h3 style="margin-bottom:2px">正在同步</h3>'+
+        running.map(tk=>{const t=typeByKey(tk.type);
+          return '<div class="nr"><span class="dot run"></span><b>'+t.label+'</b><span class="bar"><i style="width:'+tk.progress+'%"></i></span><span class="num" style="color:var(--acc)">'+Math.round(tk.progress)+'%</span></div>';}).join('')+
+      '</div>':'')+
+    '</div>'+
+    '<div class="vi-right">'+
+      '<h3>同步动态</h3>'+
+      '<div class="vi-feed">'+
+        FEED.map(f=>{const t=typeByKey(f.type);
+          return '<div class="fi"><span class="t">'+f.t+'</span><span class="dot '+(f.ok?'ok':'err')+'" style="align-self:center"></span><span class="m">'+t.label+' <span style="color:var(--sub);font-size:12px">'+f.txt+'</span> '+(f.res?'<span class="r">'+f.res+'</span>':'')+'</span></div>';}).join('')+
+      '</div>'+
+    '</div>'+
+  '</div>';
+  document.querySelectorAll('[data-sel]').forEach(p=>p.onclick=()=>{state.sel=p.dataset.sel;render();});
+  document.querySelectorAll('[data-h]').forEach(b=>b.onclick=()=>{state.hours=+b.dataset.h;render();});
+  $('#i-run').onclick=()=>triggerSync(state.sel);
+  const a=$('#i-adv');if(a)a.onclick=()=>toast('原型：弹出简单订单多选框');
+}
+
+/* ============ switcher ============ */
+const VARIANTS=[
+  {key:'G',name:'极简清单',sub:'一张表 · 3列+1按钮'},
+  {key:'H',name:'摘要优先',sub:'打开即答案 · 问题逐条给按钮'},
+  {key:'I',name:'调度台',sub:'左选类型右看动态 · 无表格'},
+];
+function render(){
+  const v=state.variant;
+  if(v==='G')renderG();else if(v==='H')renderH();else renderI();
+  const info=VARIANTS.find(x=>x.key===v);
+  $('#vlabel').innerHTML=v+' · '+info.name+'<small>'+info.sub+'</small>';
+}
+function cycle(d){
+  const i=VARIANTS.findIndex(v=>v.key===state.variant);
+  state.variant=VARIANTS[(i+d+VARIANTS.length)%VARIANTS.length].key;
+  render();
+}
+$('#prev').onclick=()=>cycle(-1);
+$('#next').onclick=()=>cycle(1);
+document.addEventListener('keydown',e=>{
+  if(['INPUT','TEXTAREA'].includes(document.activeElement.tagName))return;
+  if(e.key==='ArrowLeft')cycle(-1);
+  if(e.key==='ArrowRight')cycle(1);
+});
+render();
+</script>
+</body>
+</html>

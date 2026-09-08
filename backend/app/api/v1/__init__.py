@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import assistant, basicdata, common, dashboard, exception, external, masterdata, material, meeting, npi, order, production, purchase, rules, writeback
+from app.api.v1 import assistant, basicdata, common, dashboard, exception, external, masterdata, material, meeting, npi, order, production, purchase, rules, system, writeback
 
 api_router = APIRouter()
 
@@ -24,6 +24,7 @@ api_router.include_router(material.supplier_message_router, prefix="/materials/s
 api_router.include_router(material.subcontract_orders_router, prefix="/materials/subcontract-orders", tags=["物料齐套中心-委外订单"])
 api_router.include_router(material.po_router, prefix="/materials", tags=["物料齐套中心-ERP采购订单"])
 api_router.include_router(material.stock_check_router, prefix="/materials", tags=["物料齐套中心-物料盘点"])
+api_router.include_router(material.scrap_inventory_router, prefix="/materials", tags=["物料齐套中心-报废物料库存查询"])
 
 # Production center
 api_router.include_router(production.router, prefix="/production", tags=["生产协同中心"])
@@ -68,6 +69,9 @@ api_router.include_router(basicdata.wecom_share_router, prefix="/share", tags=["
 
 # 权限定义
 api_router.include_router(basicdata.permissions_router, prefix="/permissions", tags=["权限定义"])
+
+# 部署版本管理（部署运维 · 部署版本）
+api_router.include_router(system.deploy_versions_router, prefix="/system/deploy", tags=["部署运维·部署版本"])
 
 # 数据供给
 api_router.include_router(basicdata.data_supply_router, prefix="/basicdata/data-supply", tags=["数据供给"])

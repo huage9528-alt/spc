@@ -19,3 +19,5 @@ apscheduler==3.10.4
 openai>=1.0.0
 dashscope>=1.0.0
 tiktoken>=0.7.0
+# deploy_agent 鉴权用（import jwt）
+PyJWT==2.9.0

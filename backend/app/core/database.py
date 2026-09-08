@@ -14,6 +14,20 @@ engine = create_async_engine(
     # 空闲池连接可能被防火墙/NAT 静默丢弃:pre_ping 挡"已关闭",recycle 挡"静默死"
     pool_pre_ping=True,
     pool_recycle=settings.DB_POOL_RECYCLE,
+    # 服务端兜底超时(毫秒)。此前服务端三者全为 0,任何锁冲突/泄漏事务都会无限等待,
+    # 是"整库卡死"的直接推手:
+    #   lock_timeout=15s            行锁等待超过 15s 报错,而不是把请求挂死
+    #   idle_in_txn_timeout=5min    事务开着却 5 分钟不发语句(泄漏事务)自动断开
+    #   statement_timeout=10min     单条语句跑超 10 分钟终止,防止拖垮整库
+    connect_args={
+        "timeout": 10,
+        "command_timeout": 600,
+        "server_settings": {
+            "lock_timeout": "15000",
+            "idle_in_transaction_session_timeout": "300000",
+            "statement_timeout": "600000",
+        },
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(

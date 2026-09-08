@@ -298,7 +298,7 @@ async def get_order_product_materials(
         order_query = select(SaleOrder).where(SaleOrder.order_no == order_no)
         if line_no:
             order_query = order_query.where(SaleOrder.line_no == line_no)
-        order = (await db.execute(order_query)).scalar_one_or_none()
+        order = (await db.execute(order_query.order_by(SaleOrder.id.desc()).limit(1))).scalar_one_or_none()
         if order:
             lines = [
                 SimpleNamespace(

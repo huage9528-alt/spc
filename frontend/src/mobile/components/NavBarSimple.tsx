@@ -1,15 +1,23 @@
 import { useNavigate } from 'react-router-dom'
-import { NavBar } from 'antd-mobile'
+import MIcon from './MIcon'
 
-export default function NavBarSimple({ title, onBack, right }: { title: string; onBack?: () => void; right?: React.ReactNode }) {
+export default function NavBarSimple({
+  title,
+  onBack,
+  right,
+}: {
+  title: React.ReactNode
+  onBack?: () => void
+  right?: React.ReactNode
+}) {
   const navigate = useNavigate()
   return (
-    <NavBar
-      style={{ background: '#fff', borderRadius: 12, marginBottom: 10, '--height': '44px' } as any}
-      onBack={onBack ?? (() => navigate(-1))}
-      right={right}
-    >
-      {title}
-    </NavBar>
+    <header className="en-nav">
+      <button className="nav-back" onClick={onBack ?? (() => navigate(-1))}>
+        <MIcon name="back" />
+      </button>
+      <div className="nav-title">{title}</div>
+      <div className="nav-right">{right}</div>
+    </header>
   )
 }

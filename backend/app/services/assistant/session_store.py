@@ -2,33 +2,15 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
+from app.core.redis_client import get_command_client, note_failure, note_success
 
 logger = logging.getLogger(__name__)
 
 # 会话配置
 SESSION_TTL = 1800  # 30 分钟过期
 MAX_HISTORY_LENGTH = 20  # 最多保留 20 条消息
-
-_redis_client = None
-
-
-def _get_redis():
-    """懒加载 Redis 客户端"""
-    global _redis_client
-    if _redis_client is None:
-        try:
-            import redis
-            from app.core.config import get_settings
-            settings = get_settings()
-            _redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
-            _redis_client.ping()
-            logger.info("Session store: Redis 连接成功")
-        except Exception as e:
-            logger.warning(f"Session store: Redis 不可用 ({e})，使用内存存储")
-            _redis_client = None
-    return _redis_client
-
 
 # 内存 fallback（Redis 不可用时）
 _memory_store: Dict[str, str] = {}
@@ -43,18 +25,24 @@ async def get_history(session_id: str) -> List[Dict[str, Any]]:
     if not session_id:
         return []
 
-    try:
-        r = _get_redis()
-        if r:
-            data = r.get(_session_key(session_id))
-        else:
-            data = _memory_store.get(_session_key(session_id))
+    key = _session_key(session_id)
+    client = get_command_client()
+    if client is None:
+        data = _memory_store.get(key)
+    else:
+        try:
+            data = await client.get(key)
+            note_success()
+        except Exception as e:
+            note_failure()
+            logger.error(f"获取会话历史失败: {e}")
+            data = _memory_store.get(key)
 
-        if data:
+    if data:
+        try:
             return json.loads(data)
-    except Exception as e:
-        logger.error(f"获取会话历史失败: {e}")
-
+        except Exception as e:
+            logger.error(f"解析会话历史失败: {e}")
     return []
 
 
@@ -67,14 +55,17 @@ async def save_history(session_id: str, history: List[Dict[str, Any]]) -> None:
     if len(history) > MAX_HISTORY_LENGTH:
         history = history[-MAX_HISTORY_LENGTH:]
 
+    key = _session_key(session_id)
+    client = get_command_client()
+    if client is None:
+        _memory_store[key] = json.dumps(history, ensure_ascii=False, default=str)
+        return
     try:
-        data = json.dumps(history, ensure_ascii=False, default=str)
-        r = _get_redis()
-        if r:
-            r.setex(_session_key(session_id), SESSION_TTL, data)
-        else:
-            _memory_store[_session_key(session_id)] = data
+        await client.setex(key, SESSION_TTL, json.dumps(history, ensure_ascii=False, default=str))
+        note_success()
     except Exception as e:
+        note_failure()
+        _memory_store[key] = json.dumps(history, ensure_ascii=False, default=str)
         logger.error(f"保存会话历史失败: {e}")
 
 
@@ -98,11 +89,14 @@ async def clear_session(session_id: str) -> None:
     """清除会话"""
     if not session_id:
         return
+    key = _session_key(session_id)
+    client = get_command_client()
+    if client is None:
+        _memory_store.pop(key, None)
+        return
     try:
-        r = _get_redis()
-        if r:
-            r.delete(_session_key(session_id))
-        else:
-            _memory_store.pop(_session_key(session_id), None)
+        await client.delete(key)
+        note_success()
     except Exception as e:
+        note_failure()
         logger.error(f"清除会话失败: {e}")

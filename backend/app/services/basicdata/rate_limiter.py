@@ -7,9 +7,7 @@ import logging
 import time
 from typing import Optional
 
-import redis.asyncio as redis
-
-from app.core.config import get_settings
+from app.core.redis_client import get_command_client, note_failure, note_success
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +20,15 @@ async def check_rate_limit(api_key_id: int, rate_limit: Optional[int]) -> tuple[
     if not rate_limit or rate_limit <= 0:
         return True, 0
 
-    client = None
+    client = get_command_client()
+    if client is None:
+        # 熔断开启期间直接放行，不付超时代价
+        return True, 0
     try:
-        client = redis.from_url(
-            get_settings().REDIS_URL, decode_responses=True, socket_connect_timeout=2,
-        )
         epoch_minute = int(time.time() // 60)
         key = f"{RATE_LIMIT_PREFIX}:{api_key_id}:{epoch_minute}"
         count = await client.incr(key)
+        note_success()
         if count == 1:
             await client.expire(key, 60)
         if count > rate_limit:
@@ -37,11 +36,6 @@ async def check_rate_limit(api_key_id: int, rate_limit: Optional[int]) -> tuple[
             return False, max(retry_after, 1)
         return True, 0
     except Exception as e:
+        note_failure()
         logger.error(f"[数据供给限流] Redis 异常，降级放行 api_key_id={api_key_id}: {e}")
         return True, 0
-    finally:
-        if client:
-            try:
-                await client.aclose()
-            except Exception:
-                pass

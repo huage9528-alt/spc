@@ -17,7 +17,7 @@ class StockCheck(Base):
     check_no = Column(String(32), nullable=False, unique=True, comment="盘点单号 PDyyyyMMdd-NNN")
     order_no = Column(String(64), nullable=True, index=True, comment="触发起源订单号(manual 类型可空)")
     title = Column(String(200), nullable=True, comment="盘点单标题")
-    check_type = Column(String(16), nullable=False, default="order", comment="order/manual/cycle_count")
+    check_type = Column(String(16), nullable=False, default="order", comment="order/manual/quick/cycle_count")
     status = Column(String(16), nullable=False, default="open", comment="open/in_progress/completed/cancelled")
     check_date = Column(Date, nullable=False, comment="盘点日期")
     total_materials = Column(Integer, nullable=False, default=0, comment="应盘物料数")

@@ -1,0 +1,6 @@
+# Deploy Agent 独立依赖（其它依赖复用 backend/requirements.txt 主项目中的 fastapi/jwt/httpx/dotenv）
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+pydantic-settings>=2.2
+PyJWT>=2.8

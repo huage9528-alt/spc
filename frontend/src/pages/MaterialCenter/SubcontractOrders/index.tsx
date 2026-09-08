@@ -24,6 +24,8 @@ interface DetailRow {
   delivery_qty?: number | null
   received_qty?: number | null
   returned_qty?: number | null
+  price?: number | null
+  amount?: number | null
   sale_order_no?: string | null
   data_source?: string | null
 }
@@ -696,6 +698,12 @@ function SubcontractDetailInline({ head, onChanged }: { head: HeadRow; onChanged
         />
       ),
     },
+    { title: '单价', dataIndex: 'price', width: 100, align: 'right', sorter: true,
+      render: (v: any) => v != null ? Number(v).toFixed(4) : '-',
+    },
+    { title: '金额', dataIndex: 'amount', width: 110, align: 'right', sorter: true,
+      render: (v: any) => v != null ? Number(v).toFixed(2) : '-',
+    },
     { title: '销售订单号', dataIndex: 'sale_order_no', width: 150, sorter: true,
       filterDropdown: ({ confirm, clearFilters }) => (
         <TextContainsFilter
@@ -750,7 +758,7 @@ function SubcontractDetailInline({ head, onChanged }: { head: HeadRow; onChanged
         loading={loading}
         dataSource={items}
         columns={columns}
-        scroll={{ x: 1200 }}
+        scroll={{ x: 1400 }}
         pagination={{
           total, current: page, pageSize,
           showSizeChanger: true, size: 'small',
@@ -778,6 +786,8 @@ function SubcontractDetailInline({ head, onChanged }: { head: HeadRow; onChanged
         <Form form={addForm} layout="vertical" onFinish={handleAdd}>
           <Form.Item name="material_id" label="物料ID"><InputNumber style={{ width: '100%' }} /></Form.Item>
           <Form.Item name="qty" label="数量"><InputNumber style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="price" label="单价"><InputNumber style={{ width: '100%' }} precision={4} /></Form.Item>
+          <Form.Item name="amount" label="金额"><InputNumber style={{ width: '100%' }} precision={2} /></Form.Item>
           <Form.Item name="sale_order_no" label="销售订单号"><Input /></Form.Item>
         </Form>
       </Modal>

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Row, Col, Table, Tag, Input, InputNumber, Select, Button, message, Space, Tooltip, Modal, Form, DatePicker, Card, Spin, Progress, Dropdown, Switch, Checkbox, Popover } from 'antd'
+import { Row, Col, Table, Tag, Input, InputNumber, Select, Button, message, Space, Tooltip, Modal, Form, DatePicker, Card, Spin, Progress, Dropdown, Switch, Checkbox, Popover, Drawer } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 const { RangePicker } = DatePicker
 import {
@@ -19,6 +19,7 @@ import {
   DownOutlined,
   SettingOutlined,
   BarChartOutlined,
+  LockOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import RiskBadge from '../../../components/RiskBadge'
@@ -29,6 +30,7 @@ import { formatDate, formatDateTime } from '../../../utils'
 import { useExport } from '../../../hooks/useExport'
 import ExportColumnSelector, { type ExportColumnOption } from '../../../components/ExportColumnSelector'
 import { useUiPreferencesStore } from '../../../store/uiPreferences'
+import { useAuthStore } from '../../../store/auth'
 import ShippingAnalyticsCharts from './components/ShippingAnalyticsCharts'
 
 interface OrderRow {
@@ -206,6 +208,109 @@ const ORDER_COLUMN_GROUPS: { title: string; keys: { key: string; label: string }
 
 const ORDER_COLUMN_KEYS: string[] = ORDER_COLUMN_GROUPS.flatMap(g => g.keys.map(k => k.key))
 
+/* ── 默认列（原型 v5：核心列常显；物料分类16 / 生产节点4 / 补充维护4 默认收起，列设置里展开）── */
+const DEFAULT_COLUMN_KEYS: string[] = [
+  'department', 'delivery_completed_date', 'customer_grade', 'customer_code', 'order_no',
+  'risk_level', 'order_qty', 'order_amount', 'completed_qty', 'order_date',
+  'promised_date', 'shipping_plan', 'inspection_result', 'packaging_status',
+  'material_ready_date', 'shipping_status_desc', 'procurement_status', 'is_closed', 'status',
+]
+
+/* ── 字段编辑元数据：edit=可手工填写类型；ro=只读原因（表头 ✎/🔒 标记来源）── */
+const FIELD_EDIT_META: Record<string, { edit?: 'text' | 'date' | 'number' | 'select'; ro?: string }> = {
+  department: { ro: 'ERP 同步，只读' },
+  delivery_completed_date: { edit: 'date' },
+  customer_grade: { edit: 'select' },
+  customer_code: { ro: 'ERP 同步，只读' },
+  order_no: { ro: 'ERP 同步，只读' },
+  risk_level: { edit: 'select' },
+  order_qty: { ro: 'ERP 同步，只读' },
+  order_amount: { ro: 'ERP 同步，只读' },
+  completed_qty: { edit: 'number' },
+  order_date: { ro: 'ERP 同步，只读' },
+  promised_date: { ro: 'ERP 同步，只读' },
+  shipping_plan: { edit: 'date' },
+  customer_inspection_date: { edit: 'date' },
+  planned_start_date: { edit: 'date' },
+  inspection_result: { edit: 'select' },
+  packaging_status: { edit: 'text' },
+  bom_return_date: { edit: 'date' },
+  material_ready_date: { edit: 'date' },
+  shipping_status_desc: { edit: 'text' },
+  procurement_status: { ro: '自动计算，只读' },
+  front_process_date: { edit: 'date' },
+  first_article_date: { edit: 'date' },
+  assembly_start_date: { edit: 'date' },
+  assembly_complete_date: { edit: 'date' },
+  remark: { edit: 'text' },
+  is_closed: { ro: '只读' },
+  status: { ro: 'ERP 同步，只读' },
+  ...Object.fromEntries(MATERIAL_KEYS.map(k => [`mat_${k}`, { edit: 'date' as const }])),
+}
+
+/* 表头标记改为 th 伪元素（见 index.css sc-hed/sc-hro）：✎ 可手工填写 / 🔒 只读，绝对定位在 th 左侧预留区，不进标题流、不与筛选/排序图标重叠 */
+
+/* 快速视图（映射后端已有筛选参数） */
+type QuickView = 'all' | 'mine' | 'today' | 'overdue' | 'high' | 'shipweek'
+const QUICK_VIEW_DEFS: { key: QuickView; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: 'mine', label: '我的待办' },
+  { key: 'today', label: '今日到期' },
+  { key: 'overdue', label: '已逾期' },
+  { key: 'high', label: '高危' },
+  { key: 'shipweek', label: '本周发货' },
+]
+
+/* 编辑弹窗：选项与分节配置（整单字段集中维护） */
+const GRADE_OPTS = [
+  { value: 'A', label: 'A 级' }, { value: 'B', label: 'B 级' },
+  { value: 'C', label: 'C 级' }, { value: 'D', label: 'D 级' },
+]
+const RESULT_OPTS = [
+  { value: 'OK', label: 'OK / 通过' }, { value: 'NG', label: 'NG / 不通过' }, { value: '待检', label: '待检' },
+]
+const RISK_OPTS = [
+  { value: 'red', label: '高风险' }, { value: 'yellow', label: '中风险' },
+  { value: 'blue', label: '低风险' }, { value: 'green', label: '正常' },
+]
+const CLOSED_OPTS = [{ value: 'true', label: '已关闭' }, { value: 'false', label: '未关闭' }]
+type EditFieldType = 'date' | 'text' | 'select' | 'number'
+interface EditFieldDef { k: string; label: string; t: EditFieldType; opts?: { value: string; label: string }[] }
+const EDIT_SECTIONS: { title: string; fields: EditFieldDef[] }[] = [
+  {
+    title: '交期与计划', fields: [
+      { k: 'delivery_completed_date', label: '发货完成', t: 'date' },
+      { k: 'customer_grade', label: '客户等级', t: 'select', opts: GRADE_OPTS },
+      { k: 'shipping_plan', label: '出货计划', t: 'date' },
+      { k: 'customer_inspection_date', label: '客户验货时间', t: 'date' },
+      { k: 'planned_start_date', label: '上线时间', t: 'date' },
+      { k: 'inspection_result', label: '客检结果', t: 'select', opts: RESULT_OPTS },
+      { k: 'packaging_status', label: '包装完成状况', t: 'text' },
+      { k: 'bom_return_date', label: 'BOM回收', t: 'date' },
+      { k: 'material_ready_date', label: '料齐套时间', t: 'date' },
+    ],
+  },
+  {
+    title: '风险与发货', fields: [
+      { k: 'risk_level', label: '风险等级', t: 'select', opts: RISK_OPTS },
+      { k: 'shipping_status_desc', label: '发货状态即时说明', t: 'text' },
+      { k: 'remark', label: '备注', t: 'text' },
+    ],
+  },
+  {
+    title: '生产节点', fields: [
+      { k: 'completed_qty', label: '完成数量', t: 'number' },
+      { k: 'front_process_date', label: '前道', t: 'date' },
+      { k: 'first_article_date', label: '首件检验日期', t: 'date' },
+      { k: 'assembly_start_date', label: '组装上线日期', t: 'date' },
+      { k: 'assembly_complete_date', label: '组装完成日期', t: 'date' },
+    ],
+  },
+  {
+    title: '物料分类到料日期', fields: MATERIAL_KEYS.map(k => ({ k: `mat_${k}`, label: k, t: 'date' as const })),
+  },
+]
+
 
 const today = () => new Date().toISOString().slice(0, 10)
 
@@ -253,7 +358,7 @@ export default function OrderList() {
   const getColumnVisibility = useUiPreferencesStore(s => s.getColumnVisibility)
   const setColumnVisibility = useUiPreferencesStore(s => s.setColumnVisibility)
   const [visibleColumnKeys, setVisibleColumnKeys] = useState<string[]>(
-    () => getColumnVisibility(ORDER_LIST_PAGE_KEY, ORDER_COLUMN_KEYS)
+    () => getColumnVisibility(ORDER_LIST_PAGE_KEY, DEFAULT_COLUMN_KEYS)
   )
   const [orders, setOrders] = useState<OrderRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -288,10 +393,6 @@ export default function OrderList() {
   const [showCharts, setShowCharts] = useState(false)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
   const [analyticsData, setAnalyticsData] = useState<any>(null)
-  const [editModalOpen, setEditModalOpen] = useState(false)
-  const [editingRecord, setEditingRecord] = useState<OrderRow | null>(null)
-  const [editForm] = Form.useForm()
-  const [saving, setSaving] = useState(false)
   const [expandedKeys, setExpandedKeys] = useState<string[]>([])
   const [detailCache, setDetailCache] = useState<Record<string, OrderDetailData>>({})
   const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>({})
@@ -301,6 +402,24 @@ export default function OrderList() {
   const [exportFormat, setExportFormat] = useState<'xlsx' | 'csv'>('xlsx')
   const [selectedColumns, setSelectedColumns] = useState<string[]>([])
   const [fieldRemarks, setFieldRemarks] = useState<Record<string, string>>({})
+
+  /* ── v5 行内编辑 / 快速视图 / 列设置抽屉 ── */
+  const userName = useAuthStore(s => s.currentUser?.display_name || s.currentUser?.username)
+  const [quickView, setQuickView] = useState<QuickView>('all')
+  const [chipCounts, setChipCounts] = useState<Record<string, number | undefined>>({})
+  const [highlightEdit, setHighlightEdit] = useState(false)
+  const [colsDrawerOpen, setColsDrawerOpen] = useState(false)
+  const [tipDismissed, setTipDismissed] = useState(() => {
+    try { return localStorage.getItem('order_edit_tip_dismissed') === '1' } catch { return false }
+  })
+  /* 行编辑（弹窗形态：整单字段集中维护） */
+  const [rowEdId, setRowEdId] = useState<number | null>(null)
+  const [rowEdDraft, setRowEdDraft] = useState<Record<string, any>>({})
+  const [editModalOpen, setEditModalOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  /* 本次会话手工修改过的单元格（圆点标记）与保存绿闪 */
+  const [sessionEdited, setSessionEdited] = useState<Set<string>>(new Set())
+  const [flashCells, setFlashCells] = useState<Set<string>>(new Set())
 
   // ── 加载字段备注 ──
   useEffect(() => {
@@ -333,7 +452,7 @@ export default function OrderList() {
     setShouldInitialLoad(true)
   }, [searchParams, setSearchParams])
 
-  // ── 行内编辑 ──
+  // ── 行内编辑（v5：✎ 列点击即编 · Enter/Tab 保存跳格 · Esc 取消 · 整行编辑 + 保存条）──
   const [editingCell, setEditingCell] = useState<string | null>(null)
   const [savingCell, setSavingCell] = useState<string | null>(null)
   const savingCellRef = useRef<string | null>(null)
@@ -343,6 +462,40 @@ export default function OrderList() {
     'planned_start_date', 'bom_return_date', 'material_ready_date',
     'front_process_date', 'first_article_date', 'assembly_start_date', 'assembly_complete_date',
   ]
+
+  /* 日期快捷项（今天/明天/+3天/+7天；清除走 allowClear） */
+  const DATE_PRESETS = [
+    { label: '今天', value: dayjs() },
+    { label: '明天', value: dayjs().add(1, 'day') },
+    { label: '+3天', value: dayjs().add(3, 'day') },
+    { label: '+7天', value: dayjs().add(7, 'day') },
+  ]
+
+  /* 保存后跳到本行下一个可编辑格（横向滚动跟随） */
+  const advanceNext = (rowId: number, field: string) => {
+    const tr = document.querySelector(`tr[data-row-key="${rowId}"]`)
+    if (!tr) return
+    const cells = Array.from(tr.querySelectorAll<HTMLElement>('[data-ec]'))
+    const idx = cells.findIndex(c => c.dataset.ec === field)
+    for (let j = idx + 1; j < cells.length; j++) {
+      const el = cells[j]
+      if (el.dataset.ec) {
+        el.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+        el.click()
+        return
+      }
+    }
+  }
+
+  /* 手工修改标记（本次会话）+ 保存绿闪 */
+  const markEdited = (id: number, field: string) => {
+    const key = `${id}:${field}`
+    setSessionEdited(prev => new Set(prev).add(key))
+    setFlashCells(prev => new Set(prev).add(key))
+    window.setTimeout(() => {
+      setFlashCells(prev => { const n = new Set(prev); n.delete(key); return n })
+    }, 1600)
+  }
 
   const handleCellSave = useCallback(async (record: OrderRow, field: string, value: any) => {
     const cellKey = `${record.id}-${field}`
@@ -377,7 +530,7 @@ export default function OrderList() {
         }
         return { ...o, [field]: payload[field] }
       }))
-      message.success('保存成功')
+      markEdited(record.id, field)
     } catch {
       // 错误已由全局拦截器提示
     } finally {
@@ -386,24 +539,121 @@ export default function OrderList() {
     }
   }, [])
 
-  // ── 行内编辑渲染辅助（参考采购到料计划模式）──
+  /* ── 整行编辑 ── */
+  const origVal = (r: OrderRow, field: string): any => {
+    if (field.startsWith('mat_')) return r.material_dates?.[field.slice(4)] ?? null
+    if (field === 'is_closed') return r.is_closed === 1 ? 'true' : 'false'
+    return (r as any)[field] ?? null
+  }
+  const setDraftVal = (field: string, v: any) => setRowEdDraft(prev => ({ ...prev, [field]: v }))
+  const startRowEd = (record: OrderRow) => {
+    const draft: Record<string, any> = {}
+    Object.keys(FIELD_EDIT_META).forEach(f => { if (FIELD_EDIT_META[f].edit) draft[f] = origVal(record, f) })
+    setRowEdDraft(draft)
+    setEditingCell(null)
+    setRowEdId(record.id)
+    setEditModalOpen(true)
+  }
+  const cancelRowEd = () => { setEditModalOpen(false); setRowEdId(null); setRowEdDraft({}) }
+  const rowEdRecord = rowEdId != null ? orders.find(o => o.id === rowEdId) ?? null : null
+  const rowDirtyCount = useMemo(() => {
+    if (!rowEdRecord) return 0
+    const r = rowEdRecord
+    return Object.keys(rowEdDraft).filter(f => String(rowEdDraft[f] ?? '') !== String(origVal(r, f) ?? '')).length
+  }, [rowEdRecord, rowEdDraft])
+  const saveRowEd = async () => {
+    const r = rowEdRecord
+    if (!r) { cancelRowEd(); return }
+    const changedFields = Object.keys(rowEdDraft).filter(f => String(rowEdDraft[f] ?? '') !== String(origVal(r, f) ?? ''))
+    if (changedFields.length === 0) { message.info('无修改'); cancelRowEd(); return }
+    const payload: Record<string, any> = {}
+    const materialDates: Record<string, string> = { ...(r.material_dates || {}) }
+    let matChanged = false
+    changedFields.forEach(f => {
+      const nv = rowEdDraft[f] ?? null
+      if (f.startsWith('mat_')) {
+        const k = f.slice(4)
+        if (nv) materialDates[k] = nv; else delete materialDates[k]
+        matChanged = true
+      } else if (f === 'is_closed') {
+        payload[f] = nv === 'true' ? 1 : 0
+      } else {
+        payload[f] = nv
+      }
+    })
+    if (matChanged) payload.material_dates = Object.keys(materialDates).length > 0 ? materialDates : null
+    setSaving(true)
+    try {
+      await orderApi.update(r.order_no, payload)
+      message.success(`已保存 ${changedFields.length} 处修改 · ${r.order_no}`)
+      changedFields.forEach(f => markEdited(r.id, f))
+      cancelRowEd()
+      fetchOrders(pagination.current, pagination.pageSize)
+    } catch {
+      // 错误已由全局拦截器提示
+    } finally {
+      setSaving(false)
+    }
+  }
+  useEffect(() => {
+    if (rowEdId == null) return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); saveRowEd() }
+      else if (e.key === 'Escape') { e.preventDefault(); cancelRowEd() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  /* ── 单元格展示包装：悬停编辑暗示 + ＋待填写 + 手工圆点 + 字段备注/同步时间 ── */
+  const editWrap = (record: OrderRow, field: string, display: React.ReactNode, extraCls = '') => {
+    const cellKey = `${record.id}-${field}`
+    const manKey = `${record.id}:${field}`
+    const syncedField = field.startsWith('mat_') ? 'material_dates' : field
+    const syncedAt = record.field_synced_at?.[syncedField]
+    const remark = fieldRemarks[syncedField]
+    const inner = display ?? <span className="sc-fill-ph" title="待填写 · 点击录入">＋</span>
+    const cell = (
+      <div
+        className={`sc-edit${extraCls}${sessionEdited.has(manKey) ? ' man' : ''}${flashCells.has(manKey) ? ' saved' : ''}`}
+        data-ec={field}
+        onClick={() => { if (!savingCell && rowEdId == null) setEditingCell(cellKey) }}
+      >
+        {inner}
+        {sessionEdited.has(manKey) && <span className="sc-mdot" title="本次会话手工修改" />}
+      </div>
+    )
+    if (remark || syncedAt) {
+      return (
+        <Tooltip title={<div style={{ fontSize: 'calc(12px * var(--font-size-scale))' }}>{remark && <div style={{ marginBottom: remark && syncedAt ? 4 : 0 }}>{remark}</div>}{syncedAt && <div>同步时间: {syncedAt}</div>}</div>}>
+          {cell}
+        </Tooltip>
+      )
+    }
+    return cell
+  }
+
+  // ── 行内编辑渲染辅助（v5 范式：悬停 ✎ 暗示 + 日历/菜单/输入框 + Enter/Tab 跳格）──
   const editableDate = (field: string, opts?: {
     overdue?: (value: string | null, record: OrderRow) => boolean
     green?: boolean
   }) => (value: string | null, record: OrderRow) => {
     const cellKey = `${record.id}-${field}`
-    const isEditing = editingCell === cellKey
-    if (isEditing) {
+    if (editingCell === cellKey) {
       return (
         <DatePicker
           size="small"
+          autoFocus
+          open
+          allowClear
+          presets={DATE_PRESETS}
           value={value ? dayjs(value) : null}
           disabled={savingCell === cellKey}
           style={{ width: '100%' }}
-          autoFocus
           onChange={(d) => {
             handleCellSave(record, field, d ? d.format('YYYY-MM-DD') : null)
             setEditingCell(null)
+            window.setTimeout(() => advanceNext(record.id, field), 60)
           }}
           onOpenChange={(open) => { if (!open) setEditingCell(null) }}
         />
@@ -411,37 +661,19 @@ export default function OrderList() {
     }
     const isOverdue = opts?.overdue ? opts.overdue(value, record) : false
     const isGreen = opts?.green || false
-    const syncField = field.startsWith('mat_') ? 'material_dates' : field
-    const syncedAt = record.field_synced_at?.[syncField]
-    const remark = fieldRemarks[syncField]
-    const display = (
-      <div
-        onClick={() => !savingCell && setEditingCell(cellKey)}
-        style={{ cursor: 'pointer', padding: '4px 8px', minHeight: '24px' }}
-      >
-        {value
-          ? <span style={{
-              color: isGreen ? '#16a34a' : isOverdue ? '#e11d48' : undefined,
-              fontWeight: (isGreen || isOverdue) ? (isGreen ? 500 : 600) : undefined,
-            }}>{formatDate(value)}</span>
-          : <span style={{ color: '#cbd5e1' }}>-</span>}
-      </div>
-    )
-    if (remark || syncedAt) {
-      return (
-        <Tooltip title={<div style={{ fontSize: 12 }}>{remark && <div style={{ marginBottom: remark && syncedAt ? 4 : 0 }}>{remark}</div>}{syncedAt && <div>同步时间: {syncedAt}</div>}</div>}>
-          {display}
-        </Tooltip>
-      )
-    }
-    return display
+    const display = value ? (
+      <span style={{
+        color: isGreen ? '#16a34a' : isOverdue ? '#e11d48' : undefined,
+        fontWeight: (isGreen || isOverdue) ? (isGreen ? 500 : 600) : undefined,
+      }}>{formatDate(value)}</span>
+    ) : null
+    return editWrap(record, field, display)
   }
 
   const editableSelect = (field: string, options: { value: string; label: string }[], renderValue?: (v: string | null, r: OrderRow) => React.ReactNode) =>
     (value: string | null, record: OrderRow) => {
       const cellKey = `${record.id}-${field}`
-      const isEditing = editingCell === cellKey
-      if (isEditing) {
+      if (editingCell === cellKey) {
         return (
           <Select
             size="small"
@@ -455,71 +687,60 @@ export default function OrderList() {
             onChange={(v) => {
               handleCellSave(record, field, v ?? null)
               setEditingCell(null)
+              window.setTimeout(() => advanceNext(record.id, field), 60)
             }}
             onDropdownVisibleChange={(open) => { if (!open) setEditingCell(null) }}
             dropdownStyle={{ zIndex: 1050 }}
           />
         )
       }
-      const display = renderValue ? renderValue(value, record) : (value || '-')
-      const syncedAt = record.field_synced_at?.[field]
-      const remark = fieldRemarks[field]
-      const cell = (
-        <div
-          onClick={() => !savingCell && setEditingCell(cellKey)}
-          style={{ cursor: 'pointer', padding: '4px 8px', minHeight: '24px' }}
-        >
-          {display}
-        </div>
-      )
-      if (remark || syncedAt) {
-        return <Tooltip title={<div style={{ fontSize: 12 }}>{remark && <div style={{ marginBottom: remark && syncedAt ? 4 : 0 }}>{remark}</div>}{syncedAt && <div>同步时间: {syncedAt}</div>}</div>}>{cell}</Tooltip>
-      }
-      return cell
+      const display = renderValue ? renderValue(value, record) : (value || null)
+      return editWrap(record, field, display)
     }
 
   const editableText = (field: string, renderValue?: (v: string | null, r: OrderRow) => React.ReactNode) =>
     (value: string | null, record: OrderRow) => {
       const cellKey = `${record.id}-${field}`
-      const isEditing = editingCell === cellKey
-      if (isEditing) {
+      if (editingCell === cellKey) {
+        const commit = (el: HTMLInputElement) => {
+          const next = el.value.trim()
+          if ((value || '') !== next) handleCellSave(record, field, next || null)
+          setEditingCell(null)
+        }
         return (
           <Input
             size="small"
             defaultValue={value || ''}
             disabled={savingCell === cellKey}
             autoFocus
-            onBlur={(e) => {
-              const next = e.target.value.trim()
-              if ((value || '') !== next) handleCellSave(record, field, next || null)
-              setEditingCell(null)
+            onBlur={(e) => commit(e.currentTarget)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault()
+                commit(e.currentTarget)
+                advanceNext(record.id, field)
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                setEditingCell(null)
+              }
             }}
             onPressEnter={(e) => e.currentTarget.blur()}
           />
         )
       }
-      const display = renderValue ? renderValue(value, record) : (value || <span style={{ color: '#cbd5e1' }}>-</span>)
-      const syncedAt = record.field_synced_at?.[field]
-      const remark = fieldRemarks[field]
-      const cell = (
-        <div
-          onClick={() => !savingCell && setEditingCell(cellKey)}
-          style={{ cursor: 'pointer', padding: '4px 8px', minHeight: '24px' }}
-        >
-          {display}
-        </div>
-      )
-      if (remark || syncedAt) {
-        return <Tooltip title={<div style={{ fontSize: 12 }}>{remark && <div style={{ marginBottom: remark && syncedAt ? 4 : 0 }}>{remark}</div>}{syncedAt && <div>同步时间: {syncedAt}</div>}</div>}>{cell}</Tooltip>
-      }
-      return cell
+      const display = renderValue ? renderValue(value, record) : (value || null)
+      return editWrap(record, field, display)
     }
 
   const editableNumber = (field: string, min = 0, renderValue?: (v: number | null, r: OrderRow) => React.ReactNode) =>
     (value: number | null, record: OrderRow) => {
       const cellKey = `${record.id}-${field}`
-      const isEditing = editingCell === cellKey
-      if (isEditing) {
+      if (editingCell === cellKey) {
+        const commit = (raw: string) => {
+          const next = raw === '' ? null : Number(raw)
+          if ((value ?? null) !== next && (next == null || !Number.isNaN(next))) handleCellSave(record, field, next)
+          setEditingCell(null)
+        }
         return (
           <InputNumber
             size="small"
@@ -528,11 +749,16 @@ export default function OrderList() {
             disabled={savingCell === cellKey}
             style={{ width: '100%' }}
             autoFocus
-            onBlur={(e) => {
-              const raw = e.target.value
-              const next = raw === '' ? null : Number(raw)
-              if ((value ?? null) !== next && (next == null || !Number.isNaN(next))) handleCellSave(record, field, next)
-              setEditingCell(null)
+            onBlur={(e) => commit(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault()
+                commit((e.target as HTMLInputElement).value)
+                advanceNext(record.id, field)
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                setEditingCell(null)
+              }
             }}
             onPressEnter={(e) => e.currentTarget.blur()}
           />
@@ -540,22 +766,47 @@ export default function OrderList() {
       }
       const display = renderValue
         ? renderValue(value, record)
-        : (value != null ? value : <span style={{ color: '#cbd5e1' }}>-</span>)
-      const syncedAt = record.field_synced_at?.[field]
-      const remark = fieldRemarks[field]
-      const cell = (
-        <div
-          onClick={() => !savingCell && setEditingCell(cellKey)}
-          style={{ cursor: 'pointer', padding: '4px 8px', textAlign: 'right' }}
-        >
-          {display}
-        </div>
-      )
-      if (remark || syncedAt) {
-        return <Tooltip title={<div style={{ fontSize: 12 }}>{remark && <div style={{ marginBottom: remark && syncedAt ? 4 : 0 }}>{remark}</div>}{syncedAt && <div>同步时间: {syncedAt}</div>}</div>}>{cell}</Tooltip>
-      }
-      return cell
+        : (value != null ? value : null)
+      return editWrap(record, field, display)
     }
+
+  /* ── 快速视图 → 后端筛选参数（复用已有接口能力，不改后端）── */
+  const quickViewParams = useCallback((view: QuickView): Record<string, any> => {
+    const t = dayjs().format('YYYY-MM-DD')
+    switch (view) {
+      case 'mine': return userName ? { owner: userName } : {}
+      case 'today': return { promised_date_start: t, promised_date_end: t, delivery_completed: 'no' }
+      case 'overdue': return { promised_date_end: dayjs().subtract(1, 'day').format('YYYY-MM-DD'), delivery_completed: 'no' }
+      case 'high': return { risk_level: 'red,yellow', delivery_completed: 'no' }
+      case 'shipweek': return { shipping_plan_start: t, shipping_plan_end: dayjs().add(6, 'day').format('YYYY-MM-DD'), delivery_completed: 'no' }
+      default: return {}
+    }
+  }, [userName])
+
+  /* 快速视图 chips 计数（page_size=1 轻量并行请求，只取 total） */
+  const fetchChipCounts = useCallback(async (baseParams: Record<string, any>) => {
+    const allBase = { ...baseParams }
+    delete allBase.delivery_completed
+    const views: QuickView[] = ['all', 'mine', 'today', 'overdue', 'high', 'shipweek']
+    const totals = await Promise.all(views.map(async (v) => {
+      try {
+        const res: any = await orderApi.list({ page: 1, page_size: 1, ...(v === 'all' ? allBase : baseParams), ...quickViewParams(v) })
+        return (res?.data?.total ?? undefined) as number | undefined
+      } catch { return undefined }
+    }))
+    setChipCounts({
+      all: totals[0],
+      mine: !userName ? undefined : totals[1],
+      today: totals[2], overdue: totals[3], high: totals[4], shipweek: totals[5],
+    })
+  }, [quickViewParams, userName])
+
+  /* 计数请求防抖（搜索逐键触发时避免每键 6 个请求） */
+  const chipCountsTimer = useRef<number | null>(null)
+  const scheduleChipCounts = useCallback((base: Record<string, any>) => {
+    if (chipCountsTimer.current) window.clearTimeout(chipCountsTimer.current)
+    chipCountsTimer.current = window.setTimeout(() => { fetchChipCounts(base) }, 600)
+  }, [fetchChipCounts])
 
   const fetchOrders = useCallback(async (
     page = 1,
@@ -568,6 +819,10 @@ export default function OrderList() {
       const f = overrideFilters ?? filters
       const s = overrideSort ?? sortInfo
       const params: Record<string, any> = { page, page_size: pageSize }
+      const countBase: Record<string, any> = {}
+      if (f.keyword) countBase.keyword = f.keyword
+      if (f.year) countBase.year = f.year
+      if (f.delivery_completed.length > 0) countBase.delivery_completed = f.delivery_completed.join(',')
       if (s.sort_by) params.sort_by = s.sort_by
       if (s.sort_order) params.sort_order = s.sort_order
       if (f.keyword) params.keyword = f.keyword
@@ -622,6 +877,7 @@ export default function OrderList() {
         params.assembly_complete_date_start = f.assembly_complete_date_range[0]
         params.assembly_complete_date_end = f.assembly_complete_date_range[1]
       }
+      Object.assign(params, quickViewParams(quickView))
       const res: any = await orderApi.list(params)
       const items = res.data.items || []
       setOrders(items)
@@ -638,13 +894,14 @@ export default function OrderList() {
         order_qty_total: stats.order_qty_total || 0,
         order_amount_total: stats.order_amount_total || 0,
       })
+      scheduleChipCounts(countBase)
     } catch (err: any) {
       const detail = err?.response?.data?.message || err?.response?.data?.detail || err?.message || '未知错误'
       console.error('[OrderList] fetchOrders failed:', err)
     } finally {
       setLoading(false)
     }
-  }, [filters, sortInfo])
+  }, [filters, sortInfo, quickView, quickViewParams, scheduleChipCounts])
 
   // 第二步：初始化加载数据（在 fetchOrders 定义之后）
   const initialLoadRef = useRef(false)
@@ -654,6 +911,14 @@ export default function OrderList() {
       initialLoadRef.current = true
     }
   }, [shouldInitialLoad, fetchOrders])
+
+  // 快速视图切换后重新拉取（跳过首次，避免与初始加载重复）
+  const quickViewFirstRef = useRef(false)
+  useEffect(() => {
+    if (!quickViewFirstRef.current) { quickViewFirstRef.current = true; return }
+    fetchOrders(1, pagination.pageSize)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quickView])
 
   const handleTableChange = (pag: any, tableFilters: any, sorter: any) => {
     let sortField = sorter.field
@@ -781,8 +1046,9 @@ export default function OrderList() {
       params.assembly_complete_date_start = filters.assembly_complete_date_range[0]
       params.assembly_complete_date_end = filters.assembly_complete_date_range[1]
     }
+    Object.assign(params, quickViewParams(quickView))
     return params
-  }, [filters])
+  }, [filters, quickView, quickViewParams])
 
   const handleExport = (format: 'xlsx' | 'csv', columns?: string[]) => {
     const params: Record<string, any> = { format, ...buildFilterParams() }
@@ -814,79 +1080,6 @@ export default function OrderList() {
     fetchOrders(1, pagination.pageSize, newFilters, sortInfo)
   }
 
-  const openEditModal = (record: OrderRow) => {
-    setEditingRecord(record)
-    const formValues: Record<string, any> = {
-      delivery_completed_date: record.delivery_completed_date ? dayjs(record.delivery_completed_date) : undefined,
-      customer_grade: record.customer_grade || undefined,
-      shipping_plan: record.shipping_plan ? dayjs(record.shipping_plan) : undefined,
-      customer_inspection_date: record.customer_inspection_date ? dayjs(record.customer_inspection_date) : undefined,
-      planned_start_date: record.planned_start_date ? dayjs(record.planned_start_date) : undefined,
-      inspection_result: record.inspection_result || undefined,
-      packaging_status: record.packaging_status || undefined,
-      bom_return_date: record.bom_return_date ? dayjs(record.bom_return_date) : undefined,
-      material_ready_date: record.material_ready_date ? dayjs(record.material_ready_date) : undefined,
-      shipping_status_desc: record.shipping_status_desc || undefined,
-      procurement_status: record.procurement_status || undefined,
-      front_process_date: record.front_process_date ? dayjs(record.front_process_date) : undefined,
-      first_article_date: record.first_article_date ? dayjs(record.first_article_date) : undefined,
-      assembly_start_date: record.assembly_start_date ? dayjs(record.assembly_start_date) : undefined,
-      assembly_complete_date: record.assembly_complete_date ? dayjs(record.assembly_complete_date) : undefined,
-      risk_level: record.risk_level || undefined,
-      is_closed: record.is_closed === 1 ? 1 : 0,
-      remark: record.remark || undefined,
-    }
-    MATERIAL_KEYS.forEach(key => {
-      const val = record.material_dates?.[key]
-      formValues[`mat_${key}`] = val ? dayjs(val) : undefined
-    })
-    editForm.setFieldsValue(formValues)
-    setEditModalOpen(true)
-  }
-
-  const handleEditSave = async () => {
-    if (!editingRecord) return
-    try {
-      const values = await editForm.validateFields()
-      const payload: Record<string, any> = {}
-      const dateFields = [
-        'delivery_completed_date', 'shipping_plan', 'customer_inspection_date',
-        'planned_start_date', 'bom_return_date', 'material_ready_date',
-        'front_process_date', 'first_article_date', 'assembly_start_date', 'assembly_complete_date',
-      ]
-      dateFields.forEach(f => {
-        payload[f] = values[f] ? values[f].format('YYYY-MM-DD') : null
-      })
-      const textFields = [
-        'customer_grade', 'inspection_result', 'packaging_status',
-        'shipping_status_desc', 'procurement_status', 'risk_level', 'remark',
-      ]
-      textFields.forEach(f => {
-        if (values[f] !== undefined) payload[f] = values[f] || null
-      })
-      // is_closed 整数字段（0/1）
-      if (values.is_closed !== undefined && values.is_closed !== null) payload.is_closed = values.is_closed
-      // material_dates JSONB
-      const materialDates: Record<string, string> = {}
-      MATERIAL_KEYS.forEach(key => {
-        const val = values[`mat_${key}`]
-        if (val) materialDates[key] = val.format('YYYY-MM-DD')
-      })
-      payload.material_dates = Object.keys(materialDates).length > 0 ? materialDates : null
-
-      setSaving(true)
-      await orderApi.update(editingRecord.order_no, payload)
-      message.success('订单已更新')
-      setEditModalOpen(false)
-      setEditingRecord(null)
-      fetchOrders(pagination.current, pagination.pageSize)
-    } catch (err: any) {
-      if (err?.errorFields) return // form validation error
-    } finally {
-      setSaving(false)
-    }
-  }
-
   const fetchDetail = useCallback(async (orderNo: string, lineNo: string | null) => {
     const cacheKey = `${orderNo}_${lineNo || '10'}`
     if (detailCache[cacheKey] || detailLoading[cacheKey]) return
@@ -905,8 +1098,8 @@ export default function OrderList() {
     // ── 基本信息（固定左侧）──
     {
       title: '销售部门', dataIndex: 'department', key: 'department', minWidth: 70, fixed: 'left' as const,
-      ellipsis: true, sorter: true,
-      render: editableText('department'),
+      sorter: true,
+      render: (v: string | null) => v || <span style={{ color: '#cbd5e1' }}>-</span>,
       filterDropdown: ({ setSelectedKeys, selectedKeys, confirm, clearFilters }: any) => (
         <div style={{ padding: 8 }}>
           <Input
@@ -1101,11 +1294,11 @@ export default function OrderList() {
     },
     {
       title: '数量', dataIndex: 'order_qty', key: 'order_qty', minWidth: 60, align: 'right' as const,
-      render: editableNumber('order_qty', 0), sorter: true,
+      render: (v: number | null) => v != null ? v.toLocaleString() : <span style={{ color: '#cbd5e1' }}>-</span>, sorter: true,
     },
     {
       title: '金额', dataIndex: 'order_amount', key: 'order_amount', minWidth: 80, align: 'right' as const,
-      render: editableNumber('order_amount', 0, (v) => v?.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || <span style={{ color: '#cbd5e1' }}>-</span>), sorter: true,
+      render: (v: number | null) => v != null ? v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : <span style={{ color: '#cbd5e1' }}>-</span>, sorter: true,
     },
     {
       title: '完成数量', dataIndex: 'completed_qty', key: 'completed_qty', minWidth: 80, align: 'right' as const,
@@ -1160,7 +1353,7 @@ export default function OrderList() {
     // ── 交期 & 计划 ──
     {
       title: '合同交期', dataIndex: 'promised_date', key: 'promised_date', minWidth: 85,
-      render: editableDate('promised_date', { overdue: (v, r) => !!(v && v < today() && r.status !== 'closed') }), sorter: true,
+      render: (v: string | null, r: OrderRow) => <DateCell value={v} overdue={!!(v && v < today() && r.status !== 'closed')} />, sorter: true,
       filterDropdown: ({ setSelectedKeys, selectedKeys, confirm, clearFilters }: any) => (
         <div style={{ padding: 8 }}>
           <RangePicker
@@ -1764,10 +1957,7 @@ export default function OrderList() {
     },
     {
       title: '是否关闭', dataIndex: 'is_closed', key: 'is_closed', minWidth: 70,
-      render: (v: number, r: OrderRow) => editableSelect('is_closed',
-        [{ value: 'true', label: '已关闭' }, { value: 'false', label: '未关闭' }],
-        (val) => val === 'true' ? <Tag color="default">已关闭</Tag> : <Tag color="green">未关闭</Tag>
-      )(v ? 'true' : 'false', r),
+      render: (v: number) => v === 1 ? <Tag color="default">已关闭</Tag> : <Tag color="green">未关闭</Tag>,
       filters: [
         { text: '已关闭', value: '1' },
         { text: '未关闭', value: '0' },
@@ -1788,165 +1978,165 @@ export default function OrderList() {
       filterMultiple: true,
     },
     {
-      title: '操作', key: 'action', minWidth: 80, fixed: 'right' as const,
+      title: '操作', key: 'action', width: 108, fixed: 'right' as const,
       render: (_: any, r: OrderRow) => (
-        <Space size="small">
-          <Tooltip title="盘点物料库存">
-            <Button type="link" size="small"
-              onClick={() => navigate(`/stock-check?orderNo=${r.order_no}`)}
-              style={{ color: '#6366f1', fontSize: 'calc(0.75rem * var(--font-size-scale))' }}
-            >盘点</Button>
-          </Tooltip>
-          <Tooltip title="编辑">
-            <Button type="link" size="small" icon={<EditOutlined />}
-              onClick={() => openEditModal(r)}
-            />
-          </Tooltip>
-        </Space>
+        <span className="sc-row-actions">
+          <a onClick={() => navigate(`/orders/${r.order_no}`)}>详情</a>
+          <a onClick={() => navigate(`/stock-check?orderNo=${r.order_no}`)} title="盘点物料库存">盘点</a>
+          <a onClick={() => startRowEd(r)} title="打开编辑弹窗，集中维护本单全部可填写字段">编辑</a>
+        </span>
       ),
     },
   ].filter(col => col.key === 'action' || visibleColumnKeys.includes(col.key))
-   .map(col =>
-    col.key === 'action' ? col : { ...col, ellipsis: true, minWidth: Math.min(col.minWidth || 100, 100) }
-  ), [editingCell, savingCell, handleCellSave, navigate, filters, pagination, sortInfo, fetchOrders, openEditModal, visibleColumnKeys])
+   .map(col => {
+    if (col.key === 'action') return col
+    const meta = FIELD_EDIT_META[col.key]
+    /* 列宽需容纳表头（左侧标记预留区 + 标题 + 筛选图标 + 内边距）；剥离 ellipsis，记录不省略（自然换行） */
+    const headerW = (typeof col.title === 'string' ? col.title.length * 13 : 80) + 78
+    return {
+      ...col,
+      ellipsis: undefined,
+      width: Math.max(col.minWidth || 100, headerW),
+      onHeaderCell: meta?.edit
+        ? () => ({ className: 'sc-hed', title: '✎ 可手工填写：点击单元格行内编辑' })
+        : meta?.ro
+          ? () => ({ className: 'sc-hro', title: `🔒 ${meta.ro}` })
+          : undefined,
+    }
+  }), [editingCell, savingCell, handleCellSave, navigate, filters, pagination, sortInfo, fetchOrders, visibleColumnKeys, sessionEdited, flashCells, fieldRemarks, startRowEd])
+
+  // 图例统计（当前可见列中可手工填写 / 只读数量）
+  const visMeta = visibleColumnKeys.map(k => FIELD_EDIT_META[k]).filter(Boolean)
+  const edCount = visMeta.filter(m => m!.edit).length
+  const roCount = visMeta.filter(m => m!.ro).length
+  const extColCount = visibleColumnKeys.filter(k => !DEFAULT_COLUMN_KEYS.includes(k)).length
+  const listHint = `${QUICK_VIEW_DEFS.find(v => v.key === quickView)?.label ?? '全部订单'}${filters.delivery_completed.includes('no') ? '（未完成）' : ''}`
+
+  const applyColumns = (next: string[]) => {
+    if (next.length === 0) return
+    setVisibleColumnKeys(next)
+    setColumnVisibility(ORDER_LIST_PAGE_KEY, next)
+  }
+  const toggleGroupKeys = (gKeys: string[], on: boolean) => {
+    const cur = new Set(visibleColumnKeys)
+    gKeys.forEach(k => { if (on) cur.add(k); else cur.delete(k) })
+    if (cur.size === 0) return
+    applyColumns(Array.from(cur))
+  }
 
   return (
-    <div>
+    <div className={`sc-page${highlightEdit ? ' sc-hl' : ''}`}>
 
-      <div className="card-modern" style={{ padding: '14px 20px', marginBottom: 16 }}>
-        <Row gutter={[12, 12]} align="middle">
-          <Col xs={24} sm={12} md={5}>
-            <Input
-              placeholder="搜索订单号/客户/产品"
-              prefix={<SearchOutlined />}
-              allowClear
-              value={filters.keyword}
-              onChange={e => {
-                const newKeyword = e.target.value
-                setFilters(f => ({ ...f, keyword: newKeyword }))
-                // 直接传递新的keyword值，避免状态更新延迟问题
-                const newFilters = { ...filters, keyword: newKeyword }
-                fetchOrders(1, 50, newFilters)
-              }}
-            />
-          </Col>
-          <Col xs={24} sm={12} md={3}>
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={() => fetchOrders()}
-            >
-              刷新
-            </Button>
-          </Col>
-          <Col xs={24} sm={12} md={2}>
-            <Select<number | null>
-              value={filters.year}
-              placeholder="全部年份"
-              allowClear
-              style={{ width: '100%' }}
-              onChange={(v) => {
-                const newFilters = { ...filters, year: v ?? null }
-                setFilters(newFilters)
-                fetchOrders(1, pagination.pageSize, newFilters, sortInfo)
-              }}
-              options={YEAR_OPTIONS.map(y => ({ value: y, label: `${y}年` }))}
-            />
-          </Col>
-          <Col>
-            <Switch
-              checked={filters.delivery_completed.includes('no')}
-              onChange={handleUnfinishedOrdersToggle}
-              checkedChildren="未完成订单"
-              unCheckedChildren="全部订单"
-            />
-          </Col>
-          <Col flex="auto" />
-          <Col>
-            <Space>
-              <Popover
-                trigger="click"
-                placement="bottomRight"
-                overlayStyle={{ maxWidth: 'calc(100vw - 32px)' }}
-                title={
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: 320 }}>
-                    <span>选择显示列</span>
-                    <Space size="small">
-                      <a
-                        style={{ fontSize: 12 }}
-                        onClick={() => {
-                          setVisibleColumnKeys(ORDER_COLUMN_KEYS)
-                          setColumnVisibility(ORDER_LIST_PAGE_KEY, ORDER_COLUMN_KEYS)
-                        }}
-                      >全选</a>
-                      <a
-                        style={{ fontSize: 12 }}
-                        onClick={() => {
-                          const next = ORDER_COLUMN_KEYS.slice(0, 1)
-                          setVisibleColumnKeys(next)
-                          setColumnVisibility(ORDER_LIST_PAGE_KEY, next)
-                        }}
-                      >清空</a>
-                    </Space>
-                  </div>
-                }
-                content={
-                  <div style={{ maxHeight: 420, overflowY: 'auto', width: 360, paddingRight: 4 }}>
-                    <Checkbox.Group
-                      value={visibleColumnKeys}
-                      onChange={(checked) => {
-                        const next = checked as string[]
-                        if (next.length === 0) return
-                        setVisibleColumnKeys(next)
-                        setColumnVisibility(ORDER_LIST_PAGE_KEY, next)
-                      }}
-                    >
-                      {ORDER_COLUMN_GROUPS.map(group => (
-                        <div key={group.title} style={{ marginBottom: 10 }}>
-                          <div style={{ fontWeight: 600, fontSize: 12, color: '#64748b', marginBottom: 4, borderBottom: '1px solid #f0f0f0', paddingBottom: 2 }}>
-                            {group.title}
-                          </div>
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: '2px 16px' }}>
-                            {group.keys.map(({ key, label }) => (
-                              <Checkbox key={key} value={key}>{label}</Checkbox>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </Checkbox.Group>
-                  </div>
-                }
-              >
-                <Button icon={<SettingOutlined />}>列设置</Button>
-              </Popover>
-              <Button
-                icon={<BarChartOutlined />}
-                type={showCharts ? 'primary' : 'default'}
-                onClick={toggleCharts}
-              >
-                {showCharts ? '隐藏图表' : '分析图表'}
-              </Button>
-              <Dropdown
-                menu={{
-                  items: [
-                    { key: 'xlsx', label: '导出 Excel', icon: <DownloadOutlined /> },
-                    { key: 'csv', label: '导出 CSV', icon: <DownloadOutlined /> },
-                  ],
-                  onClick: ({ key }) => handleExportClick(key as 'xlsx' | 'csv'),
-                }}
-              >
-                <Button icon={<DownloadOutlined />} loading={exporting}>导出 <DownOutlined /></Button>
-              </Dropdown>
-              <Button type="primary" icon={<AuditOutlined />} onClick={handleScan} loading={scanning}>风险扫描</Button>
-            </Space>
-          </Col>
-        </Row>
+      {/* ── 工具栏：搜索 + 快速视图 chips + 右侧动作 ── */}
+      <div className="sc-toolbar">
+        <Input
+          placeholder="订单号 / 客户 / 产品"
+          prefix={<SearchOutlined />}
+          allowClear
+          value={filters.keyword}
+          onChange={e => {
+            const newKeyword = e.target.value
+            setFilters(f => ({ ...f, keyword: newKeyword }))
+            // 直接传递新的keyword值，避免状态更新延迟问题
+            const newFilters = { ...filters, keyword: newKeyword }
+            fetchOrders(1, pagination.pageSize, newFilters)
+          }}
+          style={{ width: 230 }}
+        />
+        <span
+          className={`sc-chip${filters.delivery_completed.includes('no') ? '' : ' on'}`}
+          style={{ cursor: 'pointer' }}
+          onClick={() => handleUnfinishedOrdersToggle(filters.delivery_completed.includes('no') ? false : true)}
+          title="是否包含已关闭/已交付订单"
+        >含已关闭 <span className="n">{chipCounts.all ?? '-'}</span></span>
+        {QUICK_VIEW_DEFS.map(v => {
+          const hot = (v.key === 'high' && (chipCounts.high ?? 0) > 0) || (v.key === 'overdue' && (chipCounts.overdue ?? 0) > 0)
+          const cnt = v.key === 'all' ? summary.total : chipCounts[v.key]
+          return (
+            <span
+              key={v.key}
+              className={`sc-chip${quickView === v.key ? ' on' : ''}`}
+              style={{ cursor: 'pointer' }}
+              onClick={() => setQuickView(v.key)}
+            >{v.label} <span className={`n${hot ? ' hot' : ''}`}>{cnt ?? '-'}</span></span>
+          )
+        })}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span
+            className={`sc-chip${highlightEdit ? ' on' : ''}`}
+            style={{ cursor: 'pointer' }}
+            onClick={() => setHighlightEdit(v => !v)}
+            title="给所有 ✎ 可手工填写列铺上底色，一眼分辨可编辑范围"
+          ><EditOutlined /> 高亮可编辑列</span>
+          <Select<number | null>
+            value={filters.year}
+            placeholder="全部年份"
+            allowClear
+            style={{ width: 96 }}
+            onChange={(v) => {
+              const newFilters = { ...filters, year: v ?? null }
+              setFilters(newFilters)
+              fetchOrders(1, pagination.pageSize, newFilters, sortInfo)
+            }}
+            options={YEAR_OPTIONS.map(y => ({ value: y, label: `${y}年` }))}
+          />
+          <Button icon={<SettingOutlined />} onClick={() => setColsDrawerOpen(true)}>
+            列设置{extColCount > 0 && <span className="sc-extdot">扩展 {extColCount}</span>}
+          </Button>
+          <Button icon={<ReloadOutlined />} onClick={() => fetchOrders()} title="刷新" />
+          <Button
+            icon={<BarChartOutlined />}
+            type={showCharts ? 'primary' : 'default'}
+            onClick={toggleCharts}
+          >
+            {showCharts ? '隐藏图表' : '分析图表'}
+          </Button>
+          <Dropdown
+            menu={{
+              items: [
+                { key: 'xlsx', label: '导出 Excel', icon: <DownloadOutlined /> },
+                { key: 'csv', label: '导出 CSV', icon: <DownloadOutlined /> },
+              ],
+              onClick: ({ key }) => handleExportClick(key as 'xlsx' | 'csv'),
+            }}
+          >
+            <Button icon={<DownloadOutlined />} loading={exporting}>导出 <DownOutlined /></Button>
+          </Dropdown>
+          <Button type="primary" icon={<AuditOutlined />} onClick={handleScan} loading={scanning}>风险扫描</Button>
+        </div>
       </div>
+
+      {/* ── 行内编辑提示条（可关闭，本机记忆） ── */}
+      {!tipDismissed && (
+        <div className="sc-edit-tip">
+          <EditOutlined className="ic" />
+          <span>
+            <b>行内编辑：</b>带 <b>✎</b> 的 <b>{edCount}</b> 列点击即编——日期弹出日历（含 今天 / 明天 / +3天 / +7天 快捷项，✕ 清除），
+            下拉弹出选项，文本/数字直接输入；<b>Enter / Tab 保存并跳到下一格</b>，Esc 取消；空格虚线 <b>＋</b> 表示待填写，
+            保存过的值带 <span className="sc-mdot" /> 手工标记。灰 <b>🔒</b> 列为 ERP / 自动计算只读。
+            行尾「编辑」打开弹窗集中维护整单字段，保存按钮实时显示修改处数。
+          </span>
+          <a className="x" onClick={() => {
+            setTipDismissed(true)
+            try { localStorage.setItem('order_edit_tip_dismissed', '1') } catch { /* ignore */ }
+          }}>知道了</a>
+        </div>
+      )}
 
       {showCharts && (
         <ShippingAnalyticsCharts loading={analyticsLoading} data={analyticsData} />
       )}
 
-      <div className="card-modern" style={{ padding: '2px 0 0' }}>
+      <div className="card-modern order-list-card" style={{ padding: '2px 0 0' }}>
+        <div className="sc-card-head">
+          <h3>订单列表</h3>
+          <span className="sc-hint">{listHint}</span>
+          <span className="sc-legend" title="带 ✎ 的列点击单元格即可行内编辑"><EditOutlined className="ic-edit" /><b>{edCount}</b> 列可手动填写</span>
+          <span className="sc-legend" title="ERP 同步 / 系统自动计算，不可手工修改"><LockOutlined className="ic-ro" /><b>{roCount}</b> 列只读</span>
+          <span style={{ marginLeft: 'auto', fontSize: 'calc(12px * var(--font-size-scale))', color: '#94a3b8' }}>
+            高危 <b style={{ color: '#dc2626' }}>{summary.red + summary.yellow}</b> · 已逾期 <b style={{ color: '#dc2626' }}>{chipCounts.overdue ?? '-'}</b> · 缺料 <b style={{ color: '#ea580c' }}>{summary.shortage}</b>
+          </span>
+        </div>
         <div className="table-modern">
           <Table
             columns={columns}
@@ -1954,7 +2144,11 @@ export default function OrderList() {
             rowKey={(r) => `${r.id}`}
             loading={loading}
             size="small"
-            scroll={{ x: 'max-content', y: 'calc(100vh - 380px)' }}
+            tableLayout="fixed"
+            scroll={{
+              x: columns.reduce((s: number, c: any) => s + (c.width ?? c.minWidth ?? 100), 0) + 48,
+              y: 'calc(100vh - 380px)',
+            }}
             locale={{ emptyText: '暂无订单数据' }}
             onChange={handleTableChange}
             summary={() => {
@@ -2267,163 +2461,121 @@ export default function OrderList() {
         </div>
       </div>
 
-      {/* ── 编辑弹窗 ── */}
+      {/* ── 编辑弹窗（整单字段集中维护，一次保存） ── */}
       <Modal
-        title={<span><EditOutlined style={{ marginRight: 8 }} />编辑订单 — {editingRecord?.order_no}</span>}
         open={editModalOpen}
-        onCancel={() => { setEditModalOpen(false); setEditingRecord(null) }}
-        width={960}
-        style={{ top: 32 }}
+        onCancel={cancelRowEd}
+        width={880}
+        style={{ top: 28 }}
+        rootClassName="sc-page"
+        title={<span><EditOutlined style={{ marginRight: 8 }} />编辑订单 — {rowEdRecord?.order_no ?? ''}</span>}
         footer={[
-          <Button key="cancel" icon={<CloseOutlined />} onClick={() => { setEditModalOpen(false); setEditingRecord(null) }}>取消</Button>,
-          <Button key="save" type="primary" icon={<SaveOutlined />} loading={saving} onClick={handleEditSave}>保存</Button>,
+          <Button key="cancel" onClick={cancelRowEd}>取消</Button>,
+          <Button key="save" type="primary" icon={<SaveOutlined />} loading={saving} onClick={saveRowEd}>
+            保存{rowDirtyCount > 0 ? `（${rowDirtyCount} 处修改）` : ''}
+          </Button>,
         ]}
         destroyOnClose
       >
-        <Form form={editForm} layout="vertical" size="small">
-          {/* ── 不可编辑字段(只读展示) ── */}
-          <Row gutter={12} style={{ marginBottom: 8, padding: '8px 12px', background: '#f8fafc', borderRadius: 8 }}>
-            <Col span={4}><span style={{ color: '#64748b', fontSize: 12 }}>销售部门</span><div style={{ fontWeight: 500 }}>{editingRecord?.department || '-'}</div></Col>
-            <Col span={4}><span style={{ color: '#64748b', fontSize: 12 }}>客户</span><div style={{ fontWeight: 500 }}>{editingRecord?.customer || editingRecord?.customer_code || '-'}</div></Col>
-            <Col span={6}><span style={{ color: '#64748b', fontSize: 12 }}>单号</span><div style={{ fontWeight: 500 }}>{editingRecord?.order_no || '-'}</div></Col>
-            <Col span={4}><span style={{ color: '#64748b', fontSize: 12 }}>数量</span><div style={{ fontWeight: 500 }}>{editingRecord?.order_qty?.toLocaleString() || '-'}</div></Col>
-            <Col span={6}><span style={{ color: '#64748b', fontSize: 12 }}>合同交期</span><div style={{ fontWeight: 500 }}>{editingRecord?.promised_date || '-'}</div></Col>
-          </Row>
-
-          {/* ── 可编辑字段 ── */}
-          <Row gutter={12}>
-            <Col span={8}>
-              <Form.Item name="delivery_completed_date" label="发货完成">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="customer_grade" label="客户等级">
-                <Select allowClear placeholder="选择等级" options={[
-                  { value: 'A', label: 'A级' }, { value: 'B', label: 'B级' },
-                  { value: 'C', label: 'C级' }, { value: 'D', label: 'D级' },
-                ]} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="shipping_plan" label="出货计划">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Row gutter={12}>
-            <Col span={8}>
-              <Form.Item name="customer_inspection_date" label="客户验货时间">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="planned_start_date" label="上线时间">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="inspection_result" label="客检结果">
-                <Select allowClear placeholder="选择结果" options={[
-                  { value: 'OK', label: 'OK / 通过' }, { value: 'NG', label: 'NG / 不通过' },
-                  { value: '待检', label: '待检' },
-                ]} />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Row gutter={12}>
-            <Col span={8}>
-              <Form.Item name="packaging_status" label="包装完成状况">
-                <Input allowClear placeholder="如：完成/入库" />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="bom_return_date" label="BOM回收">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="material_ready_date" label="料齐套时间">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Row gutter={12}>
-            <Col span={12}>
-              <Form.Item name="shipping_status_desc" label="发货状态即时说明">
-                <Input allowClear placeholder="发货状态说明" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="procurement_status" label="采购物料齐套">
-                <Input allowClear placeholder="采购齐套状态" />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          {/* ── 物料分类到料日期 ── */}
-          <div style={{ margin: '8px 0 4px', fontWeight: 600, fontSize: 'calc(0.8125rem * var(--font-size-scale))', color: '#334155' }}>物料分类到料日期</div>
-          <Row gutter={12}>
-            {MATERIAL_KEYS.map(key => (
-              <Col span={6} key={key}>
-                <Form.Item name={`mat_${key}`} label={key} style={{ marginBottom: 8 }}>
-                  <DatePicker style={{ width: '100%' }} size="small" />
-                </Form.Item>
-              </Col>
-            ))}
-          </Row>
-
-          {/* ── 生产节点 ── */}
-          <div style={{ margin: '12px 0 4px', fontWeight: 600, fontSize: 'calc(0.8125rem * var(--font-size-scale))', color: '#334155' }}>生产节点</div>
-          <Row gutter={12}>
-            <Col span={6}>
-              <Form.Item name="front_process_date" label="前道">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item name="first_article_date" label="首件检验日期">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item name="assembly_start_date" label="组装上线日期">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item name="assembly_complete_date" label="组装完成日期">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          {/* ── 风险 & 备注 ── */}
-          <Row gutter={12}>
-            <Col span={8}>
-              <Form.Item name="risk_level" label="风险等级">
-                <Select allowClear placeholder="选择风险等级" options={[
-                  { value: 'red', label: '高风险' }, { value: 'yellow', label: '中风险' },
-                  { value: 'green', label: '正常' },
-                ]} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="is_closed" label="是否关闭">
-                <Select allowClear placeholder="选择关闭状态" options={[
-                  { value: 1, label: '已关闭' },
-                  { value: 0, label: '未关闭' },
-                ]} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="remark" label="备注">
-                <Input.TextArea rows={2} placeholder="备注信息" />
-              </Form.Item>
-            </Col>
-          </Row>
-        </Form>
+        <div className="sc-frm-ro">
+          <div><div className="k">销售部门</div><div className="v">{rowEdRecord?.department || '-'}</div></div>
+          <div><div className="k">客户</div><div className="v">{rowEdRecord?.customer || rowEdRecord?.customer_code || '-'}</div></div>
+          <div><div className="k">单号</div><div className="v" style={{ fontFamily: 'Consolas, Menlo, monospace' }}>{rowEdRecord?.order_no || '-'}</div></div>
+          <div><div className="k">数量</div><div className="v">{rowEdRecord?.order_qty?.toLocaleString() ?? '-'}</div></div>
+          <div><div className="k">合同交期</div><div className="v">{rowEdRecord?.promised_date || '-'}</div></div>
+        </div>
+        {EDIT_SECTIONS.map(sec => (
+          <React.Fragment key={sec.title}>
+            <div className="sc-frm-sec">{sec.title}</div>
+            <Row gutter={[12, 10]}>
+              {sec.fields.map(f => (
+                <Col span={sec.fields.length > 8 ? 6 : 8} key={f.k}>
+                  <span className="sc-frm-label">{f.label}</span>
+                  {f.t === 'date' && (
+                    <DatePicker
+                      size="small" style={{ width: '100%' }} presets={DATE_PRESETS} allowClear
+                      value={rowEdDraft[f.k] ? dayjs(rowEdDraft[f.k]) : null}
+                      onChange={(d) => setDraftVal(f.k, d ? d.format('YYYY-MM-DD') : null)}
+                    />
+                  )}
+                  {f.t === 'select' && (
+                    <Select
+                      size="small" style={{ width: '100%' }} allowClear options={f.opts}
+                      value={rowEdDraft[f.k] ?? undefined}
+                      onChange={(v) => setDraftVal(f.k, v ?? null)}
+                    />
+                  )}
+                  {f.t === 'number' && (
+                    <InputNumber
+                      size="small" style={{ width: '100%' }} min={0}
+                      value={rowEdDraft[f.k] ?? undefined}
+                      onChange={(v) => setDraftVal(f.k, v ?? null)}
+                    />
+                  )}
+                  {f.t === 'text' && (
+                    <Input
+                      size="small" allowClear
+                      value={rowEdDraft[f.k] ?? ''}
+                      onChange={(e) => setDraftVal(f.k, e.target.value)}
+                    />
+                  )}
+                </Col>
+              ))}
+            </Row>
+          </React.Fragment>
+        ))}
       </Modal>
+
+      {/* ── 列设置抽屉 ── */}
+      <Drawer
+        open={colsDrawerOpen}
+        onClose={() => setColsDrawerOpen(false)}
+        width={400}
+        title="列设置"
+        rootClassName="sc-page"
+        extra={
+          <Space size="small">
+            <Button size="small" onClick={() => applyColumns(DEFAULT_COLUMN_KEYS)}>仅核心列</Button>
+            <Button size="small" onClick={() => applyColumns(ORDER_COLUMN_KEYS)}>显示全部</Button>
+          </Space>
+        }
+      >
+        <div style={{ fontSize: 'calc(12px * var(--font-size-scale))', color: '#94a3b8', marginBottom: 12, lineHeight: 1.8 }}>
+          核心列常显（含 <b>✎</b> 可编辑列与 <b>🔒</b> 只读列）；扩展列组勾选后即时加入表格，全部支持行内填写（本机记忆）。
+          齐套率 = 已到齐 ÷ 物料数，由系统自动计算；客户 / 单号 / 下单时间 / ERP状态 来自 ERP 同步，只读。
+        </div>
+        {ORDER_COLUMN_GROUPS.map(group => {
+          const gKeys = group.keys.map(k => k.key)
+          const allOn = gKeys.every(k => visibleColumnKeys.includes(k))
+          const edN = gKeys.filter(k => FIELD_EDIT_META[k]?.edit).length
+          return (
+            <div key={group.title} style={{ marginBottom: 14 }}>
+              <div className="sc-grp-row">
+                <span style={{ fontWeight: 600 }}>{group.title}</span>
+                <span className="cnt">{gKeys.length} 列</span>
+                {edN > 0 && <span className="edn">✎ {edN} 可填写</span>}
+                <Switch size="small" checked={allOn} onChange={(v) => toggleGroupKeys(gKeys, v)} />
+              </div>
+              <Checkbox.Group
+                value={visibleColumnKeys.filter(k => gKeys.includes(k))}
+                onChange={(checked) => {
+                  const cur = new Set(visibleColumnKeys.filter(k => !gKeys.includes(k)))
+                  const nextInGroup = checked as string[]
+                  nextInGroup.forEach(k => cur.add(k))
+                  if (cur.size === 0) return
+                  applyColumns(Array.from(cur))
+                }}
+              >
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: '2px 16px', padding: '4px 0 0 2px' }}>
+                  {group.keys.map(({ key, label }) => (
+                    <Checkbox key={key} value={key}>{label}</Checkbox>
+                  ))}
+                </div>
+              </Checkbox.Group>
+            </div>
+          )
+        })}
+      </Drawer>
 
       {/* ── 风险详情弹窗 ── */}
       <RiskDetailModal

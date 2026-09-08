@@ -108,6 +108,7 @@ const sharePathToPermission: Record<string, string> = {
   '/sync-config': 'settings',
   '/basicdata/customers': 'basicdata.data',
   '/basicdata/suppliers': 'basicdata.data',
+  '/basicdata/supplier-material-map': 'basicdata.data.suppliers',
   '/basicdata/materials': 'basicdata.data',
   '/basicdata/skus': 'basicdata.data',
   '/basicdata/products': 'basicdata.data',

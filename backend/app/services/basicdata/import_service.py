@@ -22,12 +22,18 @@ class ImportService:
             try:
                 order_no = str(row.get("order_no", "")).strip()
                 line_no = str(row.get("line_no", "")).strip()
+                raw_erp_id = row.get("erp_id")
+                try:
+                    erp_id = int(raw_erp_id) if raw_erp_id not in (None, "") else None
+                except (TypeError, ValueError):
+                    erp_id = None
                 if not order_no or not line_no:
                     errors.append(f"第{i}行: 订单号或行号为空")
                     continue
 
                 header_data = {
                     "order_no": order_no,
+                    "erp_id": erp_id,
                     "customer": row.get("customer"),
                     "customer_code": row.get("customer_code"),
                     "department": row.get("department"),
@@ -50,11 +56,15 @@ class ImportService:
                     "status": row.get("status") or "open",
                 }
 
-                header_result = await self.db.execute(select(SaleOrder).where(SaleOrder.order_no == order_no))
-                header = header_result.scalar_one_or_none()
+                header_query = select(SaleOrder).where(SaleOrder.order_no == order_no)
+                if erp_id is not None:
+                    header_query = header_query.where(SaleOrder.erp_id == erp_id)
+                else:
+                    header_query = header_query.order_by(SaleOrder.id.desc())
+                header = (await self.db.execute(header_query.limit(1))).scalar_one_or_none()
                 if header:
                     for key, value in header_data.items():
-                        if key != "order_no" and value is not None:
+                        if key not in ("order_no", "erp_id") and value is not None:
                             setattr(header, key, value)
                 else:
                     self.db.add(SaleOrder(**header_data))

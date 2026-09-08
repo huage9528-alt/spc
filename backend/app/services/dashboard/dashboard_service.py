@@ -686,9 +686,8 @@ class DashboardService:
         today = date.today()
         target = target_date or today
 
-        # 查询范围：ETA == 选中日的 PO（该天应到）+ 所有 ETA < 选中日且未齐套的 PO（之前逾期未齐）
-        # 上限为选中日，下限不限（展示全部历史逾期未齐）
-        end_date = target
+        # 查询范围：7 日滚动窗口（选中日 ~ 选中日+6）应到的 PO + 所有 ETA 早于今天且未齐套的 PO（历史逾期未齐）
+        window_end = target + timedelta(days=6)
 
         # 构建物料→订单→部门(车位)的映射：从MaterialDemand找到对应订单的部门
         md_q = await self.db.execute(
@@ -717,8 +716,8 @@ class DashboardService:
             PurchaseOrder.eta != None,
             PurchaseOrder.is_closed == 0,
             or_(
-                # 1) 选中日当天应到的 PO
-                PurchaseOrder.eta == target,
+                # 1) 7 日窗口内应到的 PO（含已齐套，供"已齐套"列展示）
+                PurchaseOrder.eta.between(target, window_end),
                 # 2) 真正逾期（ETA 早于今天）且未齐套的 PO
                 (
                     (PurchaseOrder.eta < today)
@@ -875,16 +874,22 @@ class DashboardService:
         )
 
     async def get_shipment_board(self) -> ShipmentBoardData:
-        """出货计划看板：已逾期 + 今天的未发货完成订单"""
+        """出货计划看板：7 日滚动窗口（逾期 + 今明后 6 日）+ 近 7 日已完成"""
         today = date.today()
+        window_end = today + timedelta(days=6)
+        done_since = today - timedelta(days=6)
 
-        # 查询：有出货计划日期、未发货完成、订单未关闭，且日期 <= 今天（逾期 + 今天）
+        # 查询：有出货计划日期、订单未关闭，且满足其一：
+        #   1) 未发货完成且出货计划 <= today+6（逾期 / 今日 / 明日 / 未来）
+        #   2) 已发货完成且完成日期在近 7 日内（本周已完成）
         q = await self.db.execute(
             select(SaleOrder).where(
                 SaleOrder.shipping_plan != None,
-                SaleOrder.delivery_completed_date == None,
                 SaleOrder.is_closed == 0,
-                SaleOrder.shipping_plan <= today,
+                or_(
+                    (SaleOrder.delivery_completed_date == None) & (SaleOrder.shipping_plan <= window_end),
+                    (SaleOrder.delivery_completed_date != None) & (SaleOrder.delivery_completed_date >= done_since),
+                ),
             ).order_by(
                 # 逾期排最前（shipping_plan 升序 = 最早的最逾期），同日内按单号
                 SaleOrder.shipping_plan.asc(),
@@ -897,7 +902,7 @@ class DashboardService:
         for o in orders:
             is_overdue = False
             overdue_days = 0
-            if o.shipping_plan and o.shipping_plan < today:
+            if o.shipping_plan and o.shipping_plan < today and o.delivery_completed_date is None:
                 is_overdue = True
                 overdue_days = (today - o.shipping_plan).days
 
@@ -919,6 +924,8 @@ class DashboardService:
                 owner=o.owner,
                 shipping_status_desc=o.shipping_status_desc,
                 status=o.status,
+                is_done=o.delivery_completed_date is not None,
+                completed_date=o.delivery_completed_date,
             ))
 
         return ShipmentBoardData(

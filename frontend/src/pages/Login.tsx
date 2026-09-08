@@ -1,15 +1,23 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react'
 import { useNavigate, useSearchParams, useLocation } from 'react-router-dom'
-import { Form, Input, Button, Spin, message } from 'antd'
-import { UserOutlined, LockOutlined, ShopOutlined, TeamOutlined } from '@ant-design/icons'
+import { Form, Input, Button, Spin, message, Switch } from 'antd'
+import {
+  UserOutlined,
+  LockOutlined,
+  FileDoneOutlined,
+  DatabaseOutlined,
+  ToolOutlined,
+  SafetyCertificateOutlined,
+  ApiOutlined,
+} from '@ant-design/icons'
 import { authApi, REDIRECT_AFTER_LOGIN_KEY } from '../services/api'
 import { useAuthStore } from '../store/auth'
 import { SUPPLIER_PORTAL_PATHS } from '../constants/permissions'
 
 type LoginType = 'employee' | 'supplier'
+type LoginMode = 'password' | 'qr'
 
 interface LoginFormValues {
-  loginType: LoginType
   username: string
   password: string
 }
@@ -51,25 +59,32 @@ const PATH_TO_PERMISSION: Record<string, string> = {
   '/supplier-payment': 'materials.supplier_payment',
 }
 
-const LOGIN_TYPE_OPTIONS: Array<{
-  label: string
-  description: string
-  value: LoginType
-  icon: ReactNode
-}> = [
-  {
-    label: '内部员工',
-    description: '企业账号',
-    value: 'employee',
-    icon: <TeamOutlined />,
-  },
-  {
-    label: '供应商',
-    description: '协作账号',
-    value: 'supplier',
-    icon: <ShopOutlined />,
-  },
+const LOGIN_TYPE_OPTIONS: Array<{ label: string; value: LoginType }> = [
+  { label: '员工登录', value: 'employee' },
+  { label: '供应商登录', value: 'supplier' },
 ]
+
+const LOGIN_FEATURES: Array<{ icon: ReactNode; label: string }> = [
+  { icon: <FileDoneOutlined />, label: '订单总控' },
+  { icon: <DatabaseOutlined />, label: '物料协同' },
+  { icon: <ToolOutlined />, label: '生产排程' },
+  { icon: <SafetyCertificateOutlined />, label: '质量闭环' },
+  { icon: <ApiOutlined />, label: '系统集成' },
+]
+
+function QrCornerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+      <path d="M14 14h3v3h-3z" />
+      <path d="M20 14v1" />
+      <path d="M14 20h1" />
+      <path d="M18 18h3v3h-3z" />
+    </svg>
+  )
+}
 
 function WecomQrPanel({ config }: { config: WecomQrConfig }) {
   const [src, setSrc] = useState('')
@@ -92,11 +107,15 @@ function WecomQrPanel({ config }: { config: WecomQrConfig }) {
   if (!src) return null
 
   return (
-    <div className="login-col right">
+    <div className="lb-qr-view">
       <div id="wecom-qr-container">
         <iframe src={src} title="企业微信扫码登录" scrolling="no" />
       </div>
-      <p className="qr-tag">仅支持已绑定的内部员工</p>
+      <p className="qr-tag">
+        仅支持已绑定的内部员工
+        <br />
+        点击右上角返回密码登录
+      </p>
     </div>
   )
 }
@@ -106,6 +125,9 @@ export default function Login() {
   const [loading, setLoading] = useState(false)
   const [loggingIn, setLoggingIn] = useState(false)
   const [qrConfig, setQrConfig] = useState<WecomQrConfig | null>(null)
+  const [loginType, setLoginType] = useState<LoginType>('employee')
+  const [loginMode, setLoginMode] = useState<LoginMode>('password')
+  const [rememberMe, setRememberMe] = useState(false)
   const navigate = useNavigate()
   const setAuth = useAuthStore((s) => s.setAuth)
   const currentToken = useAuthStore((s) => s.currentToken)
@@ -143,7 +165,7 @@ export default function Login() {
       setLoggingIn(false)
       if (opts?.clearUrl) window.history.replaceState({}, '', window.location.pathname)
     }
-  }, [setAuth, navigate, from])
+  }, [setAuth, navigate, from, isInWecom])
 
   // PC 浏览器：拉取扫码配置（企微客户端内不需要）
   useEffect(() => {
@@ -207,19 +229,19 @@ export default function Login() {
     try {
       // 渠道区分：企微客户端内 = wecom 渠道，浏览器 = web 渠道（同渠道互斥、跨渠道并存）
       const channel = isInWecom ? 'wecom' : 'web'
-      const res: any = await authApi.login(values.username, values.password, values.loginType, channel)
+      const res: any = await authApi.login(values.username, values.password, loginType, channel, rememberMe)
       const token = res.data.access_token
 
       useAuthStore.getState().setAuth(token, null)
       const meRes: any = await authApi.getMe()
       const user = meRes.data
       const isSupplierAccount = user?.role_code === 'supplier'
-      if (values.loginType === 'supplier' && !isSupplierAccount) {
+      if (loginType === 'supplier' && !isSupplierAccount) {
         useAuthStore.getState().logout()
-        message.warning('当前为内部员工账号，请切换到内部员工登录')
+        message.warning('当前为内部员工账号，请切换到员工登录')
         return
       }
-      if (values.loginType === 'employee' && isSupplierAccount) {
+      if (loginType === 'employee' && isSupplierAccount) {
         useAuthStore.getState().logout()
         message.warning('当前为供应商账号，请切换到供应商登录')
         return
@@ -246,106 +268,109 @@ export default function Login() {
   const showQr = !isInWecom && !!qrConfig?.enabled
 
   return (
-    <div className="login-bg">
-      <div className={`login-card${showQr ? ' has-qr' : ''}`}>
-        <div className="login-col left">
-          <div className="text-center mb-8">
-            <div
-              className="inline-flex items-center justify-center mb-4"
-              style={{ width: 48, height: 48, borderRadius: 14, background: 'linear-gradient(135deg, #6366f1, #818cf8)', boxShadow: '0 4px 16px rgba(99,102,241,.25)' }}
-            >
-              <LockOutlined style={{ fontSize: 22, color: '#fff' }} />
+    <div className="lb-page">
+      {/* 左：系统简介 + 功能图标 */}
+      <div className="lb-intro">
+        <div className="lb-brand">
+          <div className="lb-logo">SPC</div>
+          <div className="lb-name">SPC SUPPLY CHAIN</div>
+        </div>
+        <h1 className="lb-h1">供应链中台</h1>
+        <div className="lb-slogan">从订单到交付，让每一张订单准时闭环</div>
+        <p className="lb-desc">
+          数据驱动的一体化供应链协同平台，覆盖订单、物料、生产、质量与系统集成，
+          让计划、采购与制造在同一条数据链路上协同运转。
+        </p>
+        <div className="lb-features">
+          {LOGIN_FEATURES.map((feature) => (
+            <div key={feature.label} className="lb-feature">
+              <span className="ic">{feature.icon}</span>
+              <span className="k">{feature.label}</span>
             </div>
-            <h1 className="text-xl font-bold m-0" style={{ color: '#0f172a' }}>
-              供应链与生产协同中台
-            </h1>
-            <p className="mt-2" style={{ color: '#94a3b8', fontSize: 13 }}>
-              Supply Chain &amp; Production Collaboration
-            </p>
-          </div>
+          ))}
+        </div>
+      </div>
 
-          <Form form={form} onFinish={onFinish} autoComplete="off" size="large" initialValues={{ loginType: 'employee' }}>
-            <Form.Item name="loginType" hidden>
-              <Input />
-            </Form.Item>
-            <Form.Item
-              className="login-role-field"
-              shouldUpdate={(prev, current) => prev.loginType !== current.loginType}
+      {/* 右：登录卡片（单卡两态：密码 / 扫码） */}
+      <div className="lb-right">
+        <div className="lb-card">
+          {showQr && (
+            <button
+              type="button"
+              className={`lb-qr-toggle${loginMode === 'qr' ? ' qr-on' : ''}`}
+              onClick={() => setLoginMode(loginMode === 'qr' ? 'password' : 'qr')}
+              title={loginMode === 'qr' ? '返回密码登录' : '切换扫码登录'}
+              aria-label={loginMode === 'qr' ? '返回密码登录' : '切换扫码登录'}
             >
-              {({ getFieldValue, setFieldsValue }) => {
-                const currentLoginType = (getFieldValue('loginType') || 'employee') as LoginType
+              <QrCornerIcon />
+              <span className="lb-back-ico">✕</span>
+            </button>
+          )}
 
-                return (
-                  <div className="login-role-switch" role="radiogroup" aria-label="登录身份">
-                    <span
-                      className={`login-role-indicator${currentLoginType === 'supplier' ? ' is-supplier' : ''}`}
-                      aria-hidden="true"
-                    />
-                    {LOGIN_TYPE_OPTIONS.map((option) => {
-                      const isActive = currentLoginType === option.value
+          {showQr && loginMode === 'qr' ? (
+            <WecomQrPanel config={qrConfig as WecomQrConfig} />
+          ) : (
+            <div className="lb-pw-view">
+              <h2 className="lb-h2">欢迎回来</h2>
+              <div className="lb-sub2">登录 SPC 供应链协同平台，继续今天的工作</div>
+              <div className="lb-idpills" role="radiogroup" aria-label="登录身份">
+                {LOGIN_TYPE_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={loginType === option.value}
+                    className={`lb-pill${loginType === option.value ? ' on' : ''}`}
+                    onClick={() => setLoginType(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <Form form={form} onFinish={onFinish} autoComplete="off">
+                <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
+                  <Input prefix={<UserOutlined style={{ color: '#94a3b8' }} />} placeholder="账号" />
+                </Form.Item>
+                <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
+                  <Input.Password prefix={<LockOutlined style={{ color: '#94a3b8' }} />} placeholder="密码" />
+                </Form.Item>
+                <div className="lb-aux">
+                  <Switch size="small" checked={rememberMe} onChange={setRememberMe} />
+                  <span className="lb-remember" onClick={() => setRememberMe(!rememberMe)}>
+                    记住我（7 天内免登录）
+                  </span>
+                  <a className="lb-forgot" onClick={() => message.info('请联系管理员重置密码')}>
+                    忘记密码？
+                  </a>
+                </div>
+                <Button
+                  type="primary"
+                  htmlType="submit"
+                  loading={loading}
+                  block
+                  size="large"
+                  className="lb-submit"
+                >
+                  登 录
+                </Button>
+              </Form>
+            </div>
+          )}
 
-                      return (
-                        <button
-                          key={option.value}
-                          type="button"
-                          className={`login-role-option${isActive ? ' is-active' : ''}`}
-                          role="radio"
-                          aria-checked={isActive}
-                          onClick={() => setFieldsValue({ loginType: option.value })}
-                        >
-                          <span className="login-role-icon">{option.icon}</span>
-                          <span className="login-role-text">
-                            <span className="login-role-label">{option.label}</span>
-                            <span className="login-role-desc">{option.description}</span>
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )
-              }}
-            </Form.Item>
-            <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
-              <Input
-                prefix={<UserOutlined style={{ color: '#a5b4fc' }} />}
-                placeholder="用户名"
-                style={{ background: 'rgba(255,255,255,.5)', borderColor: 'rgba(0,0,0,.08)' }}
-              />
-            </Form.Item>
-            <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
-              <Input.Password
-                prefix={<LockOutlined style={{ color: '#a5b4fc' }} />}
-                placeholder="密码"
-                style={{ background: 'rgba(255,255,255,.5)', borderColor: 'rgba(0,0,0,.08)' }}
-              />
-            </Form.Item>
-            <Form.Item className="mb-0 mt-2">
-              <Button type="primary" htmlType="submit" loading={loading} block size="large"
-                style={{ height: 44, fontWeight: 600 }}
-              >
-                登录
-              </Button>
-            </Form.Item>
-          </Form>
           {isInWecom && (
             <p className="inapp-hint">↻ 已在企业微信内，自动静默登录中…</p>
           )}
+
+          {loggingIn && (
+            <div className="lb-logging-mask">
+              <Spin />
+              <span className="lb-logging-text">企业微信登录中…</span>
+            </div>
+          )}
         </div>
-
-        {showQr && (
-          <>
-            <div className="login-divider" />
-            <WecomQrPanel config={qrConfig as WecomQrConfig} />
-          </>
-        )}
-
-        {loggingIn && (
-          <div className="login-logging-mask">
-            <Spin />
-            <span className="login-logging-text">企业微信登录中…</span>
-          </div>
-        )}
       </div>
+
+      <div className="lb-foot">© 2026 SPC · 企业微信已接入 · 建议使用 Chrome / Edge 浏览器</div>
     </div>
   )
 }

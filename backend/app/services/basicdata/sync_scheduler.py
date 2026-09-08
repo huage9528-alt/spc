@@ -10,11 +10,11 @@ import uuid
 from datetime import datetime, timedelta, time
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
-from app.core.config import get_settings
+from app.core.config import get_settings, get_server_identity
 from app.services.basicdata.erp_sync_service import ERPSyncService
 from app.models.basicdata.sync_sql_config import SyncSqlConfig
 from app.models.basicdata.sync_log import SyncLog
@@ -114,6 +114,23 @@ class SyncScheduler:
         if not config:
             return False
 
+        # 防重复执行：该类型在近 30 分钟内已有 pending/running 任务（可能是本实例的手动
+        # 同步、或另一实例的定时同步）则跳过本轮，避免两个写入方并发拉同一批 ERP 数据、
+        # 并发抢 sync_sql_config 行锁（2026-08-26 08:32 LockNotAvailableError 根因）。
+        # 30 分钟窗口自动过期：实例崩溃残留的 running 行在老化后不再阻塞后续同步。
+        recent = await db.execute(
+            select(func.count()).select_from(SyncLog).where(
+                SyncLog.sync_type == config.sync_type,
+                SyncLog.status.in_(("pending", "running")),
+                SyncLog.created_at > datetime.now() - timedelta(minutes=30),
+            )
+        )
+        if recent.scalar_one() > 0:
+            logger.info(
+                f"[调度器] {config.sync_type} 近 30 分钟内已有未完成的同步任务，本轮跳过"
+            )
+            return False
+
         # 检查时间窗口
         if not self._is_in_time_window(config.sync_time_window):
             return False
@@ -138,7 +155,7 @@ class SyncScheduler:
         status: str, 
         message: str = ""
     ):
-        """更新同步状态"""
+        """更新同步状态（必须在短事务内调用并在调用后尽快 commit）"""
         config.last_sync_status = status
         config.last_sync_message = message
         if status == "success":
@@ -146,139 +163,203 @@ class SyncScheduler:
             config.next_sync_time = self._calculate_next_sync_time(config)
         await db.flush()
 
-    async def _run_single_sync(
-        self, 
-        db: AsyncSession, 
-        config: SyncSqlConfig, 
-        service: ERPSyncService
-    ):
-        """执行单个同步任务"""
-        sync_type = config.sync_type
-        logger.info(f"[同步任务] 开始执行: {sync_type} - {config.description or ''}")
-        
-        # 创建 SyncLog
-        task_id = str(uuid.uuid4())
-        sync_log = SyncLog(
-            task_id=task_id,
-            sync_type=sync_type,
-            trigger_mode="scheduled",
-            status="running",
-            started_at=datetime.now(),
-        )
-        db.add(sync_log)
-        
-        try:
-            # 更新状态为运行中
+    def _compute_since(self, config: SyncSqlConfig):
+        """根据同步策略计算 since 时间（纯内存计算，不触碰数据库）"""
+        if config.sync_strategy == "incremental":
+            if config.last_sync_time:
+                return config.last_sync_time
+            return datetime.now() - timedelta(days=30)
+        elif config.sync_strategy == "full":
+            return None
+        elif config.sync_strategy == "hybrid":
+            if not config.last_sync_time:
+                return None
+            elif (datetime.now() - config.last_sync_time).days >= 7:
+                return None
+            return config.last_sync_time
+        return None
+
+    async def _run_single_sync(self, config_id: int):
+        """执行单个同步任务。
+
+        事务纪律（修复 PG 卡死的关键）：
+        - 阶段A/阶段C 各用一个短事务，commit 后立即释放 sync_sql_config 行锁；
+        - 阶段B（ERP 拉数，分钟级）期间不持有任何对 sync_sql_config 的事务/锁。
+        旧实现把 "running" 状态的 UPDATE 挂在未提交事务上去跑 ERP 拉数，
+        导致行锁被持有数分钟，手动同步/配置管理接口 UPDATE 同表时无限等待
+        （服务端 lock_timeout=0），连接堆积直至连接池耗尽、全站卡死。
+        """
+        # 阶段A：短事务——读配置、计算 since、写 SyncLog、标记 running，立即 commit
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(SyncSqlConfig).where(SyncSqlConfig.id == config_id)
+            )
+            config = result.scalar_one_or_none()
+            if not config:
+                return
+            sync_type = config.sync_type
+            description = config.description or ""
+            since = self._compute_since(config)
+
+            task_id = str(uuid.uuid4())
+            started_at = datetime.now()
+            sync_log = SyncLog(
+                task_id=task_id,
+                sync_type=sync_type,
+                trigger_mode="scheduled",
+                server_id=get_server_identity(),
+                status="running",
+                started_at=started_at,
+            )
+            db.add(sync_log)
             await self._update_sync_status(db, config, "running", "同步任务开始")
-            await db.flush()
-            
-            # 根据同步策略计算since时间
-            since = None
-            if config.sync_strategy == "incremental":
-                if config.last_sync_time:
-                    since = config.last_sync_time
-                else:
-                    since = datetime.now() - timedelta(days=30)
-            elif config.sync_strategy == "full":
-                since = None
-            elif config.sync_strategy == "hybrid":
-                if not config.last_sync_time:
-                    since = None
-                elif (datetime.now() - config.last_sync_time).days >= 7:
-                    since = None
-                else:
-                    since = config.last_sync_time
-            
-            # 调用对应的同步方法
-            sync_method_name = self.sync_method_map.get(sync_type)
-            if sync_method_name and hasattr(service, sync_method_name):
+            await db.commit()
+
+        logger.info(f"[同步任务] 开始执行: {sync_type} - {description}")
+
+        # 阶段B：ERP 拉数 + 目标表写入，独立 session（不再触碰调度状态表）
+        sync_method_name = self.sync_method_map.get(sync_type)
+        if not sync_method_name or not hasattr(ERPSyncService, sync_method_name):
+            message = f"暂不支持 {sync_type} 的同步方法"
+            await self._finish_sync(
+                config_id, task_id, started_at, "failed", message, sync_type
+            )
+            logger.warning(f"[同步任务] {sync_type} - {message}")
+            return
+
+        synced_count = created_count = updated_count = errors_count = 0
+        sync_log_status = "failed"
+        config_status = "failed"
+        message = ""
+        error_detail = None
+        try:
+            async with AsyncSessionLocal() as sync_db:
+                service = ERPSyncService(sync_db)
                 sync_method = getattr(service, sync_method_name)
                 result = await sync_method(since=since)
-                
-                # 记录结果
-                synced_count = result.get("synced", 0)
-                created_count = result.get("created", 0)
-                updated_count = result.get("updated", 0)
-                errors_list = result.get("errors", [])
-                errors_count = len(errors_list)
+                try:
+                    await sync_db.commit()
+                except Exception as commit_err:
+                    logger.error(f"[调度器] 同步数据 commit 失败: {commit_err}")
+                    await sync_db.rollback()
+                    raise
 
-                message = f"同步完成: 处理{synced_count}条, 新增{created_count}条, 更新{updated_count}条"
-                if errors_count > 0:
-                    message += f", 失败{errors_count}条"
+            synced_count = result.get("synced", 0)
+            created_count = result.get("created", 0)
+            updated_count = result.get("updated", 0)
+            errors_list = result.get("errors", [])
+            errors_count = len(errors_list)
 
-                await self._update_sync_status(db, config, "success", message)
+            message = f"同步完成: 处理{synced_count}条, 新增{created_count}条, 更新{updated_count}条"
+            if errors_count > 0:
+                message += f", 失败{errors_count}条"
 
-                # 更新 SyncLog
-                sync_log.status = "success" if errors_count == 0 else "failed"
-                sync_log.finished_at = datetime.now()
-                sync_log.duration_seconds = (sync_log.finished_at - sync_log.started_at).total_seconds()
-                sync_log.synced_count = synced_count
-                sync_log.created_count = created_count
-                sync_log.updated_count = updated_count
-                sync_log.failed_count = errors_count
-                sync_log.message = message
-                # 同步方法内部捕获的异常只进入了 stats["errors"]，
-                # 不会触发下方外层 except。这里把错误明细写入 error_detail，
-                # 否则前端只能看到 "失败N条" 而无法定位失败原因。
-                if errors_list:
-                    sync_log.error_detail = "\n".join(errors_list[:50])
+            sync_log_status = "success" if errors_count == 0 else "failed"
+            config_status = "success"
+            # 同步方法内部捕获的异常只进入了 stats["errors"]，
+            # 不会触发下方外层 except。这里把错误明细写入 error_detail，
+            # 否则前端只能看到 "失败N条" 而无法定位失败原因。
+            error_detail = "\n".join(errors_list[:50]) if errors_list else None
 
-                logger.info(f"[同步任务] {sync_type} - {message}")
-            else:
-                message = f"暂不支持 {sync_type} 的同步方法"
-                await self._update_sync_status(db, config, "failed", message)
-                sync_log.status = "failed"
-                sync_log.finished_at = datetime.now()
-                sync_log.duration_seconds = (sync_log.finished_at - sync_log.started_at).total_seconds()
-                sync_log.message = message
-                logger.warning(f"[同步任务] {sync_type} - {message}")
-                
+            logger.info(f"[同步任务] {sync_type} - {message}")
         except Exception as e:
-            error_msg = f"同步失败: {str(e)}"
-            try:
-                await self._update_sync_status(db, config, "failed", error_msg)
-            except Exception:
-                logger.error(f"[同步任务] 更新同步状态失败，忽略", exc_info=True)
-            try:
-                sync_log.status = "failed"
-                sync_log.finished_at = datetime.now()
-                sync_log.duration_seconds = (sync_log.finished_at - sync_log.started_at).total_seconds()
-                sync_log.message = error_msg
-                sync_log.error_detail = traceback.format_exc()
-            except Exception:
-                pass
-            logger.error(f"[同步任务] {sync_type} - {error_msg}")
+            message = f"同步失败: {str(e)}"
+            sync_log_status = "failed"
+            config_status = "failed"
+            error_detail = traceback.format_exc()
+            logger.error(f"[同步任务] {sync_type} - {message}", exc_info=True)
+
+        # 阶段C：短事务——回写最终状态与 SyncLog，立即 commit
+        await self._finish_sync(
+            config_id, task_id, started_at, config_status, message,
+            sync_type, synced_count, created_count, updated_count,
+            errors_count, sync_log_status, error_detail,
+        )
+
+    async def _finish_sync(
+        self,
+        config_id: int,
+        task_id: str,
+        started_at: datetime,
+        config_status: str,
+        message: str,
+        sync_type: str,
+        synced_count: int = 0,
+        created_count: int = 0,
+        updated_count: int = 0,
+        failed_count: int = 0,
+        sync_log_status: Optional[str] = None,
+        error_detail: Optional[str] = None,
+    ):
+        """短事务回写同步结果：SyncSqlConfig 状态 + SyncLog 统计"""
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(SyncSqlConfig).where(SyncSqlConfig.id == config_id)
+                )
+                config = result.scalar_one_or_none()
+                if config:
+                    if config_status == "success":
+                        await self._update_sync_status(db, config, "success", message)
+                    else:
+                        config.last_sync_status = config_status
+                        config.last_sync_message = message
+                        await db.flush()
+
+                log_result = await db.execute(
+                    select(SyncLog).where(SyncLog.task_id == task_id)
+                )
+                sync_log = log_result.scalar_one_or_none()
+                if sync_log:
+                    finished_at = datetime.now()
+                    sync_log.status = sync_log_status or config_status
+                    sync_log.finished_at = finished_at
+                    sync_log.duration_seconds = (finished_at - started_at).total_seconds()
+                    sync_log.synced_count = synced_count
+                    sync_log.created_count = created_count
+                    sync_log.updated_count = updated_count
+                    sync_log.failed_count = failed_count
+                    sync_log.message = message
+                    if error_detail:
+                        sync_log.error_detail = error_detail
+                await db.commit()
+        except Exception:
+            logger.error("[同步任务] 回写同步状态失败，忽略", exc_info=True)
 
     async def _run_sync(self):
         """执行一次调度循环"""
         logger.info(f"[调度器] 检查同步任务 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         try:
+            # 短事务：只筛出到期的配置 id，立即 commit，绝不把读事务带进 ERP 拉数阶段
             async with AsyncSessionLocal() as db:
                 configs = await self._load_sync_configs(db)
-                
+                due_ids = []
                 for config in configs:
                     if await self._should_sync(db, config):
-                        # 为每个同步任务创建独立的 session，
-                        # 避免 ERPSyncService 内部 rollback 导致调度器 session 中的
-                        # SyncSqlConfig 对象过期，从而引发 MissingGreenlet 错误
-                        async with AsyncSessionLocal() as sync_db:
-                            service = ERPSyncService(sync_db)
-                            await self._run_single_sync(db, config, service)
-                            # 提交同步数据（orders, materials 等）
-                            try:
-                                await sync_db.commit()
-                            except Exception as commit_err:
-                                logger.error(f"[调度器] 同步数据 commit 失败: {commit_err}")
-                                await sync_db.rollback()
-                        # 提交调度器状态（SyncLog, SyncSqlConfig 状态更新）
-                        try:
-                            await db.commit()
-                        except Exception as commit_err:
-                            logger.error(f"[调度器] 状态 commit 失败: {commit_err}")
-                            await db.rollback()
+                        due_ids.append(config.id)
+                await db.commit()
+
+            for config_id in due_ids:
+                # 逐个隔离异常：单个配置失败（如行锁被其他实例/手动同步短暂占用）
+                # 不能中断本轮其余到期任务；锁冲突降级为 warning，下一轮自然重试。
+                try:
+                    await self._run_single_sync(config_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    if type(getattr(e, "orig", None)).__name__ == "LockNotAvailableError":
+                        logger.warning(
+                            f"[调度器] 同步任务 {config_id} 等待 sync_sql_config 行锁超时"
+                            f"（其他实例/手动同步占用中），本轮跳过，下轮重试: {e}"
+                        )
+                    else:
+                        logger.error(
+                            f"[调度器] 同步任务 {config_id} 失败，继续执行其余任务: {e}",
+                            exc_info=True,
+                        )
                 
-                logger.info(f"[调度器] 同步任务检查完成")
+            logger.info(f"[调度器] 同步任务检查完成")
                 
         except Exception as e:
             try:

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Modal, Checkbox, Space, Button, message } from 'antd'
+import { Modal, Checkbox, Space, Button, message, Radio } from 'antd'
 
 export interface ExportColumnOption {
   field: string
@@ -9,6 +9,9 @@ export interface ExportColumnOption {
 export interface ExportColumnSelectorProps {
   open: boolean
   columns: ExportColumnOption[]
+  /** 可选：提供时弹窗顶部显示 xlsx/csv 格式切换（默认 xlsx） */
+  format?: 'xlsx' | 'csv'
+  onFormatChange?: (format: 'xlsx' | 'csv') => void
   onConfirm: (selectedColumns: string[]) => void
   onCancel: () => void
 }
@@ -16,6 +19,8 @@ export interface ExportColumnSelectorProps {
 export default function ExportColumnSelector({
   open,
   columns,
+  format,
+  onFormatChange,
   onConfirm,
   onCancel,
 }: ExportColumnSelectorProps) {
@@ -66,6 +71,19 @@ export default function ExportColumnSelector({
       ]}
       width={600}
     >
+      {onFormatChange && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 0 8px', borderBottom: '1px solid #f0f0f0', marginBottom: 8 }}>
+          <span style={{ color: '#475569', fontSize: 13 }}>导出格式：</span>
+          <Radio.Group
+            size="small"
+            value={format ?? 'xlsx'}
+            onChange={(e) => onFormatChange(e.target.value as 'xlsx' | 'csv')}
+          >
+            <Radio.Button value="xlsx">Excel (.xlsx)</Radio.Button>
+            <Radio.Button value="csv">CSV (.csv)</Radio.Button>
+          </Radio.Group>
+        </div>
+      )}
       <div style={{ padding: '8px 0' }}>
         <Checkbox.Group
           value={checkedValues}

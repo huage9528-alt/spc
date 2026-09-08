@@ -1345,7 +1345,7 @@ async def get_order_product_breakdown(
     lines = line_result.scalars().all()
 
     if not lines:
-        order_q = await db.execute(select(SaleOrder).where(SaleOrder.order_no == order_no))
+        order_q = await db.execute(select(SaleOrder).where(SaleOrder.order_no == order_no).order_by(SaleOrder.id.desc()).limit(1))
         order = order_q.scalar_one_or_none()
         if order:
             lines = [SimpleNamespace(

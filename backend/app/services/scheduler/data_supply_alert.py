@@ -32,24 +32,19 @@ class DataSupplyAlertScheduler:
 
     async def _can_alert(self, condition: str) -> bool:
         """Redis 去重：同一条件 2h 内只告警一次。Redis 不可用时放行。"""
+        from app.core.redis_client import get_command_client, note_failure, note_success
+        client = get_command_client()
+        if client is None:
+            return True
         try:
-            import redis.asyncio as redis
-            from app.core.config import get_settings
-            client = redis.from_url(
-                get_settings().REDIS_URL, decode_responses=True, socket_connect_timeout=2,
+            got = await client.set(
+                f"ds_alert:{condition}",
+                "1", nx=True, ex=7200,
             )
-            try:
-                got = await client.set(
-                    f"ds_alert:{condition}",
-                    "1", nx=True, ex=7200,
-                )
-                return bool(got)
-            finally:
-                try:
-                    await client.aclose()
-                except Exception:
-                    pass
+            note_success()
+            return bool(got)
         except Exception:
+            note_failure()
             return True
 
     async def _send_wecom(self, text: str):

@@ -184,7 +184,9 @@ declare_permission("materials.kit_analysis", "齐套分析", module="materials",
 declare_permission("materials.supplier_risk", "供应商风险分析", module="materials", parent_code="materials", route_path="/supplier-risk", sort_order=5)
 declare_permission("materials.supplier_payment", "供应商付款排程", module="materials", parent_code="materials", route_path="/supplier-payment", sort_order=6)
 declare_permission("materials.stock_check", "物料盘点", module="materials", parent_code="materials", route_path="/stock-check", sort_order=7)
-declare_permission("materials.subcontract_orders", "委外订单", module="materials", parent_code="materials", route_path="/subcontract-orders", sort_order=8)
+declare_permission("materials.task_stock_check", "任务盘点", module="materials", parent_code="materials", route_path="/task-stock-check", sort_order=8)
+declare_permission("materials.subcontract_orders", "委外订单", module="materials", parent_code="materials", route_path="/subcontract-orders", sort_order=9)
+declare_permission("materials.scrap_inventory", "报废物料库存查询", module="materials", parent_code="materials", route_path="/scrap-inventory", sort_order=10)
 
 # 生产协同中心
 declare_permission("production", "生产协同中心", module="production", sort_order=5)
@@ -277,3 +279,11 @@ declare_permission("purchase.price_change.archive_delete", "调价单归档删�
 # 财务数据
 declare_permission("finance", "财务数据", module="finance", sort_order=12)
 declare_permission("finance.data", "科目余额", module="finance", parent_code="finance", actions=["read"], route_path="/finance/subject-balances", sort_order=1)
+
+# 部署运维（2026-09-04）— 生产环境部署 / 回退 / 切换任意版本为当前
+declare_permission(
+    "deploy_versions", "部署版本管理",
+    module="basicdata", parent_code="basicdata",
+    actions=["read", "manage"],
+    route_path="/deploy-versions", sort_order=12,
+)

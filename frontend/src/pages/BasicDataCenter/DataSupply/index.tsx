@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+﻿import { useState, useEffect, useCallback, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import {
   Table, Button, Modal, Form, Input, Select, Space, message,
@@ -47,82 +47,68 @@ const StatCard = ({ icon, color, title, value, suffix, trend }: {
 }) => (
   <div
     style={{
-      background: `linear-gradient(135deg, ${color}0f 0%, ${color}03 100%)`,
-      borderRadius: 12,
-      padding: '16px 18px',
-      border: `1px solid ${color}18`,
-      boxShadow: `0 2px 8px ${color}08, 0 1px 3px rgba(0,0,0,0.03)`,
-      transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+      background: '#fff',
+      borderRadius: 10,
+      padding: '12px 14px',
+      border: '1px solid #e2e8f0',
+      boxShadow: '0 1px 2px rgba(15, 23, 42, 0.04)',
       position: 'relative',
       overflow: 'hidden',
     }}
-    onMouseEnter={(e) => {
-      e.currentTarget.style.transform = 'translateY(-2px)';
-      e.currentTarget.style.boxShadow = `0 8px 20px ${color}15, 0 4px 8px rgba(0,0,0,0.06)`;
-    }}
-    onMouseLeave={(e) => {
-      e.currentTarget.style.transform = 'translateY(0)';
-      e.currentTarget.style.boxShadow = `0 2px 8px ${color}08, 0 1px 3px rgba(0,0,0,0.03)`;
-    }}
   >
     <div style={{
+      content: '',
       position: 'absolute',
-      top: -20,
-      right: -20,
-      width: 80,
-      height: 80,
-      borderRadius: '50%',
-      background: `radial-gradient(circle, ${color}10 0%, transparent 70%)`,
+      left: 0, top: 12, bottom: 12,
+      width: 3,
+      borderRadius: '0 3px 3px 0',
+      background: color,
     }} />
-    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, position: 'relative', zIndex: 1 }}>
+    <div style={{ position: 'relative', zIndex: 1 }}>
+      <div style={{ fontSize: 'calc(12px * var(--font-size-scale))', color: '#94a3b8' }}>{title}</div>
       <div style={{
-        width: 44, height: 44, borderRadius: 12, flexShrink: 0,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: `linear-gradient(135deg, ${color}25 0%, ${color}0d 100%)`,
-        boxShadow: `inset 0 1px 2px ${color}10, 0 2px 6px ${color}10`,
+        fontSize: 'calc(20px * var(--font-size-scale))',
+        fontWeight: 650,
+        letterSpacing: '-0.02em',
+        fontVariantNumeric: 'tabular-nums',
+        lineHeight: 1.25,
+        marginTop: 2,
       }}>
-        <span style={{ color, fontSize: 'calc(1.25rem * var(--font-size-scale))', display: 'flex' }}>{icon}</span>
+        {value}{suffix && <span style={{ fontSize: 'calc(12px * var(--font-size-scale))', fontWeight: 500, marginLeft: 2, color: '#94a3b8' }}>{suffix}</span>}
       </div>
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 'calc(0.78125rem * var(--font-size-scale))', color: '#8c8c8c', marginBottom: 4, fontWeight: 500, letterSpacing: 0.2 }}>{title}</div>
-        <div style={{ fontSize: 'calc(1.5rem * var(--font-size-scale))', fontWeight: 700, color, lineHeight: 1.15, fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-          {value}{suffix && <span style={{ fontSize: 'calc(0.84375rem * var(--font-size-scale))', fontWeight: 400, marginLeft: 6, color: '#8c8c8c' }}>{suffix}</span>}
+      {trend && (
+        <div style={{ marginTop: 2, fontSize: 'calc(11px * var(--font-size-scale))', color: trend.up ? '#16a34a' : '#dc2626', fontWeight: 500 }}>
+          {trend.up ? '▲' : '▼'} {trend.value}
         </div>
-        {trend && (
-          <div style={{ marginTop: 6, fontSize: 'calc(0.75rem * var(--font-size-scale))', color: trend.up ? '#52c41a' : '#ff4d4f', display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ fontSize: 'calc(0.625rem * var(--font-size-scale))' }}>{trend.up ? '▲' : '▼'}</span>
-            {trend.value}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   </div>
 )
 
-// 代码块：带语言标签 + 一键复制
+// 代码块：暗色主题（原型 #0f172a）
 const CodeBlock = ({ code, lang = 'python' }: { code: string; lang?: string }) => {
   const { Text } = Typography
   return (
     <div style={{ position: 'relative', margin: '12px 0' }}>
       <div style={{
-        background: '#1e1e1e', borderRadius: 10, overflow: 'hidden',
+        background: '#0f172a', borderRadius: 10, overflow: 'hidden',
         boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
       }}>
         <div style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          padding: '8px 16px', background: '#2d2d2d', borderBottom: '1px solid #3d3d3d',
+          padding: '6px 16px', background: 'rgba(255,255,255,0.04)', borderBottom: '1px solid rgba(255,255,255,0.06)',
         }}>
-          <Tag color="geekblue" style={{ margin: 0, fontSize: 'calc(0.6875rem * var(--font-size-scale))' }}>{lang}</Tag>
+          <span style={{ fontSize: 'calc(11px * var(--font-size-scale))', color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{lang}</span>
           <Button
             size="small" type="text" icon={<CopyOutlined />}
             onClick={() => copyToClipboard(code)}
-            style={{ color: '#9cdcfe' }}
+            style={{ color: '#94a3b8' }}
           />
         </div>
         <pre style={{
-          margin: 0, padding: '16px 20px', overflow: 'auto',
-          fontSize: 'calc(0.78125rem * var(--font-size-scale))', lineHeight: 1.7, fontFamily: 'Consolas, Monaco, "Courier New", monospace',
-          color: '#d4d4d4', background: '#1e1e1e',
+          margin: 0, padding: '14px 16px', overflow: 'auto',
+          fontSize: 'calc(12px * var(--font-size-scale))', lineHeight: 1.8, fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+          color: '#cbd5e1', background: '#0f172a',
         }}>
           <code>{code}</code>
         </pre>
@@ -131,7 +117,7 @@ const CodeBlock = ({ code, lang = 'python' }: { code: string; lang?: string }) =
   )
 }
 
-// 键值对描述表（替代手写 HTML table）
+// 键值对描述表（扁平卡片）
 const DescTable = ({ rows, columns = 2 }: {
   rows: { label: ReactNode; value: ReactNode }[]
   columns?: 2 | 3
@@ -140,14 +126,14 @@ const DescTable = ({ rows, columns = 2 }: {
   return (
     <div style={{
       display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`,
-      gap: 12, borderRadius: 12, padding: 4,
+      gap: 10, borderRadius: 10,
     }}>
       {rows.map((r, i) => (
         <div key={i} style={{
-          background: '#fafbfc', padding: '14px 16px',
-          display: 'flex', flexDirection: 'column', gap: 6, minHeight: 56,
-          justifyContent: 'center', borderRadius: 8,
-          border: '1px solid #f0f1f5',
+          background: '#f8fafc', padding: '10px 14px',
+          display: 'flex', flexDirection: 'column', gap: 4,
+          borderRadius: 8,
+          border: '1px solid #e2e8f0',
           transition: 'all 0.2s ease',
         }}
         onMouseEnter={(e) => {
@@ -463,8 +449,8 @@ export default function DataSupply() {
     <div>
       {newKeyModalOpen && (
         <Modal
-          open
-          title={<span><ExclamationCircleOutlined style={{ color: '#faad14', marginRight: 8 }} />API Key 已创建</span>}
+rootClassName="sc-page"           open
+          title={<span><ExclamationCircleOutlined style={{ color: '#d97706', marginRight: 8 }} />API Key 已创建</span>}
           width={620}
           centered
           footer={[
@@ -538,10 +524,10 @@ export default function DataSupply() {
             <div style={{
               width: 36, height: 36, borderRadius: 10,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              background: 'linear-gradient(135deg, #1890ff25 0%, #722ed125 100%)',
+              background: 'linear-gradient(135deg, #5b5bd625 0%, #8b5cf625 100%)',
               boxShadow: '0 2px 8px rgba(24, 144, 255, 0.15)',
             }}>
-              <SafetyCertificateOutlined style={{ fontSize: 'calc(1.125rem * var(--font-size-scale))', color: '#1890ff' }} />
+              <SafetyCertificateOutlined style={{ fontSize: 'calc(1.125rem * var(--font-size-scale))', color: '#5b5bd6' }} />
             </div>
             <div>
               <div style={{ fontSize: 'calc(0.9375rem * var(--font-size-scale))', fontWeight: 600, color: '#1f2937', lineHeight: 1.2 }}>API Key 列表</div>
@@ -635,7 +621,7 @@ export default function DataSupply() {
                       {!eps ? <Tag style={{ margin: 0 }}>无</Tag> : (
                         <Space wrap size={4}>
                           {eps.slice(0, 3).map((code: string) => (
-                            <Tag key={code} color="purple" style={{ margin: 0 }}>{endpointLabelMap[code] || code}</Tag>
+                            <Tag key={code} color="#8b5cf6" style={{ margin: 0 }}>{endpointLabelMap[code] || code}</Tag>
                           ))}
                           {eps.length > 3 && (
                             <Tooltip title={eps.map((code: string) => endpointLabelMap[code] || code).join('、')}>
@@ -654,14 +640,14 @@ export default function DataSupply() {
               key: 'limits',
               width: 170,
               render: (_: any, r: ApiKeyItem) => {
-                let ipTag = <Tag color="green" style={{ margin: 0 }}>不限</Tag>
+                let ipTag = <Tag color="#16a34a" style={{ margin: 0 }}>不限</Tag>
                 if (r.ip_whitelist_json) {
                   try {
                     const ips = JSON.parse(r.ip_whitelist_json)
-                    if (ips.length) ipTag = <Tooltip title={ips.join(', ')}><Tag color="blue" style={{ margin: 0 }}>{ips.length} IP</Tag></Tooltip>
+                    if (ips.length) ipTag = <Tooltip title={ips.join(', ')}><Tag color="#5b5bd6" style={{ margin: 0 }}>{ips.length} IP</Tag></Tooltip>
                   } catch { /* keep default */ }
                 }
-                let expireNode: ReactNode = <Tag color="green" style={{ margin: 0 }}>永久</Tag>
+                let expireNode: ReactNode = <Tag color="#16a34a" style={{ margin: 0 }}>永久</Tag>
                 if (r.expires_at) {
                   const isExpired = new Date(r.expires_at) < new Date()
                   expireNode = (
@@ -706,7 +692,7 @@ export default function DataSupply() {
       </div>
 
       <Modal
-        title={editingApiKey ? '编辑 API Key' : '创建 API Key'}
+rootClassName="sc-page"         title={editingApiKey ? '编辑 API Key' : '创建 API Key'}
         open={apiKeyModalOpen}
         onOk={handleSaveApiKey}
         onCancel={() => { setApiKeyModalOpen(false); setEditingApiKey(null) }}
@@ -763,7 +749,7 @@ export default function DataSupply() {
                 return (
                   <Space direction="vertical" size={0}>
                     <Space size={6}>
-                      <Tag color="blue" style={{ margin: 0 }}>{ep.method}</Tag>
+                      <Tag color="#5b5bd6" style={{ margin: 0 }}>{ep.method}</Tag>
                       <Text strong>{ep.name}</Text>
                       {ep.tags?.map(t => <Tag key={t} style={{ margin: 0 }}>{t}</Tag>)}
                     </Space>
@@ -794,7 +780,7 @@ export default function DataSupply() {
                 return (
                   <Space direction="vertical" size={0}>
                     <Space size={6}>
-                      <Tag color="green" style={{ margin: 0 }}>{ep.method}</Tag>
+                      <Tag color="#16a34a" style={{ margin: 0 }}>{ep.method}</Tag>
                       <Text strong>{ep.name}</Text>
                       {ep.tags?.map(t => <Tag key={t} style={{ margin: 0 }}>{t}</Tag>)}
                     </Space>
@@ -838,7 +824,7 @@ export default function DataSupply() {
             <Col span={6}>
               <StatCard
                 icon={<BarChartOutlined />}
-                color="#1890ff"
+                color="#5b5bd6"
                 title="总调用次数"
                 value={statistics.total_calls}
               />
@@ -846,7 +832,7 @@ export default function DataSupply() {
             <Col span={6}>
               <StatCard
                 icon={<CheckCircleOutlined />}
-                color="#52c41a"
+                color="#16a34a"
                 title="成功 / 成功率"
                 value={statistics.success_calls}
                 suffix={successRate ? `(${successRate}%)` : ''}
@@ -855,7 +841,7 @@ export default function DataSupply() {
             <Col span={6}>
               <StatCard
                 icon={<CloseCircleOutlined />}
-                color={statistics.failed_calls ? '#ff4d4f' : '#bfbfbf'}
+                color={statistics.failed_calls ? '#dc2626' : '#bfbfbf'}
                 title="失败"
                 value={statistics.failed_calls}
               />
@@ -863,7 +849,7 @@ export default function DataSupply() {
             <Col span={6}>
               <StatCard
                 icon={<ClockCircleOutlined />}
-                color="#722ed1"
+                color="#8b5cf6"
                 title="平均耗时"
                 value={statistics.avg_duration_ms?.toFixed(1) || '-'}
                 suffix="ms"
@@ -874,7 +860,7 @@ export default function DataSupply() {
             <Col span={8}>
               <StatCard
                 icon={<WarningOutlined />}
-                color={statistics.failure_rate ? '#ff4d4f' : '#52c41a'}
+                color={statistics.failure_rate ? '#dc2626' : '#16a34a'}
                 title="失败率"
                 value={statistics.failure_rate != null ? (statistics.failure_rate * 100).toFixed(1) : '-'}
                 suffix={statistics.failure_rate != null ? '%' : ''}
@@ -891,7 +877,7 @@ export default function DataSupply() {
             <Col span={8}>
               <StatCard
                 icon={<ClockCircleOutlined />}
-                color="#13c2c2"
+                color="#0e7490"
                 title="P95 耗时"
                 value={statistics.p95_duration_ms != null ? statistics.p95_duration_ms.toFixed(1) : '-'}
                 suffix="ms"
@@ -949,7 +935,7 @@ export default function DataSupply() {
                 .map(([type, count]) => (
                   <Tag
                     key={type}
-                    color="blue"
+                    color="#5b5bd6"
                     style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))', padding: '3px 10px', borderRadius: 4 }}
                   >
                     {endpointLabelMap[type] || type}: <Text strong>{count}</Text>
@@ -967,7 +953,7 @@ export default function DataSupply() {
               {Object.entries(statistics.by_api_key)
                 .sort(([, a], [, b]) => b - a)
                 .map(([name, count]) => (
-                  <Tag key={name} color="geekblue" style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))', padding: '3px 10px', borderRadius: 4 }}>
+                  <Tag key={name} color="#4c4dc2" style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))', padding: '3px 10px', borderRadius: 4 }}>
                     {name}: <Text strong>{count}</Text>
                   </Tag>
                 ))}
@@ -1016,7 +1002,7 @@ export default function DataSupply() {
               key: 'data_type',
               width: 160,
               render: (v: string) => (
-                <Tag color="blue">
+                <Tag color="#5b5bd6">
                   {endpointLabelMap[v] || v}
                 </Tag>
               ),
@@ -1059,7 +1045,7 @@ export default function DataSupply() {
               render: (v: number | null) => {
                 if (!v) return '-'
                 const ms = Number(v)
-                const color = ms > 1000 ? '#ff4d4f' : ms > 500 ? '#faad14' : '#52c41a'
+                const color = ms > 1000 ? '#dc2626' : ms > 500 ? '#d97706' : '#16a34a'
                 return <Text style={{ color, fontWeight: 500 }}>{ms.toFixed(1)}ms</Text>
               },
             },
@@ -1831,10 +1817,10 @@ System.out.println(resp.body());`
               <div style={{
                 width: 32, height: 32, borderRadius: 10,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: 'linear-gradient(135deg, #1890ff25 0%, #1890ff0d 100%)',
+                background: 'linear-gradient(135deg, #5b5bd625 0%, #5b5bd60d 100%)',
                 boxShadow: '0 2px 6px rgba(24, 144, 255, 0.1)',
               }}>
-                <ApiOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#1890ff' }} />
+                <ApiOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#5b5bd6' }} />
               </div>
               <span style={{ fontSize: 'calc(0.9375rem * var(--font-size-scale))', fontWeight: 600, color: '#1f2937' }}>接入流程</span>
             </div>
@@ -1864,10 +1850,10 @@ System.out.println(resp.body());`
               <div style={{
                 width: 32, height: 32, borderRadius: 10,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: 'linear-gradient(135deg, #52c41a25 0%, #52c41a0d 100%)',
+                background: 'linear-gradient(135deg, #16a34a25 0%, #16a34a0d 100%)',
                 boxShadow: '0 2px 6px rgba(82, 196, 26, 0.1)',
               }}>
-                <SafetyCertificateOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#52c41a' }} />
+                <SafetyCertificateOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#16a34a' }} />
               </div>
               <span style={{ fontSize: 'calc(0.9375rem * var(--font-size-scale))', fontWeight: 600, color: '#1f2937' }}>认证方式</span>
             </div>
@@ -1936,10 +1922,10 @@ System.out.println(resp.body());`
               <div style={{
                 width: 32, height: 32, borderRadius: 10,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: 'linear-gradient(135deg, #722ed125 0%, #722ed10d 100%)',
+                background: 'linear-gradient(135deg, #8b5cf625 0%, #8b5cf60d 100%)',
                 boxShadow: '0 2px 6px rgba(114, 46, 209, 0.1)',
               }}>
-                <ApiOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#722ed1' }} />
+                <ApiOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#8b5cf6' }} />
               </div>
               <span style={{ fontSize: 'calc(0.9375rem * var(--font-size-scale))', fontWeight: 600, color: '#1f2937' }}>对外业务接口清单</span>
             </div>
@@ -1964,7 +1950,7 @@ System.out.println(resp.body());`
                 title: '方法 / 路径', key: 'route', width: 280,
                 render: (_: any, r: any) => (
                   <Space size={6}>
-                    <Tag color="blue" style={{ margin: 0 }}>{r.method}</Tag>
+                    <Tag color="#5b5bd6" style={{ margin: 0 }}>{r.method}</Tag>
                     <Text code style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))' }}>{r.path}</Text>
                   </Space>
                 ),
@@ -1985,10 +1971,10 @@ System.out.println(resp.body());`
               <div style={{
                 width: 32, height: 32, borderRadius: 10,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: 'linear-gradient(135deg, #13c2c225 0%, #13c2c20d 100%)',
+                background: 'linear-gradient(135deg, #0e749025 0%, #0e74900d 100%)',
                 boxShadow: '0 2px 6px rgba(19, 194, 194, 0.1)',
               }}>
-                <ApiOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#13c2c2' }} />
+                <ApiOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#0e7490' }} />
               </div>
               <span style={{ fontSize: 'calc(0.9375rem * var(--font-size-scale))', fontWeight: 600, color: '#1f2937' }}>内部可暴露接口清单（@exposable）</span>
             </div>
@@ -2013,7 +1999,7 @@ System.out.println(resp.body());`
                 title: '方法 / 路径', key: 'route', width: 280,
                 render: (_: any, r: any) => (
                   <Space size={6}>
-                    <Tag color="green" style={{ margin: 0 }}>{r.method}</Tag>
+                    <Tag color="#16a34a" style={{ margin: 0 }}>{r.method}</Tag>
                     <Text code style={{ fontSize: 'calc(0.75rem * var(--font-size-scale))' }}>{r.path}</Text>
                   </Space>
                 ),
@@ -2180,10 +2166,10 @@ func getenv(k, def string) string {
                   <div style={{
                     width: 32, height: 32, borderRadius: 10,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'linear-gradient(135deg, #52c41a25 0%, #52c41a0d 100%)',
+                    background: 'linear-gradient(135deg, #16a34a25 0%, #16a34a0d 100%)',
                     boxShadow: '0 2px 6px rgba(82, 196, 26, 0.1)',
                   }}>
-                    <LockOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#52c41a' }} />
+                    <LockOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#16a34a' }} />
                   </div>
                   <span style={{ fontSize: 'calc(0.9375rem * var(--font-size-scale))', fontWeight: 600, color: '#1f2937' }}>安全机制</span>
                 </div>
@@ -2214,10 +2200,10 @@ func getenv(k, def string) string {
                   <div style={{
                     width: 32, height: 32, borderRadius: 10,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'linear-gradient(135deg, #ff4d4f25 0%, #ff4d4f0d 100%)',
+                    background: 'linear-gradient(135deg, #dc262625 0%, #dc26260d 100%)',
                     boxShadow: '0 2px 6px rgba(255, 77, 79, 0.1)',
                   }}>
-                    <WarningOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#ff4d4f' }} />
+                    <WarningOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#dc2626' }} />
                   </div>
                   <span style={{ fontSize: 'calc(0.9375rem * var(--font-size-scale))', fontWeight: 600, color: '#1f2937' }}>错误码</span>
                 </div>
@@ -2258,10 +2244,10 @@ func getenv(k, def string) string {
               <div style={{
                 width: 32, height: 32, borderRadius: 10,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: 'linear-gradient(135deg, #faad1425 0%, #faad140d 100%)',
+                background: 'linear-gradient(135deg, #d9770625 0%, #d977060d 100%)',
                 boxShadow: '0 2px 6px rgba(250, 173, 20, 0.1)',
               }}>
-                <ClockCircleOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#faad14' }} />
+                <ClockCircleOutlined style={{ fontSize: 'calc(1rem * var(--font-size-scale))', color: '#d97706' }} />
               </div>
               <span style={{ fontSize: 'calc(0.9375rem * var(--font-size-scale))', fontWeight: 600, color: '#1f2937' }}>限流规则</span>
             </div>
@@ -2282,112 +2268,52 @@ func getenv(k, def string) string {
   }
 
   return (
-    <div style={{ padding: 0, background: '#f5f7fa', minHeight: 'calc(100vh - 64px)' }}>
-      <style>{`
-        .data-supply-tabs .ant-tabs-nav {
-          margin-bottom: 0 !important;
-          padding: 0 4px;
-        }
-        .data-supply-tabs .ant-tabs-tab {
-          padding: 10px 18px;
-          font-size: calc(0.875rem * var(--font-size-scale));
-          font-weight: 500;
-          transition: all 0.2s ease;
-        }
-        .data-supply-tabs .ant-tabs-tab:hover {
-          color: #1890ff;
-        }
-        .data-supply-tabs .ant-tabs-tab-active {
-          font-weight: 600;
-        }
-        .data-supply-tabs .ant-tabs-ink-bar {
-          height: 3px;
-          border-radius: 2px;
-        }
-        .data-supply-table .ant-table-thead > tr > th {
-          background: linear-gradient(180deg, #fafbfc 0%, #f5f7fa 100%) !important;
-          color: #262626 !important;
-          font-weight: 600 !important;
-          font-size: calc(0.8125rem * var(--font-size-scale)) !important;
-          border-bottom: 1px solid #e8e8e8 !important;
-          padding: 12px 16px !important;
-        }
-        .data-supply-table .ant-table-tbody > tr.row-even > td {
-          background: #fcfcfd;
-        }
-        .data-supply-table .ant-table-tbody > tr.row-odd > td {
-          background: #ffffff;
-        }
-        .data-supply-table .ant-table-tbody > tr:hover > td {
-          background: #f0f5ff !important;
-        }
-        .data-supply-table .ant-table-tbody > tr.row-disabled > td {
-          opacity: 0.5;
-        }
-        .data-supply-table .ant-table-tbody > tr > td {
-          padding: 12px 16px !important;
-          border-bottom: 1px solid #f0f0f0 !important;
-        }
-        .data-supply-table .ant-table-container {
-          border-radius: 8px;
-          overflow: hidden;
-        }
-      `}</style>
-      {/* Tab 区域 - 无外层框，吸附顶部栏下方并占满宽度 */}
+    <div className="sc-page" style={{ padding: 0 }}>
+      {/* 页头 */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, padding: '20px 24px 0' }}>
+        <div>
+          <div style={{ fontSize: 'calc(20px * var(--font-size-scale))', fontWeight: 600, letterSpacing: '-0.01em' }}>数据供给</div>
+          <div style={{ fontSize: 'calc(12.5px * var(--font-size-scale))', color: '#94a3b8', marginTop: 3 }}>
+            为外部系统提供受控的只读取数接口：HMAC-SHA256 签名 · 每 Key 限流 · IP 白名单 · 全量调用留痕
+          </div>
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ fontSize: 'calc(12px * var(--font-size-scale))', color: '#94a3b8' }}>
+            接口入口：<code style={{ background: '#f1f5f9', borderRadius: 4, padding: '1px 6px', fontSize: 11 }}>/api/v1/external/*</code>
+          </span>
+        </div>
+      </div>
+
+      {/* Tab 区域 */}
       <Tabs
-        className="data-supply-tabs"
         activeKey={activeTab}
         onChange={setActiveTab}
         size="middle"
-        style={{ marginBottom: 0, background: '#fff', padding: '0 16px', borderBottom: '1px solid #f0f0f0', position: 'sticky', top: 56, zIndex: 8 }}
+        style={{ padding: '0 24px', marginBottom: 0, position: 'sticky', top: 56, zIndex: 8, background: 'var(--bg, #f8fafc)' }}
         tabBarStyle={{ marginBottom: 0 }}
         items={[
           {
             key: 'api-keys',
-            label: (
-              <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', fontWeight: 500 }}>
-                <KeyOutlined style={{ marginRight: 6 }} />
-                API Key 管理
-              </span>
-            ),
+            label: <span><KeyOutlined style={{ marginRight: 6 }} />API Key 管理</span>,
             children: null,
           },
           {
             key: 'call-logs',
-            label: (
-              <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', fontWeight: 500 }}>
-                <BarChartOutlined style={{ marginRight: 6 }} />
-                调用日志
-              </span>
-            ),
+            label: <span><BarChartOutlined style={{ marginRight: 6 }} />调用日志</span>,
             children: null,
           },
           {
             key: 'guide',
-            label: (
-              <span style={{ fontSize: 'calc(0.875rem * var(--font-size-scale))', fontWeight: 500 }}>
-                <BookOutlined style={{ marginRight: 6 }} />
-                使用说明
-              </span>
-            ),
+            label: <span><BookOutlined style={{ marginRight: 6 }} />使用说明</span>,
             children: null,
           },
         ]}
       />
-      {/* 内容区域 - 单独放在下方 */}
-      <div style={{ padding: '12px 16px 16px' }}>
-        <Card
-          bordered={false}
-          style={{
-            borderRadius: 12,
-            boxShadow: '0 1px 4px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.02)',
-          }}
-          bodyStyle={{ padding: 20 }}
-        >
-          {activeTab === 'api-keys' && renderApiKeysTab()}
-          {activeTab === 'call-logs' && renderCallLogsTab()}
-          {activeTab === 'guide' && renderGuideTab()}
-        </Card>
+      {/* 内容区域 */}
+      <div style={{ padding: '16px 24px 24px' }}>
+        {activeTab === 'api-keys' && renderApiKeysTab()}
+        {activeTab === 'call-logs' && renderCallLogsTab()}
+        {activeTab === 'guide' && renderGuideTab()}
       </div>
     </div>
   )

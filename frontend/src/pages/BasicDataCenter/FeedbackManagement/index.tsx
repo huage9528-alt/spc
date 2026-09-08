@@ -1,34 +1,75 @@
 import { useEffect, useRef, useState } from 'react'
+import { Table, Button, Space, Input, Select, Form, message, Modal, Image } from 'antd'
 import {
-  Table, Tag, Button, Space, Input, Select, Row, Col, Card, Drawer, Form,
-  message, Popconfirm, Descriptions, List, Image,
-} from 'antd'
-import { ReloadOutlined, SearchOutlined, EyeOutlined, DeleteOutlined, MessageOutlined } from '@ant-design/icons'
+  ReloadOutlined, SearchOutlined, DeleteOutlined, MessageOutlined,
+  DownloadOutlined, PaperClipOutlined, ClockCircleOutlined,
+  SyncOutlined, CheckCircleOutlined, CloseCircleOutlined,
+} from '@ant-design/icons'
+import dayjs from 'dayjs'
 import { feedbackApi } from '../../../services/api'
 import { useAuthStore } from '../../../store/auth'
 import { useSearchParams } from 'react-router-dom'
+import KpiBand, { type KpiItem } from '../components/KpiBand'
+import ChipsFilter, { type ChipOption } from '../components/ChipsFilter'
+import BdDrawer, { DrawerSection, KvGrid } from '../components/BdDrawer'
 
-const typeMap: Record<string, { label: string; color: string }> = {
-  issue: { label: '问题', color: 'red' },
-  suggestion: { label: '建议', color: 'blue' },
-  inquiry: { label: '咨询', color: 'green' },
+const typeMeta: Record<string, { label: string; cls: string }> = {
+  issue: { label: '问题', cls: 'sc-tag-danger' },
+  suggestion: { label: '建议', cls: 'sc-tag-kit' },
+  inquiry: { label: '咨询', cls: 'sc-tag-done' },
 }
-const severityMap: Record<string, { label: string; color: string }> = {
-  low: { label: '低', color: 'default' },
-  medium: { label: '中', color: 'gold' },
-  high: { label: '高', color: 'red' },
+const severityMeta: Record<string, { label: string; cls: string }> = {
+  low: { label: '低', cls: 'sc-tag-wait' },
+  medium: { label: '中', cls: 'sc-tag-warn' },
+  high: { label: '高', cls: 'sc-tag-danger' },
 }
-const statusMap: Record<string, { label: string; color: string }> = {
-  pending: { label: '待处理', color: 'orange' },
-  processing: { label: '处理中', color: 'blue' },
-  resolved: { label: '已解决', color: 'green' },
-  closed: { label: '已关闭', color: 'default' },
+const statusMeta: Record<string, { label: string; cls: string }> = {
+  pending: { label: '待处理', cls: 'sc-tag-warn' },
+  processing: { label: '处理中', cls: 'sc-tag-kit' },
+  resolved: { label: '已解决', cls: 'sc-tag-done' },
+  closed: { label: '已关闭', cls: 'sc-tag-wait' },
 }
+
+const STATUS_CLS = (k?: string) => (k ? statusMeta[k]?.cls || 'sc-tag-plain' : 'sc-tag-plain')
+const STATUS_LBL = (k?: string) => (k ? statusMeta[k]?.label || k : '—')
+
+const AVATAR_GRADIENTS = [
+  'linear-gradient(135deg,#5b5bd6,#8b5cf6)',
+  'linear-gradient(135deg,#0ea5e9,#14b8a6)',
+  'linear-gradient(135deg,#f59e0b,#f43f5e)',
+  'linear-gradient(135deg,#16a34a,#0ea5e9)',
+]
+const avatarColor = (name: string) => {
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
+  return AVATAR_GRADIENTS[h % AVATAR_GRADIENTS.length]
+}
+
+const timeAgo = (t?: string | null) => {
+  if (!t) return ''
+  const diff = dayjs().diff(dayjs(t), 'minute')
+  if (diff < 1) return '刚刚'
+  if (diff < 60) return `${diff} 分钟前`
+  const h = Math.floor(diff / 60)
+  if (h < 24) return `${h} 小时前`
+  return `${Math.floor(h / 24)} 天前`
+}
+
+const Operator = ({ name, dim }: { name?: string | null; dim?: boolean }) =>
+  name ? (
+    <span className="sys-op">
+      <span className="um-avatar" style={{ background: dim ? 'linear-gradient(135deg,#94a3b8,#64748b)' : avatarColor(name) }}>
+        {name.slice(0, 1)}
+      </span>
+      <span className="sys-op-name" style={dim ? { color: '#94a3b8' } : undefined}>{name}</span>
+    </span>
+  ) : <span className="sc-note">—</span>
 
 export default function FeedbackManagement() {
   const hasPermission = useAuthStore(s => s.hasPermission)
   const canHandle = hasPermission('basicdata.feedback.handle', 'handle') || hasPermission('basicdata.feedback', 'update')
   const canDelete = hasPermission('basicdata.feedback', 'delete')
+
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [stats, setStats] = useState<any>({ total: 0, pending: 0, processing: 0, resolved: 0, closed: 0 })
@@ -37,12 +78,15 @@ export default function FeedbackManagement() {
   const [filterType, setFilterType] = useState<string | undefined>(undefined)
   const [filterSeverity, setFilterSeverity] = useState<string | undefined>(undefined)
   const [filterStatus, setFilterStatus] = useState<string | undefined>(undefined)
+  const [sortInfo, setSortInfo] = useState<{ sort_by?: string; sort_order?: string }>({})
 
-  const [detailOpen, setDetailOpen] = useState(false)
   const [detail, setDetail] = useState<any>(null)
   const [replyForm] = Form.useForm()
   const [replying, setReplying] = useState(false)
-  const [sortInfo, setSortInfo] = useState<{ sort_by?: string; sort_order?: string }>({})
+  const [deleteTarget, setDeleteTarget] = useState<any>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [statusConfirm, setStatusConfirm] = useState<{ next: string } | null>(null)
+  const [statusUpdating, setStatusUpdating] = useState(false)
 
   const fetchData = async (
     page = pagination.current,
@@ -81,10 +125,9 @@ export default function FeedbackManagement() {
     return () => clearTimeout(t)
   }, [keyword, filterType, filterSeverity, filterStatus, sortInfo]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const openDetail = async (record: any) => {
+  const openDetail = (record: any) => {
     setDetail(record)
-    replyForm.setFieldsValue({ reply: record.reply || '', status: record.status })
-    setDetailOpen(true)
+    replyForm.setFieldsValue({ reply: '', status: undefined })
   }
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -126,140 +169,188 @@ export default function FeedbackManagement() {
     }
   }
 
-  const changeStatus = async (status: string) => {
+  const doChangeStatus = async (status: string) => {
+    setStatusUpdating(true)
     try {
       const res: any = await feedbackApi.updateStatus(detail.id, status)
-      message.success('状态已更新')
+      message.success(`状态已更新为「${(statusMeta[status] || {}).label || status}」`)
       setDetail(res.data)
-      replyForm.setFieldsValue({ status: res.data?.status })
+      replyForm.setFieldsValue({ status: undefined })
       fetchData()
     } catch (e: any) {
       // 错误已由全局拦截器提示
+    } finally {
+      setStatusUpdating(false)
+      setStatusConfirm(null)
     }
   }
 
-  const handleDelete = async (id: number) => {
+  const changeStatus = (status: string, needConfirm: boolean) => {
+    if (needConfirm) setStatusConfirm({ next: status })
+    else doChangeStatus(status)
+  }
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
     try {
-      await feedbackApi.remove(id)
+      await feedbackApi.remove(deleteTarget.id)
       message.success('已删除')
+      setDeleteTarget(null)
+      if (detail?.id === deleteTarget.id) setDetail(null)
       fetchData()
     } catch (e: any) {
       // 错误已由全局拦截器提示
+    } finally {
+      setDeleting(false)
     }
   }
+
+  // ---------- 状态流转按钮 ----------
+  const statusButtons = (s: string) => {
+    const btns: { text: string; type: any; confirm?: boolean; danger?: boolean; status: string }[] = []
+    if (canHandle) {
+      if (s === 'pending') {
+        btns.push({ text: '开始处理', status: 'processing', type: 'default' })
+        btns.push({ text: '标记已解决', status: 'resolved', type: 'primary', confirm: true })
+        btns.push({ text: '关闭反馈', status: 'closed', type: 'default', confirm: true, danger: true })
+      } else if (s === 'processing') {
+        btns.push({ text: '标记已解决', status: 'resolved', type: 'primary', confirm: true })
+        btns.push({ text: '关闭反馈', status: 'closed', type: 'default', confirm: true, danger: true })
+      } else if (s === 'resolved') {
+        btns.push({ text: '重开处理', status: 'processing', type: 'default' })
+        btns.push({ text: '关闭反馈', status: 'closed', type: 'default', confirm: true, danger: true })
+      } else if (s === 'closed') {
+        btns.push({ text: '重新打开', status: 'pending', type: 'default' })
+      }
+    } else if (s === 'resolved') {
+      btns.push({ text: '确认关闭', status: 'closed', type: 'primary', confirm: true, danger: true })
+    } else if (s === 'closed') {
+      btns.push({ text: '重新打开', status: 'pending', type: 'default' })
+    }
+    return btns
+  }
+
+  const kpiItems: KpiItem[] = [
+    { label: '待处理', value: stats.pending, go: '优先处理 · 查看 →', accent: 'warning', icon: <ClockCircleOutlined />, onClick: () => setFilterStatus('pending') },
+    { label: '处理中', value: stats.processing, sub: '跟进中的反馈', accent: 'info', icon: <SyncOutlined spin={stats.processing > 0} />, onClick: () => setFilterStatus('processing') },
+    { label: '已解决', value: stats.resolved, sub: '闭环留痕', accent: 'success', icon: <CheckCircleOutlined />, onClick: () => setFilterStatus('resolved') },
+    { label: '已关闭', value: stats.closed, sub: '无需处理 / 超时关闭', accent: 'gray', icon: <CloseCircleOutlined />, onClick: () => setFilterStatus('closed') },
+    { label: '反馈总数', value: stats.total, sub: '问题 / 建议 / 咨询', accent: 'brand', icon: <MessageOutlined />, onClick: () => setFilterStatus(undefined) },
+  ]
+
+  const chipOptions: ChipOption[] = [
+    { label: '全部', value: 'all', count: stats.total },
+    { label: '待处理', value: 'pending', count: stats.pending, hot: true },
+    { label: '处理中', value: 'processing', count: stats.processing },
+    { label: '已解决', value: 'resolved', count: stats.resolved },
+    { label: '已关闭', value: 'closed', count: stats.closed },
+  ]
+
+  const renderTitle = (record: any) => (
+    <span>
+      <span
+        className="sc-mat-name"
+        style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+        onClick={() => openDetail(record)}
+      >
+        <span className="sc-mono" style={{ color: '#94a3b8', fontFamily: 'Consolas, Menlo, monospace', fontSize: 'calc(11px * var(--font-size-scale))' }}>#{record.id}</span>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{record.title}</span>
+      </span>
+      <div className="sys-op-sub" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+        <PaperClipOutlined style={{ fontSize: 11 }} /> {record.page_path || '—'}
+      </div>
+    </span>
+  )
 
   const columns: any[] = [
+    { title: '标题', key: 'title', width: 320, render: (_: any, r: any) => renderTitle(r) },
     {
-      title: '标题', dataIndex: 'title', key: 'title', ellipsis: true, width: 240, sorter: true,
+      title: '类型', dataIndex: 'type', key: 'type', width: 90,
+      render: (v: string) => <span className={`sc-tag ${typeMeta[v]?.cls || 'sc-tag-plain'}`}>{typeMeta[v]?.label || v}</span>,
     },
     {
-      title: '类型', dataIndex: 'type', key: 'type', width: 80, sorter: true,
-      filters: Object.entries(typeMap).map(([k, v]) => ({ text: v.label, value: k })),
-      render: (v: string) => <Tag color={typeMap[v]?.color}>{typeMap[v]?.label || v}</Tag>,
+      title: '严重度', dataIndex: 'severity', key: 'severity', width: 90,
+      render: (v: string) => <span className={`sc-tag ${severityMeta[v]?.cls || 'sc-tag-plain'}`}>{severityMeta[v]?.label || v}</span>,
     },
     {
-      title: '严重程度', dataIndex: 'severity', key: 'severity', width: 90, sorter: true,
-      filters: Object.entries(severityMap).map(([k, v]) => ({ text: v.label, value: k })),
-      render: (v: string) => <Tag color={severityMap[v]?.color}>{severityMap[v]?.label || v}</Tag>,
+      title: '状态', dataIndex: 'status', key: 'status', width: 105,
+      render: (v: string) => <span className={`sc-tag ${statusMeta[v]?.cls || 'sc-tag-plain'}`}><span className="dot" />{statusMeta[v]?.label || v}</span>,
+    },
+    { title: '提交人', dataIndex: 'submitter_name', key: 'submitter_name', width: 140, render: (v: string) => <Operator name={v} /> },
+    {
+      title: '提交时间', dataIndex: 'created_at', key: 'created_at', width: 170,
+      render: (v: string) => (
+        <span className="sys-tm">
+          <div className="sc-mono">{v ? dayjs(v).format('YYYY-MM-DD HH:mm') : '—'}</div>
+          <div className="ago">{timeAgo(v)}</div>
+        </span>
+      ),
     },
     {
-      title: '状态', dataIndex: 'status', key: 'status', width: 90, sorter: true,
-      filters: Object.entries(statusMap).map(([k, v]) => ({ text: v.label, value: k })),
-      render: (v: string) => <Tag color={statusMap[v]?.color}>{statusMap[v]?.label || v}</Tag>,
+      title: '回复人', key: 'replied_by', width: 130,
+      render: (_: any, r: any) => (r.replied_by ? <Operator name={r.replied_by} /> : <span className="sc-note">—</span>),
     },
     {
-      title: '所在页面', dataIndex: 'page_path', key: 'page_path', width: 160, ellipsis: true, sorter: true,
-    },
-    {
-      title: '提交人', dataIndex: 'submitter_name', key: 'submitter_name', width: 100, sorter: true,
-    },
-    {
-      title: '提交时间', dataIndex: 'created_at', key: 'created_at', width: 160, sorter: true,
-      render: (v: string) => v ? new Date(v).toLocaleString('zh-CN') : '-',
-    },
-    {
-      title: '回复人', dataIndex: 'replied_by', key: 'replied_by', width: 100, sorter: true,
-    },
-    {
-      title: '操作', key: 'actions', width: 160, fixed: 'right',
-      render: (_: any, record: any) => (
-        <Space size="small">
-          <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => openDetail(record)}>查看</Button>
-          {canDelete && (
-            <Popconfirm title="确定删除？" onConfirm={() => handleDelete(record.id)}>
-              <Button type="link" size="small" danger icon={<DeleteOutlined />}>删除</Button>
-            </Popconfirm>
-          )}
-        </Space>
+      title: '操作', key: 'action', width: 110, fixed: 'right' as const,
+      render: (_: any, r: any) => (
+        <span className="sc-row-act">
+          <a onClick={() => openDetail(r)}>查看</a>
+          {canDelete && <a style={{ color: '#dc2626' }} onClick={() => setDeleteTarget(r)}>删除</a>}
+        </span>
       ),
     },
   ]
 
   return (
-    <div>
-      {/* 统计卡 */}
-      <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={6}><Card><div style={{ color: '#64748b' }}>总数</div><div style={{ fontSize: 24, fontWeight: 600 }}>{stats.total}</div></Card></Col>
-        <Col span={6}><Card><div style={{ color: '#fa8c16' }}>待处理</div><div style={{ fontSize: 24, fontWeight: 600 }}>{stats.pending}</div></Card></Col>
-        <Col span={6}><Card><div style={{ color: '#1677ff' }}>处理中</div><div style={{ fontSize: 24, fontWeight: 600 }}>{stats.processing}</div></Card></Col>
-        <Col span={6}><Card><div style={{ color: '#52c41a' }}>已解决</div><div style={{ fontSize: 24, fontWeight: 600 }}>{stats.resolved}</div></Card></Col>
-      </Row>
+    <div className="sc-page">
+      <KpiBand items={kpiItems} />
 
-      {/* 搜索 */}
-      <div className="card-modern" style={{ padding: '16px 20px', marginBottom: 16 }}>
-        <Row gutter={12} align="middle">
-          <Col flex="auto">
-            <Input
-              prefix={<SearchOutlined />}
-              placeholder="搜索标题/所在页面/提交人/回复人"
-              allowClear
-              size="middle"
-              value={keyword}
-              onChange={e => setKeyword(e.target.value)}
-            />
-          </Col>
-          <Col>
-            <Select
-              allowClear
-              placeholder="类型"
-              style={{ width: 120 }}
-              value={filterType}
-              onChange={v => setFilterType(v)}
-              options={Object.entries(typeMap).map(([k, v]) => ({ label: v.label, value: k }))}
-            />
-          </Col>
-          <Col>
-            <Select
-              allowClear
-              placeholder="严重程度"
-              style={{ width: 120 }}
-              value={filterSeverity}
-              onChange={v => setFilterSeverity(v)}
-              options={Object.entries(severityMap).map(([k, v]) => ({ label: v.label, value: k }))}
-            />
-          </Col>
-          <Col>
-            <Select
-              allowClear
-              placeholder="状态"
-              style={{ width: 120 }}
-              value={filterStatus}
-              onChange={v => setFilterStatus(v)}
-              options={Object.entries(statusMap).map(([k, v]) => ({ label: v.label, value: k }))}
-            />
-          </Col>
-          <Col><Button icon={<ReloadOutlined />} onClick={() => fetchData()}>刷新</Button></Col>
-        </Row>
+      <div className="sc-toolbar">
+        <span className="sc-search">
+          <Input
+            allowClear
+            prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
+            placeholder="标题 / 所在页面 / 提交人 / 回复人"
+            style={{ width: 280 }}
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+          />
+        </span>
+        <Select
+          allowClear
+          placeholder="全部类型"
+          style={{ width: 120 }}
+          value={filterType}
+          onChange={setFilterType}
+          options={Object.entries(typeMeta).map(([k, v]) => ({ label: v.label, value: k }))}
+        />
+        <Select
+          allowClear
+          placeholder="全部严重度"
+          style={{ width: 130 }}
+          value={filterSeverity}
+          onChange={setFilterSeverity}
+          options={Object.entries(severityMeta).map(([k, v]) => ({ label: v.label, value: k }))}
+        />
+        <ChipsFilter
+          options={chipOptions}
+          value={filterStatus ?? 'all'}
+          onChange={(v) => setFilterStatus(v === 'all' ? undefined : String(v))}
+        />
+        <span style={{ marginLeft: 'auto' }}>
+          <Button icon={<ReloadOutlined />} onClick={() => fetchData()}>刷新</Button>
+        </span>
       </div>
 
-      <div className="card-modern">
+      <div className="sc-card" style={{ padding: '0 0 4px' }}>
         <Table
           columns={columns}
           dataSource={data}
           rowKey="id"
           loading={loading}
           size="small"
-          scroll={{ x: 1280 }}
+          scroll={{ x: 1250 }}
           onChange={(_pag: any, tableFilters: any, sorter: any) => {
             const sortField = sorter.field
             const sortOrder = sorter.order === 'ascend' ? 'asc' : sorter.order === 'descend' ? 'desc' : undefined
@@ -284,135 +375,146 @@ export default function FeedbackManagement() {
       </div>
 
       {/* 详情抽屉 */}
-      <Drawer
-        title={<Space><MessageOutlined />反馈详情 #{detail?.id}</Space>}
-        open={detailOpen}
-        onClose={() => setDetailOpen(false)}
-        width={680}
+      <BdDrawer
+        open={!!detail}
+        onClose={() => setDetail(null)}
+        width={640}
+        title={detail?.title}
+        code={detail ? `#${detail.id} · ${detail.page_path || ''}` : ''}
+        tags={detail && (
+          <>
+            <span className={`sc-tag ${typeMeta[detail.type]?.cls || 'sc-tag-plain'}`}>{typeMeta[detail.type]?.label || detail.type}</span>
+            <span className={`sc-tag ${severityMeta[detail.severity]?.cls || 'sc-tag-plain'}`}>{severityMeta[detail.severity]?.label || detail.severity}严重度</span>
+            <span className={`sc-tag ${statusMeta[detail.status]?.cls || 'sc-tag-plain'}`}><span className="dot" />{statusMeta[detail.status]?.label || detail.status}</span>
+          </>
+        )}
       >
         {detail && (
           <>
-            <Descriptions column={2} size="small" bordered>
-              <Descriptions.Item label="类型"><Tag color={typeMap[detail.type]?.color}>{typeMap[detail.type]?.label}</Tag></Descriptions.Item>
-              <Descriptions.Item label="严重程度"><Tag color={severityMap[detail.severity]?.color}>{severityMap[detail.severity]?.label}</Tag></Descriptions.Item>
-              <Descriptions.Item label="状态"><Tag color={statusMap[detail.status]?.color}>{statusMap[detail.status]?.label}</Tag></Descriptions.Item>
-              <Descriptions.Item label="提交人">{detail.submitter_name}</Descriptions.Item>
-              <Descriptions.Item label="所在页面" span={2}>{detail.page_path || '-'}</Descriptions.Item>
-              <Descriptions.Item label="提交时间" span={2}>{detail.created_at ? new Date(detail.created_at).toLocaleString('zh-CN') : '-'}</Descriptions.Item>
-              <Descriptions.Item label="标题" span={2}>{detail.title}</Descriptions.Item>
-              <Descriptions.Item label="描述" span={2}>
-                <div style={{ whiteSpace: 'pre-wrap' }}>{detail.description}</div>
-              </Descriptions.Item>
-            </Descriptions>
-
-            {detail.attachments?.length > 0 && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontWeight: 600, marginBottom: 8 }}>附件</div>
-                <Image.PreviewGroup>
-                  <List
-                    size="small"
-                    bordered
-                    dataSource={detail.attachments}
-                    renderItem={(a: any) => (
-                      <List.Item
-                        actions={[
-                          <a key="dl" href={a.url} download={a.name} target="_blank" rel="noreferrer">下载</a>,
-                        ]}
-                      >
-                        <Space>
+            <div style={{ marginTop: 12 }}>
+              <DrawerSection title="反馈内容">
+                <div style={{ whiteSpace: 'pre-wrap', fontSize: 'calc(14px * var(--font-size-scale))', color: '#334155', lineHeight: 1.8 }}>
+                  {detail.description || '（无描述）'}
+                </div>
+                {detail.attachments?.length > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ fontSize: 'calc(12px * var(--font-size-scale))', color: '#94a3b8', fontWeight: 600, letterSpacing: '0.05em', marginBottom: 8 }}>
+                      附件（{detail.attachments.length}）
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                      {detail.attachments.map((a: any) => (
+                        <a key={a.id} href={a.url} target="_blank" rel="noreferrer" style={{ width: 92, textAlign: 'center' }}>
                           {a.mime?.startsWith('image/') ? (
-                            <Image
-                              src={a.url}
-                              alt={a.name}
-                              width={48}
-                              height={48}
-                              style={{ objectFit: 'cover', borderRadius: 4, cursor: 'zoom-in' }}
-                              preview={{ mask: '点击预览' }}
-                            />
+                            <Image src={a.url} alt={a.name} width={92} height={60} style={{ objectFit: 'cover', borderRadius: 8 }} preview={{ mask: '预览' }} />
                           ) : (
-                            <span style={{ width: 48, height: 48, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: '#f1f5f9', borderRadius: 4, color: '#94a3b8', fontSize: 12 }}>
+                            <span style={{ width: 92, height: 60, borderRadius: 8, background: 'linear-gradient(135deg,#94a3b8,#64748b)', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700 }}>
                               {(a.name || '').split('.').pop()?.toUpperCase() || 'FILE'}
                             </span>
                           )}
-                          <span>{a.name}</span>
-                          <span style={{ color: '#94a3b8', fontSize: 12 }}>{(a.size / 1024).toFixed(1)} KB</span>
-                        </Space>
-                      </List.Item>
-                    )}
-                  />
-                </Image.PreviewGroup>
-              </div>
-            )}
+                          <div style={{ fontSize: 'calc(10.5px * var(--font-size-scale))', color: '#94a3b8', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</div>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </DrawerSection>
+            </div>
 
-            {/* 状态流转 */}
-            {(() => {
-              const s = detail.status
-              const btns: React.ReactNode[] = []
-              if (canHandle) {
-                if (s === 'pending') btns.push(
-                  <Button key="p" onClick={() => changeStatus('processing')}>开始处理</Button>,
-                  <Button key="r" type="primary" onClick={() => changeStatus('resolved')}>标记已解决</Button>,
-                  <Button key="c" onClick={() => changeStatus('closed')}>关闭</Button>,
-                )
-                else if (s === 'processing') btns.push(
-                  <Button key="r" type="primary" onClick={() => changeStatus('resolved')}>标记已解决</Button>,
-                  <Button key="c" onClick={() => changeStatus('closed')}>关闭</Button>,
-                )
-                else if (s === 'resolved') btns.push(
-                  <Button key="o" onClick={() => changeStatus('processing')}>重开处理</Button>,
-                  <Button key="c" onClick={() => changeStatus('closed')}>关闭</Button>,
-                )
-                else if (s === 'closed') btns.push(
-                  <Button key="o" onClick={() => changeStatus('pending')}>重新打开</Button>,
-                )
-              } else {
-                if (s === 'resolved') btns.push(
-                  <Popconfirm key="c" title="确认关闭这条反馈？" onConfirm={() => changeStatus('closed')}>
-                    <Button type="primary">确认关闭</Button>
-                  </Popconfirm>,
-                )
-                if (s === 'closed') btns.push(
-                  <Button key="o" onClick={() => changeStatus('pending')}>重新打开</Button>,
-                )
-              }
-              return btns.length ? (
-                <div style={{ marginTop: 16, padding: 12, background: '#fafafa', borderRadius: 8 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>状态流转</div>
-                  <Space wrap>{btns}</Space>
-                </div>
-              ) : null
-            })()}
+            <DrawerSection title="状态流转">
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <span className={`sc-tag ${statusMeta[detail.status]?.cls || 'sc-tag-plain'}`}><span className="dot" />当前：{statusMeta[detail.status]?.label || detail.status}</span>
+                {statusButtons(detail.status).map(b => (
+                  <Button
+                    key={b.text}
+                    type={b.type}
+                    danger={b.danger}
+                    size="small"
+                    loading={statusUpdating}
+                    onClick={() => changeStatus(b.status, !!b.confirm)}
+                  >
+                    {b.text}
+                  </Button>
+                ))}
+              </div>
+            </DrawerSection>
 
             {detail.reply && (
-              <div style={{ marginTop: 16, padding: 12, background: '#f0f9ff', borderRadius: 8 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  管理员回复（{detail.replied_by} · {detail.replied_at ? new Date(detail.replied_at).toLocaleString('zh-CN') : ''}）
+              <DrawerSection title="处理回复">
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <Operator name={detail.replied_by} />
+                  <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 12px', flex: 1, minWidth: 0 }}>
+                    <div className="sys-op-sub">{detail.replied_at ? dayjs(detail.replied_at).format('YYYY-MM-DD HH:mm') : ''}</div>
+                    <div style={{ whiteSpace: 'pre-wrap', fontSize: 'calc(13.5px * var(--font-size-scale))', color: '#0f172a', marginTop: 4, lineHeight: 1.7 }}>{detail.reply}</div>
+                  </div>
                 </div>
-                <div style={{ whiteSpace: 'pre-wrap' }}>{detail.reply}</div>
-              </div>
+              </DrawerSection>
             )}
 
             {canHandle && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontWeight: 600, marginBottom: 8 }}>处理回复</div>
+              <DrawerSection title="回复提交人（可同步状态）">
                 <Form form={replyForm} layout="vertical">
-                  <Form.Item name="reply" label="回复内容（可选）" extra="留空则仅更新状态">
-                    <Input.TextArea rows={4} maxLength={2000} showCount placeholder="请填写处理结论或回复内容" />
+                  <Form.Item name="reply" label="回复内容" extra="留空则仅更新状态">
+                    <Input.TextArea rows={4} maxLength={2000} showCount placeholder="请填写处理结论或回复内容…" />
                   </Form.Item>
-                  <Form.Item name="status" label="同步设置状态（可选）">
+                  <Form.Item name="status" label="同步设置状态">
                     <Select
                       allowClear
                       placeholder="保持当前状态不变"
-                      options={Object.entries(statusMap).map(([k, v]) => ({ label: v.label, value: k }))}
+                      options={Object.entries(statusMeta).map(([k, v]) => ({ label: v.label, value: k }))}
                     />
                   </Form.Item>
-                  <Button type="primary" onClick={handleReply} loading={replying}>保存</Button>
+                  <Button type="primary" icon={<MessageOutlined />} onClick={handleReply} loading={replying}>回复并保存</Button>
                 </Form>
-              </div>
+              </DrawerSection>
             )}
           </>
         )}
-      </Drawer>
+      </BdDrawer>
+
+      {/* 状态流转确认 */}
+      <Modal
+        title="更新处理状态"
+        open={!!statusConfirm}
+        onCancel={() => setStatusConfirm(null)}
+        onOk={() => statusConfirm && doChangeStatus(statusConfirm.next)}
+        confirmLoading={statusUpdating}
+        okText="确认更新"
+        cancelText="取消"
+        width={480}
+        rootClassName="sc-page"
+      >
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12 }}>
+          <span className={`sc-tag ${STATUS_CLS(detail?.status)}`}>{STATUS_LBL(detail?.status)}</span>
+          <span style={{ color: '#94a3b8' }}>→</span>
+          <span className={`sc-tag ${STATUS_CLS(statusConfirm?.next)}`}>{STATUS_LBL(statusConfirm?.next)}</span>
+        </div>
+        <p style={{ fontSize: 'calc(13.5px * var(--font-size-scale))', color: '#475569', lineHeight: 1.8 }}>
+          确认将 <b>#{detail?.id}</b> 更新为「{STATUS_LBL(statusConfirm?.next)}」？
+          {statusConfirm?.next === 'closed'
+            ? <>关闭后提交人将看到已关闭状态；如未完全解决可先回复并保持「处理中」。</>
+            : '提交人可在详情中看到最新状态。'}
+        </p>
+      </Modal>
+
+      {/* 删除确认 */}
+      <Modal
+        title={<span style={{ color: '#dc2626' }}>删除反馈</span>}
+        open={!!deleteTarget}
+        onOk={handleDelete}
+        confirmLoading={deleting}
+        onCancel={() => setDeleteTarget(null)}
+        okText="删除反馈"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        width={480}
+        rootClassName="sc-page"
+      >
+        <p style={{ fontSize: 'calc(13.5px * var(--font-size-scale))', color: '#475569', lineHeight: 1.8 }}>
+          确认删除反馈 <b style={{ color: '#0f172a' }}>#{deleteTarget?.id} {deleteTarget?.title}</b>？
+          <br />
+          删除后提交人将无法再查看本条内容与回复记录（附件一并删除）。<b>已解决 / 处理中的反馈建议保留作复盘依据</b>。
+        </p>
+      </Modal>
     </div>
   )
 }

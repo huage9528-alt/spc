@@ -17,6 +17,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.core.security import PermissionChecker
 from app.core.storage import get_storage
+from app.core.storage.validation import UploadValidationError, validate_upload
 from app.models.basicdata.file_asset import FileAsset
 from app.schemas.common import ResponseModel
 from app.schemas.basicdata.file_asset import FileAssetOut, FileStatsOut
@@ -56,6 +57,12 @@ async def upload_file(
     mime = file.content_type or "application/octet-stream"
     if settings.STORAGE_ALLOWED_MIMES and mime not in settings.STORAGE_ALLOWED_MIMES:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型: {mime}")
+
+    # 扩展名白名单 + 魔数嗅探：防止伪造 Content-Type 上传 html/svg 等可执行内容（存储型 XSS）
+    try:
+        mime = validate_upload(content, file.filename or "", mime)
+    except UploadValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     storage = get_storage()
     stored = storage.save(content, file.filename or "unnamed", mime, namespace)
@@ -223,7 +230,11 @@ async def download_file(
 
     safe_name = asset.name or "download"
     encoded_name = quote(safe_name)
-    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"}
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox",
+    }
     return StreamingResponse(_iter(), media_type=asset.mime or "application/octet-stream", headers=headers)
 
 
@@ -258,5 +269,11 @@ async def preview_file(
     mime = asset.mime or "application/octet-stream"
     # 仅图片/PDF 走内联，其余强制下载
     inline = mime.startswith("image/") or mime == "application/pdf"
-    headers = {} if inline else {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(asset.name or 'download')}"}
+    # nosniff + CSP sandbox：即使存在历史遗留的可疑文件，也阻止浏览器按 HTML/SVG 同源执行
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox",
+    }
+    if not inline:
+        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(asset.name or 'download')}"
     return StreamingResponse(_iter(), media_type=mime, headers=headers)

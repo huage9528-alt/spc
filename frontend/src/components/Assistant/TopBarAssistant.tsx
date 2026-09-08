@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import { Button, Badge, Drawer } from 'antd'
-import { StarOutlined, RobotOutlined } from '@ant-design/icons'
+import { Drawer } from 'antd'
+import { SearchOutlined, RobotOutlined } from '@ant-design/icons'
 import ChatPanel from './ChatPanel'
 import { useAssistantChat } from './useAssistantChat'
 
@@ -14,28 +14,25 @@ const TopBarAssistant: React.FC = () => {
     }
   }, [open, skills.length, loadSkills])
 
+  // Ctrl/Cmd + K 快捷键唤起
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setOpen(o => !o)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   return (
     <>
-      <Button
-        type="default"
-        icon={<StarOutlined style={{ color: '#fbbf24' }} />}
-        style={{ 
-          backgroundColor: '#fff',
-          borderColor: '#93c5fd',
-          color: '#3b82f6',
-          borderRadius: 8,
-          fontWeight: 500,
-          fontSize: 14,
-          height: 32,
-          padding: '0 12px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6
-        }}
-        onClick={() => setOpen(true)}
-      >
-        AI 全局搜索
-      </Button>
+      <div className="tbv2-search" onClick={() => setOpen(true)} title="AI 全局搜索">
+        <SearchOutlined style={{ fontSize: 14 }} />
+        <span className="tbv2-search-text">搜索订单、物料、客户…</span>
+        <kbd>Ctrl K</kbd>
+      </div>
       <Drawer
         title={
           <span>

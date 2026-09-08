@@ -1,0 +1,5 @@
+# 部署脚本必须保持 LF 行尾：其中的远程 bash 脚本经 Invoke-RemoteScript 传输执行，
+# CRLF 会导致远程解析异常（运行时已做归一化兜底，此处从源头固定）
+scripts/deploy-config.ps1 text eol=lf
+scripts/deploy-remote.ps1 text eol=lf
+scripts/manage-version.ps1 text eol=lf

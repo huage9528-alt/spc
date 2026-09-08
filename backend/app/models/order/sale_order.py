@@ -1,6 +1,6 @@
 """订单交付中心 — 销售订单模型（对齐1.点检CSV 38列）"""
 
-from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, Text, UniqueConstraint, Index, ForeignKey
+from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, Text, UniqueConstraint, Index, ForeignKey, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
@@ -12,7 +12,7 @@ class SaleOrder(Base):
     """销售订单主表 — 对齐 1.点检 CSV 列"""
     __tablename__ = "sale_order"
     __table_args__ = (
-        UniqueConstraint("order_no", "line_no", name="uq_sale_order"),
+        Index("uq_sale_order_erp_id", "erp_id", unique=True, postgresql_where=text("erp_id IS NOT NULL")),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

@@ -1,0 +1,97 @@
+/* 物料二维码标签 — 弹窗预览样式;打印侧完整独立样式在 MaterialQRCodePrintModal 的 printCss() 中 */
+
+.qprint-preview {
+  max-height: 56vh;
+  overflow: auto;
+  background: #f1f5f9;
+  padding: 12px;
+  border-radius: 8px;
+}
+
+.qprint-sheet {
+  margin: 0 auto;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+/* ===== A4 网格: 210mm 宽, 3 列, 页边距 8mm(打印侧), 单元格约 63×33mm ===== */
+/* gap 2mm: 8×33 + 7×2 = 278mm ≤ 可用 281mm，保证 8 行/页 */
+.qprint-sheet--a4 {
+  width: 210mm;
+  padding: 8mm;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2mm;
+}
+
+/* ===== 小标签纸: 每张一页, 预览纵向排列 ===== */
+.qprint-sheet--w40h30,
+.qprint-sheet--w50h30 {
+  display: flex;
+  flex-direction: column;
+  gap: 4mm;
+  align-items: center;
+  padding: 4mm;
+}
+
+.qlabel {
+  display: flex;
+  align-items: center;
+  gap: 2mm;
+  border: 1px dashed #cbd5e1;
+  overflow: hidden;
+}
+
+.qprint-sheet--a4 .qlabel { height: 33mm; padding: 1.5mm; }
+.qprint-sheet--a4 .qlabel__qr { width: 24mm; height: 24mm; }
+
+.qprint-sheet--w40h30 .qlabel { width: 40mm; height: 30mm; padding: 1mm; }
+.qprint-sheet--w40h30 .qlabel__qr { width: 19mm; height: 19mm; }
+
+.qprint-sheet--w50h30 .qlabel { width: 50mm; height: 30mm; padding: 1mm; }
+.qprint-sheet--w50h30 .qlabel__qr { width: 22mm; height: 22mm; }
+
+.qlabel__qr { flex: none; display: flex; }
+.qlabel__qr svg { width: 100%; height: 100%; }
+
+.qlabel__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5mm;
+}
+
+.qlabel__code {
+  font-family: ui-monospace, 'Courier New', monospace;
+  font-weight: 700;
+  font-size: 8pt;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qlabel__name {
+  font-size: 7.5pt;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qlabel__spec {
+  font-size: 7pt;
+  color: #475569;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 小标签纸字号进一步压缩 */
+.qprint-sheet--w40h30 .qlabel__code,
+.qprint-sheet--w50h30 .qlabel__code { font-size: 6.5pt; }
+.qprint-sheet--w40h30 .qlabel__name,
+.qprint-sheet--w50h30 .qlabel__name { font-size: 6pt; }
+.qprint-sheet--w40h30 .qlabel__spec,
+.qprint-sheet--w50h30 .qlabel__spec { font-size: 5.5pt; }
+
+.qprint-iframe { display: none; }

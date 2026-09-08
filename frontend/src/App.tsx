@@ -16,7 +16,11 @@ import SupplierRisk from './pages/MaterialCenter/SupplierRisk/index'
 import SupplierPayment from './pages/MaterialCenter/SupplierPayment/index'
 import OrderDetail from './pages/OrderDelivery/OrderDetail/index'
 import StockCheck from './pages/MaterialCenter/StockCheck/index'
+import StockCheckWorkbench from './pages/MaterialCenter/StockCheck/Workbench'
+import QuickCount from './pages/MaterialCenter/StockCheck/QuickCount'
+import TaskStockCoverage from './pages/MaterialCenter/TaskStockCoverage'
 import SubcontractOrders from './pages/MaterialCenter/SubcontractOrders/index'
+import ScrapInventory from './pages/MaterialCenter/ScrapInventory'
 import IssueLedger from './pages/ExceptionCenter/IssueLedger/index'
 import ExceptionPool from './pages/ExceptionCenter/ExceptionPool/index'
 import IssueLogView from './pages/ExceptionCenter/IssueLogView/index'
@@ -50,6 +54,7 @@ import WritebackConfig from './pages/BasicDataCenter/WritebackConfig'
 import WritebackMonitor from './pages/WritebackMonitor/index'
 import Customers from './pages/BasicDataCenter/Customers'
 import Suppliers from './pages/BasicDataCenter/Suppliers'
+import SupplierMaterialMap from './pages/BasicDataCenter/SupplierMaterialMap'
 import Materials from './pages/BasicDataCenter/Materials'
 import SKUs from './pages/BasicDataCenter/SKUs'
 import Products from './pages/BasicDataCenter/Products'
@@ -82,6 +87,7 @@ import NPICenter from './pages/NPICenter/index'
 import Login from './pages/Login'
 import Profile from './pages/Profile'
 import ShareAccess from './pages/ShareAccess'
+import DeployVersions from './pages/SystemCenter/DeployVersions'
 import PriceChangeList from './pages/Purchase/PriceChange/list'
 import PriceChangeNew from './pages/Purchase/PriceChange/new'
 import PriceChangeDetail from './pages/Purchase/PriceChange/detail'
@@ -189,7 +195,11 @@ export default function App() {
                             <Route path="material-issues" element={<MaterialIssues/>}/>
                             <Route path="long-lead-materials" element={<LongLeadMaterials/>}/>
                             <Route path="stock-check" element={<StockCheck />} />
+                            <Route path="stock-check/:checkId" element={<StockCheckWorkbench />} />
+                            <Route path="quick-stock-check" element={<QuickCount />} />
+                            <Route path="task-stock-check" element={<TaskStockCoverage />} />
                             <Route path="subcontract-orders" element={<SubcontractOrders/>}/>
+                            <Route path="scrap-inventory" element={<ScrapInventory/>}/>
                             <Route path="kit-analysis" element={<KitAnalysis/>}/>
                             <Route path="supplier-risk" element={<SupplierRisk/>}/>
                             <Route path="supplier-payment" element={<SupplierPayment/>}/>
@@ -244,6 +254,7 @@ export default function App() {
                             <Route path="masterdata" element={<Navigate to="/basicdata/customers" replace/>}/>
                             <Route path="basicdata/customers" element={<Customers/>} key="customers"/>
                             <Route path="basicdata/suppliers" element={<Suppliers/>} key="suppliers"/>
+                            <Route path="basicdata/supplier-material-map" element={<SupplierMaterialMap/>} key="supplier-material-map"/>
                             <Route path="basicdata/materials" element={<Materials/>} key="materials"/>
                             <Route path="basicdata/skus" element={<SKUs/>} key="skus"/>
                             <Route path="basicdata/products" element={<Products/>} key="products"/>
@@ -258,6 +269,9 @@ export default function App() {
                             <Route path="basicdata/files" element={<FileManagement/>} key="files"/>
                             <Route path="basicdata/data-supply" element={<DataSupply/>} key="data-supply"/>
                             <Route path="announcements" element={<AnnouncementManagement/>} key="announcements"/>
+                            {/* 兼容旧权限 route_path：/sys/deploy-versions → /deploy-versions */}
+                            <Route path="sys/deploy-versions" element={<Navigate to="/deploy-versions" replace/>}/>
+                            <Route path="deploy-versions" element={<DeployVersions/>} key="deploy-versions"/>
                             <Route path="purchase/price-change" element={<PriceChangeList/>}/>
                             <Route path="purchase/price-change/new" element={<PriceChangeNew/>}/>
                             <Route path="purchase/price-change/pending" element={<PriceChangePending/>}/>

@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, AsyncSessionLocal
 from app.core.security import PermissionChecker
-from app.core.config import get_settings
+from app.core.config import get_settings, get_server_identity
 from app.schemas.common import ResponseModel
 from app.services.basicdata.erp_sync_service import ERPSyncService
 from app.models.basicdata.sync_sql_config import SyncSqlConfig
@@ -270,6 +270,7 @@ async def trigger_sync(
         sync_type=sync_type,
         trigger_mode="manual",
         triggered_by=current_user.get("username", ""),
+        server_id=get_server_identity(),
         status="pending",
         sync_params={"hours": hours, "order_numbers": order_numbers},
     )
@@ -304,6 +305,7 @@ async def get_sync_task(
         "sync_type": log.sync_type,
         "trigger_mode": log.trigger_mode,
         "triggered_by": log.triggered_by,
+        "server_id": log.server_id,
         "status": log.status,
         "started_at": str(log.started_at) if log.started_at else None,
         "finished_at": str(log.finished_at) if log.finished_at else None,
@@ -341,6 +343,7 @@ async def list_sync_tasks(
             "sync_type": l.sync_type,
             "trigger_mode": l.trigger_mode,
             "triggered_by": l.triggered_by,
+            "server_id": l.server_id,
             "status": l.status,
             "started_at": str(l.started_at) if l.started_at else None,
             "finished_at": str(l.finished_at) if l.finished_at else None,

@@ -1,0 +1,28 @@
+[Unit]
+Description=SPC-v2 Deploy Agent
+Documentation=https://example.com/spc-v2/deploy-agent
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=deploy-agent
+Group=deploy-agent
+WorkingDirectory=/opt/spc-v2/source
+EnvironmentFile=-/etc/default/deploy-agent
+ExecStart=/usr/bin/python3 -m deploy_agent
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+# 安全：禁用一切 root 路径；只放行本机 loopback + 临时 sock
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/spc-v2 /var/log/spc-v2
+# 不需要 docker CLI 外的网络；如需拉镜像，可放宽
+# AF_UNIX 是 docker socket 必须
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

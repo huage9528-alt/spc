@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Modal, Input, Table, Button, Space, message, Pagination, Spin, Tabs, Empty, Popconfirm, Tag, Tooltip } from 'antd'
 import { SearchOutlined, ClearOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons'
 import { materialApi } from '@/services/api'
 import { useStockCheckPoolStore, PoolMaterial, poolKey } from '@/store/stockCheckPool'
+import RecentDaysPicker from './RecentDaysPicker'
 
 interface MaterialCandidate {
   erp_material_id: number
@@ -22,8 +23,10 @@ interface MaterialCandidate {
 interface Props {
   open: boolean
   onCancel: () => void
-  onConfirm: (selected: MaterialCandidate[], source: 'search' | 'pool') => void
+  onConfirm: (selected: MaterialCandidate[], source: 'search' | 'pool', recentDays: number | null) => void
   confirmLoading?: boolean
+  /** true=显示「近期已盘」免盘范围面板(手动建单);不传=不显示(向已有单追加明细) */
+  showRecentDays?: boolean
 }
 
 type TabKey = 'search' | 'pool'
@@ -32,7 +35,7 @@ function rowKey(row: Pick<MaterialCandidate, 'erp_material_id' | 'wh_id'>): stri
   return poolKey(row)
 }
 
-export default function MaterialPickerModal({ open, onCancel, onConfirm, confirmLoading }: Props) {
+export default function MaterialPickerModal({ open, onCancel, onConfirm, confirmLoading, showRecentDays }: Props) {
   const [keyword, setKeyword] = useState('')
   const [whFilter, setWhFilter] = useState('')
   const [page, setPage] = useState(1)
@@ -42,6 +45,8 @@ export default function MaterialPickerModal({ open, onCancel, onConfirm, confirm
   const [loading, setLoading] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [selectedMap, setSelectedMap] = useState<Record<string, MaterialCandidate>>({})
+  // null=未选择(不标记);99999=不限(全部历史);>=0=天数。手动建单默认不限。
+  const [recentDays, setRecentDays] = useState<number | null>(showRecentDays ? 99999 : null)
 
   const [activeTab, setActiveTab] = useState<TabKey>('search')
   const [poolSelectedIds, setPoolSelectedIds] = useState<string[]>([])
@@ -52,6 +57,36 @@ export default function MaterialPickerModal({ open, onCancel, onConfirm, confirm
   const poolRemove = useStockCheckPoolStore((s) => s.remove)
   const poolClear = useStockCheckPoolStore((s) => s.clear)
   const poolHas = useStockCheckPoolStore((s) => s.has)
+
+  // ===== 表格高度自适应: 弹窗整体不超出视口,最外层不出滚动条 =====
+  const rdpRef = useRef<HTMLDivElement>(null)
+  const [tableY, setTableY] = useState<{ search: number; pool: number }>({ search: 360, pool: 360 })
+
+  useEffect(() => {
+    if (!open) return
+    const calc = () => {
+      const modalEl = document.querySelector('.material-picker-modal') as HTMLElement | null
+      if (!modalEl) return
+      const h = (sel: string, fb: number) => {
+        const el = modalEl.querySelector(sel) as HTMLElement | null
+        return el ? el.offsetHeight : fb
+      }
+      // 弹窗固定开销: 顶部偏移(默认 top:100)+标题+底部按钮+body内边距+Tabs导航+表头+底部余量
+      const chrome = modalEl.getBoundingClientRect().top
+        + h('.ant-modal-header', 57) + h('.ant-modal-footer', 60) + 40
+        + h('.ant-tabs-nav', 46) + h('.ant-table-thead', 39) + 24
+      const rdpH = (rdpRef.current?.offsetHeight ?? 0) + (rdpRef.current ? 12 : 0)
+      const avail = window.innerHeight - chrome - rdpH
+      setTableY({
+        search: Math.max(160, avail - 88), // 搜索行 44 + 分页行 44
+        pool: Math.max(160, avail - 44),   // 筛选行 44
+      })
+    }
+    // 等弹窗内容渲染完成后再测量
+    const t = setTimeout(calc, 0)
+    window.addEventListener('resize', calc)
+    return () => { clearTimeout(t); window.removeEventListener('resize', calc) }
+  }, [open, activeTab, poolItems.length])
 
   useEffect(() => {
     if (!open || activeTab !== 'search') return
@@ -99,6 +134,7 @@ export default function MaterialPickerModal({ open, onCancel, onConfirm, confirm
       setActiveTab('search')
       setPoolSelectedIds([])
       setPoolKeyword('')
+      setRecentDays(showRecentDays ? 99999 : null)
     }
   }, [open])
 
@@ -156,7 +192,7 @@ export default function MaterialPickerModal({ open, onCancel, onConfirm, confirm
       message.warning('请至少选择一个物料')
       return
     }
-    onConfirm(Object.values(selectedMap), 'search')
+    onConfirm(Object.values(selectedMap), 'search', recentDays)
   }
 
   const handleAddToPool = (rows: MaterialCandidate[]) => {
@@ -210,7 +246,7 @@ export default function MaterialPickerModal({ open, onCancel, onConfirm, confirm
         wh_name: row?.wh_name ?? null,
       }
     }).filter((s) => s.erp_material_id > 0)
-    onConfirm(selected, 'pool')
+    onConfirm(selected, 'pool', recentDays)
   }
 
   const renderWhName = (row: { wh_name?: string | null }) => {
@@ -392,10 +428,11 @@ export default function MaterialPickerModal({ open, onCancel, onConfirm, confirm
         <Table
           rowKey={rowKey}
           size="small"
+          className="picker-modal-table"
           dataSource={items}
           columns={searchColumns as any}
           pagination={false}
-          scroll={{ y: 360, x: 1100 }}
+          scroll={{ y: tableY.search, x: 1100 }}
         />
       </Spin>
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
@@ -428,10 +465,11 @@ export default function MaterialPickerModal({ open, onCancel, onConfirm, confirm
         <Table
           rowKey={(row: PoolMaterial) => poolKey(row)}
           size="small"
+          className="picker-modal-table"
           dataSource={filteredPoolItems}
           columns={poolColumns as any}
           pagination={false}
-          scroll={{ y: 360 }}
+          scroll={{ y: tableY.pool }}
           rowSelection={{
             selectedRowKeys: poolSelectedIds,
             onChange: (keys) => setPoolSelectedIds(keys as string[]),
@@ -497,12 +535,18 @@ export default function MaterialPickerModal({ open, onCancel, onConfirm, confirm
   return (
     <Modal
       title="选择盘点物料"
+      className="material-picker-modal"
       open={open}
       onCancel={onCancel}
       width={1100}
       destroyOnClose
       footer={activeTab === 'search' ? searchFooter : poolFooter}
     >
+      {showRecentDays && (
+        <div ref={rdpRef}>
+          <RecentDaysPicker value={recentDays} onChange={setRecentDays} />
+        </div>
+      )}
       <Tabs
         activeKey={activeTab}
         onChange={(key) => setActiveTab(key as TabKey)}

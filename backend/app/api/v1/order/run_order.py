@@ -262,7 +262,7 @@ async def sync_from_order(
 ):
     """从订单创建跑单记录"""
     # 检查订单是否存在
-    sale_order_result = await db.execute(select(SaleOrder).where(SaleOrder.order_no == order_no))
+    sale_order_result = await db.execute(select(SaleOrder).where(SaleOrder.order_no == order_no).order_by(SaleOrder.id.desc()).limit(1))
     sale_order = sale_order_result.scalar_one_or_none()
     if not sale_order:
         raise HTTPException(status_code=404, detail="订单不存在")

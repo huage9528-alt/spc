@@ -766,15 +766,22 @@ async def ai_auto_match(
 async def test_sync_sql(
     config_id: int,
     current_user: dict = Depends(PermissionChecker("settings", "read")),
-    db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(SyncSqlConfig).where(SyncSqlConfig.id == config_id))
-    config = result.scalar_one_or_none()
-    if not config:
-        raise HTTPException(status_code=404, detail="配置不存在")
+    # 只在读配置时短暂占用 PG 会话；ERP 测试（最长 30s）期间不持有任何
+    # PG 连接/事务，避免并发测试时连接池被白白占满
+    from app.core.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(SyncSqlConfig.sql_text).where(SyncSqlConfig.id == config_id)
+        )
+        row = result.first()
+        if not row:
+            raise HTTPException(status_code=404, detail="配置不存在")
+        sql_text = row[0]
+        await db.commit()
 
     try:
-        data = await asyncio.to_thread(_run_erp_test, config.sql_text)
+        data = await asyncio.to_thread(_run_erp_test, sql_text)
         return ResponseModel(data=data)
     except HTTPException:
         raise

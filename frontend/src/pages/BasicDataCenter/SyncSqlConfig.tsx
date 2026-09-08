@@ -1,17 +1,18 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   Table, Button, Modal, Form, Input, Select, Space, message,
-  Popconfirm, Tag, Alert, Divider, Tooltip, Empty, Switch, Row, Col,
-  AutoComplete,
+  Popconfirm, Tag, Alert, Tooltip, Empty, Switch, AutoComplete,
 } from 'antd'
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, PlayCircleOutlined,
   SwapOutlined, ThunderboltOutlined, SearchOutlined, MinusCircleOutlined,
-  ReloadOutlined,
+  ReloadOutlined, RobotOutlined, LoadingOutlined, CheckCircleOutlined,
+  CloseCircleOutlined, ExclamationCircleOutlined,
 } from '@ant-design/icons'
 import api from '../../services/api'
 import PermButton from '../../components/PermButton'
 import { useAuthStore } from '../../store/auth'
+import ChipsFilter, { type ChipOption } from './components/ChipsFilter'
 
 const { TextArea } = Input
 
@@ -118,6 +119,7 @@ export default function SyncSqlConfig() {
   const [form] = Form.useForm()
   const [sortInfo, setSortInfo] = useState<{ sort_by?: string; sort_order?: string }>({})
   const [tableFilters, setTableFilters] = useState<Record<string, string>>({})
+  const [statusChip, setStatusChip] = useState<string | number>('all')
 
   // ---------- 字段映射状态 ----------
   const [spcFields, setSpcFields] = useState<SpcField[]>([])
@@ -505,69 +507,121 @@ export default function SyncSqlConfig() {
   }
 
   /* ================================================================ */
+  /* Client-side chip filter + stats                                   */
+  /* ================================================================ */
+
+  const stats = {
+    total: data.length,
+    success: data.filter(r => r.last_sync_status === 'success').length,
+    failed: data.filter(r => r.last_sync_status === 'failed').length,
+    running: data.filter(r => r.last_sync_status === 'running').length,
+    never: data.filter(r => !r.last_sync_status).length,
+    disabled: data.filter(r => !r.sync_enabled).length,
+  }
+
+  const chipOptions: ChipOption[] = [
+    { label: '全部', value: 'all', count: stats.total },
+    { label: '成功', value: 'success', count: stats.success },
+    { label: '失败', value: 'failed', count: stats.failed, hot: stats.failed > 0 },
+    { label: '运行中', value: 'running', count: stats.running },
+    { label: '未运行', value: 'never', count: stats.never },
+    { label: '停用', value: 'disabled', count: stats.disabled },
+  ]
+
+  const viewData = data.filter(r => {
+    if (statusChip === 'all') return true
+    if (statusChip === 'success') return r.last_sync_status === 'success'
+    if (statusChip === 'failed') return r.last_sync_status === 'failed'
+    if (statusChip === 'running') return r.last_sync_status === 'running'
+    if (statusChip === 'never') return !r.last_sync_status
+    if (statusChip === 'disabled') return !r.sync_enabled
+    return true
+  })
+
+  /* ================================================================ */
   /* Table columns                                                     */
   /* ================================================================ */
 
+  const STRATEGY_CLS: Record<string, string> = {
+    incremental: 'sc-tag-kit',
+    full: 'sc-tag-warn',
+    hybrid: 'sc-tag-cyan',
+  }
+  const STRATEGY_LBL: Record<string, string> = {
+    incremental: '增量',
+    full: '全量',
+    hybrid: '混合',
+  }
+
   const columns = [
     {
-      title: '同步类型', dataIndex: 'sync_type', key: 'sync_type', width: 120, sorter: true,
+      title: '同步类型', dataIndex: 'sync_type', key: 'sync_type', width: 180, sorter: true,
       filters: Object.entries(syncTypeLabels).map(([k, v]) => ({ text: v, value: k })),
-      render: (v: string) => <Tag color="blue">{syncTypeLabels[v] || v}</Tag>,
+      filterSearch: true,
+      render: (v: string) => (
+        <span>
+          <span className="sc-tag sc-tag-prod">{v}</span>
+          <div className="sys-op-sub">{syncTypeLabels[v] || ''}</div>
+        </span>
+      ),
     },
-    { title: '说明', dataIndex: 'description', key: 'description', ellipsis: true, width: 150, sorter: true },
+    { title: '说明', dataIndex: 'description', key: 'description', ellipsis: true, width: 180, sorter: true },
     {
       title: '同步间隔', dataIndex: 'sync_interval', key: 'sync_interval', width: 80, sorter: true,
       render: (v: string) => {
         const option = SYNC_INTERVAL_OPTIONS.find(o => o.value === v)
-        return option ? <Tag color="purple">{option.label}</Tag> : <Tag>{v}</Tag>
+        return <span className="sc-tag sc-tag-purple">{option?.label || v}</span>
       },
     },
     {
-      title: '同步策略', dataIndex: 'sync_strategy', key: 'sync_strategy', width: 90, sorter: true,
+      title: '策略', dataIndex: 'sync_strategy', key: 'sync_strategy', width: 80, sorter: true,
       filters: SYNC_STRATEGY_OPTIONS.map(o => ({ text: o.label, value: o.value })),
-      render: (v: string) => {
-        const option = SYNC_STRATEGY_OPTIONS.find(o => o.value === v)
-        return option ? <Tag color="orange">{option.label}</Tag> : <Tag>{v}</Tag>
-      },
+      render: (v: string) => <span className={`sc-tag ${STRATEGY_CLS[v] || 'sc-tag-plain'}`}>{STRATEGY_LBL[v] || v}</span>,
     },
     {
-      title: '时间窗口', dataIndex: 'sync_time_window', key: 'sync_time_window', width: 100,
-      render: (v: string | null) => v ? <Tag color="cyan">{v}</Tag> : <Tag color="default">不限</Tag>,
+      title: '时间窗口', dataIndex: 'sync_time_window', key: 'sync_time_window', width: 120,
+      render: (v: string | null) => v
+        ? <span className="sc-tag sc-tag-cyan sc-mono">{v}</span>
+        : <span className="sc-tag sc-tag-wait">不限</span>,
     },
     {
-      title: '优先级', dataIndex: 'sync_priority', key: 'sync_priority', width: 60, sorter: true,
-      render: (v: number) => <Tag color={v <= 3 ? 'red' : v <= 6 ? 'orange' : 'default'}>{v}</Tag>,
+      title: '优先级', dataIndex: 'sync_priority', key: 'sync_priority', width: 70, sorter: true,
+      render: (v: number) => (
+        <span style={{ fontWeight: 600, color: v <= 3 ? '#dc2626' : v <= 6 ? '#d97706' : '#16a34a' }}>{v}</span>
+      ),
     },
     {
-      title: '同步状态', dataIndex: 'last_sync_status', key: 'last_sync_status', width: 90, sorter: true,
-      filters: [{ text: '成功', value: 'success' }, { text: '失败', value: 'failed' }, { text: '运行中', value: 'running' }, { text: '未运行', value: '' }],
+      title: '最近状态', dataIndex: 'last_sync_status', key: 'last_sync_status', width: 110, sorter: true,
       render: (v: string | null, record: SyncSqlItem) => {
-        if (!v) return <Tag color="default">未运行</Tag>
-        if (v === 'success') return <Tag color="green" icon={<PlayCircleOutlined />}>成功</Tag>
-        if (v === 'failed') return <Tag color="red" icon={<DeleteOutlined />}>失败</Tag>
-        if (v === 'running') return <Tag color="blue" icon={<ThunderboltOutlined />}>运行中</Tag>
-        return <Tag>{v}</Tag>
+        if (!v) return <span className="sc-tag sc-tag-wait">未运行</span>
+        if (v === 'success') return <span className="sc-tag sc-tag-done"><CheckCircleOutlined /> {record.last_sync_time ? new Date(record.last_sync_time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '成功'}</span>
+        if (v === 'failed') return <span className="sc-tag sc-tag-danger"><CloseCircleOutlined /> 失败</span>
+        if (v === 'running') return <span className="sc-tag sc-tag-kit"><LoadingOutlined spin /> 运行中</span>
+        return <span className="sc-tag sc-tag-plain">{v}</span>
       },
     },
     {
       title: '下次同步', dataIndex: 'next_sync_time', key: 'next_sync_time', width: 140, sorter: true,
-      render: (v: string | null) => v ? <span style={{ fontSize: 11 }}>{new Date(v).toLocaleString('zh-CN')}</span> : <span style={{ color: '#94a3b8', fontSize: 11 }}>-</span>,
+      render: (v: string | null) => v
+        ? <span className="sc-mono" style={{ color: '#475569', fontSize: 'calc(12.5px * var(--font-size-scale))' }}>{new Date(v).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+        : <span className="sc-note">—</span>,
     },
     {
       title: '启用', dataIndex: 'sync_enabled', key: 'sync_enabled', width: 60, sorter: true,
-      filters: [{ text: '是', value: 'true' }, { text: '否', value: 'false' }],
-      render: (v: boolean) => <Tag color={v ? 'green' : 'default'}>{v ? '是' : '否'}</Tag>,
+      render: (v: boolean) => v
+        ? <span className="sc-tag sc-tag-done">是</span>
+        : <span className="sc-tag sc-tag-wait">否</span>,
     },
     {
-      title: '操作', key: 'action', width: 180, fixed: 'right' as const,
+      title: '操作', key: 'action', width: 140, fixed: 'right' as const,
       render: (_: any, record: SyncSqlItem) => (
-        <Space size="small">
-          <Button size="small" icon={<PlayCircleOutlined />} loading={testingId === record.id} onClick={() => handleTest(record.id)}>测试</Button>
-          <PermButton permResource="settings" permAction="update" size="small" icon={<EditOutlined />} onClick={() => openEdit(record)}>编辑</PermButton>
-          <Popconfirm title="确认删除？" onConfirm={() => handleDelete(record.id)} disabled={!canDelete}>
-            <PermButton permResource="settings" permAction="delete" size="small" icon={<DeleteOutlined />} danger />
+        <span className="sc-row-act">
+          <Button type="text" size="small" icon={<PlayCircleOutlined />} loading={testingId === record.id} onClick={() => handleTest(record.id)}>测试</Button>
+          <PermButton permResource="settings" permAction="update" type="text" size="small" onClick={() => openEdit(record)}>编辑</PermButton>
+          <Popconfirm title="确认删除？删除后该类型将立即停止同步" onConfirm={() => handleDelete(record.id)} okText="确认" cancelText="取消" disabled={!canDelete}>
+            <PermButton permResource="settings" permAction="delete" type="text" size="small" danger icon={<DeleteOutlined />} />
           </Popconfirm>
-        </Space>
+        </span>
       ),
     },
   ]
@@ -583,21 +637,27 @@ export default function SyncSqlConfig() {
   /* ================================================================ */
 
   return (
-    <div>
-      <div className="card-modern" style={{ padding: '16px 20px', marginBottom: 16 }}>
-        <Row gutter={12} align="middle">
-          <Col flex="auto" />
-          <Col>
-            <Space>
-              <Button icon={<ReloadOutlined />} onClick={fetchData}>刷新</Button>
-              <PermButton permResource="settings" permAction="create" type="primary" icon={<PlusOutlined />} onClick={openAdd}>添加配置</PermButton>
-            </Space>
-          </Col>
-        </Row>
+    <div className="sc-page">
+      <div className="sys-strip">
+        <SwapOutlined style={{ color: '#5b5bd6' }} />
+        <span>每条配置 = 一段对 ERP 只读库执行的 SQL + 字段映射。同步仅覆盖 <b>data_source='erp'</b> 的行，手工 / Excel 数据永不覆盖；
+        增量策略用 <code>:since</code> 占位符，条件参数用 <code>:参数名</code></span>
+        <span className="vsep" />
+        <span>共 <b>{stats.total}</b> 条配置</span>
+        <span className="vsep" />
+        <span>成功 <b style={{ color: '#16a34a' }}>{stats.success}</b> · 失败 <b style={{ color: '#dc2626' }}>{stats.failed}</b></span>
       </div>
 
-      <div className="card-modern" style={{ padding: '0 0 4px' }}>
-        <Table columns={columns} dataSource={data} rowKey="id" loading={loading} size="small" scroll={{ x: 1400 }} onChange={handleTableChange} pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t: number) => `共 ${t} 条`, pageSizeOptions: ['20', '50', '100'] }} />
+      <div className="sc-toolbar">
+        <ChipsFilter options={chipOptions} value={statusChip} onChange={setStatusChip} />
+        <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+          <Button icon={<ReloadOutlined />} onClick={fetchData}>刷新</Button>
+          <PermButton permResource="settings" permAction="create" type="primary" icon={<PlusOutlined />} onClick={openAdd}>添加配置</PermButton>
+        </span>
+      </div>
+
+      <div className="sc-card" style={{ padding: '0 0 4px' }}>
+        <Table columns={columns as any} dataSource={viewData} rowKey="id" loading={loading} size="small" scroll={{ x: 1300 }} onChange={handleTableChange} pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t: number) => `共 ${t} 条`, pageSizeOptions: ['20', '50', '100'] }} />
       </div>
 
       {/* 测试结果弹窗 */}
@@ -611,17 +671,15 @@ export default function SyncSqlConfig() {
           </Button>,
         ]}
         width={1100}
+        rootClassName="sc-page"
         styles={{ body: { maxHeight: 'calc(100vh - 200px)', overflowY: 'auto' } }}
       >
         {testResult && (
           <div>
-            <div style={{ marginBottom: 16 }}>
-              <Alert
-                type="success"
-                showIcon
-                message={`查询成功：共 ${testResult.total_rows} 条记录${testResult.elapsed_seconds != null ? `，耗时 ${testResult.elapsed_seconds}s` : ''}`}
-                description={`返回字段(${testResult.columns?.length || 0})：${testResult.columns?.join(', ')}`}
-              />
+            <div className="test-sum" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#166534', borderRadius: 8, padding: '9px 14px', fontSize: 'calc(13px * var(--font-size-scale))', marginBottom: 12 }}>
+              <CheckCircleOutlined />
+              <span>执行成功 · 共 <b>{testResult.total_rows}</b> 条{testResult.elapsed_seconds != null ? ` · 耗时 <b>${testResult.elapsed_seconds}s</b>` : ''}</span>
+              <span style={{ opacity: 0.8, fontSize: 'calc(12px * var(--font-size-scale))' }}>返回字段（{testResult.columns?.length || 0}）：{testResult.columns?.join(' / ')}</span>
             </div>
             <div style={{ marginBottom: 8 }}>
               <strong>数据预览（前 {testResult.preview?.length || 0} 条）：</strong>
@@ -656,11 +714,16 @@ export default function SyncSqlConfig() {
         open={modalOpen}
         onOk={handleSave}
         onCancel={() => setModalOpen(false)}
-        width={860}
+        width={880}
+        rootClassName="sc-page"
         styles={{ body: { maxHeight: 'calc(100vh - 200px)', overflowY: 'auto' } }}
       >
         <Form form={form} layout="vertical">
-          {/* ---- 基本信息 ---- */}
+          {/* ---- ① 基本信息 ---- */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <span style={{ width: 20, height: 20, borderRadius: '50%', background: '#5b5bd6', color: '#fff', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>1</span>
+            <span style={{ fontWeight: 600, fontSize: 'calc(14px * var(--font-size-scale))' }}>基本信息</span>
+          </div>
           <div style={{ display: 'flex', gap: 16 }}>
             <Form.Item name="sync_type" label="同步类型" rules={[{ required: true, message: '选择或输入同步类型' }]} style={{ flex: 1 }}>
               <AutoComplete
@@ -682,10 +745,11 @@ export default function SyncSqlConfig() {
             </Form.Item>
           </div>
 
-          {/* ---- 同步配置 ---- */}
-          <Divider style={{ margin: '8px 0 16px' }}>
-            <ThunderboltOutlined /> 同步配置
-          </Divider>
+          {/* ---- ② 同步配置 ---- */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0 12px' }}>
+            <span style={{ width: 20, height: 20, borderRadius: '50%', background: '#5b5bd6', color: '#fff', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>2</span>
+            <span style={{ fontWeight: 600, fontSize: 'calc(14px * var(--font-size-scale))' }}>同步计划</span>
+          </div>
           <div style={{ display: 'flex', gap: 16 }}>
             <Form.Item 
               name="sync_interval" 
@@ -738,21 +802,35 @@ export default function SyncSqlConfig() {
             </Form.Item>
           </div>
 
-          {/* ---- SQL 语句 ---- */}
+          {/* ---- ③ SQL 语句 ---- */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0 12px' }}>
+            <span style={{ width: 20, height: 20, borderRadius: '50%', background: '#5b5bd6', color: '#fff', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>3</span>
+            <span style={{ fontWeight: 600, fontSize: 'calc(14px * var(--font-size-scale))' }}>SQL 语句</span>
+            <span style={{ fontWeight: 400, fontSize: 'calc(12px * var(--font-size-scale))', color: '#94a3b8' }}>SELECT 列名即 ERP 字段名，将进入下方映射面板</span>
+          </div>
           <Form.Item
             name="sql_text"
-            label="SQL 语句"
+            label={<span style={{ fontWeight: 600 }}>SQL 语句</span>}
             rules={[{ required: true, message: '输入 SQL' }]}
-            extra="使用 :since 作为增量时间参数，SELECT 的列名将作为 ERP 字段名用于映射"
+            extra={<span style={{ fontSize: 'calc(12px * var(--font-size-scale))', color: '#94a3b8' }}>使用 <code style={{ background: '#f1f5f9', borderRadius: 3, padding: '0 4px' }}>:since</code> 作为增量时间参数，SELECT 的列名将作为 ERP 字段名用于映射</span>}
           >
             <TextArea
               rows={8}
-              placeholder="SELECT FBillNo AS order_no, ... FROM ... WHERE update_time >= :since"
-              style={{ fontFamily: 'monospace', fontSize: 12 }}
+              placeholder={'-- 增量同步示例\nSELECT custid AS erp_id, custname AS name\nFROM cux_customers\nWHERE modifydate >= :since'}
+              style={{
+                fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+                fontSize: 12.5,
+                background: '#0f172a',
+                color: '#cbd5e1',
+                borderColor: '#334155',
+                borderRadius: 10,
+                padding: '12px 16px',
+                lineHeight: 1.8,
+              }}
             />
           </Form.Item>
 
-          <Space style={{ marginTop: -12, marginBottom: 16 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: -16, marginBottom: 16 }}>
             <Button
               icon={<SearchOutlined />}
               loading={erpFieldsLoading}
@@ -767,12 +845,19 @@ export default function SyncSqlConfig() {
             >
               测试
             </Button>
-          </Space>
+            <span style={{ fontSize: 'calc(11.5px * var(--font-size-scale))', color: '#94a3b8', marginLeft: 'auto' }}>
+              测试不会写入数据
+            </span>
+          </div>
 
-          {/* ---- 字段映射面板 ---- */}
-          <Divider style={{ margin: '8px 0 16px' }}>
-            <SwapOutlined /> 字段映射
-          </Divider>
+          {/* ---- ④ 字段映射面板 ---- */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0 12px' }}>
+            <span style={{ width: 20, height: 20, borderRadius: '50%', background: '#5b5bd6', color: '#fff', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>4</span>
+            <span style={{ fontWeight: 600, fontSize: 'calc(14px * var(--font-size-scale))' }}>字段映射</span>
+            <span style={{ fontWeight: 400, fontSize: 'calc(12px * var(--font-size-scale))', color: '#94a3b8' }}>
+              {mappingRows.length > 0 ? `${mappingRows.length} 个 ERP 字段 · 已映射 ${mappingRows.filter(r => r.spc_field).length}` : ''}
+            </span>
+          </div>
 
           {mappingRows.length === 0 ? (
             <Empty
@@ -786,21 +871,21 @@ export default function SyncSqlConfig() {
                 <span style={{ fontSize: 12, color: '#64748b' }}>
                   共 {mappingRows.length} 个 ERP 字段，已映射 {mappingRows.filter(r => r.spc_field).length} 个
                 </span>
-                <Tooltip title="使用 AI 分析 SQL 语义，自动匹配 ERP 字段到 SPC 字段并生成备注">
+                <Tooltip title="使用 AI 分析 SQL 语义，自动匹配 ERP 字段到 SPC 字段并生成备注；AI 未配置时降级为本地简单名称匹配">
                   <Button
                     size="small"
-                    icon={<ThunderboltOutlined />}
+                    icon={<RobotOutlined />}
                     onClick={handleAutoMatch}
                     loading={aiMatching}
                   >
-                    {aiMatching ? 'AI 分析中...' : '自动匹配'}
+                    {aiMatching ? 'AI 分析中...' : 'AI 自动匹配'}
                   </Button>
                 </Tooltip>
               </div>
 
               <div
                 style={{
-                  border: '1px solid #f0f0f0',
+                  border: '1px solid #e2e8f0',
                   borderRadius: 8,
                   maxHeight: 320,
                   overflowY: 'auto',
@@ -809,13 +894,14 @@ export default function SyncSqlConfig() {
                 {/* 表头 */}
                 <div
                   style={{
-                    display: 'flex', alignItems: 'center', padding: '8px 12px',
-                    background: '#fafafa', fontWeight: 600, fontSize: 12,
-                    borderBottom: '1px solid #f0f0f0', position: 'sticky', top: 0, zIndex: 1,
+                    display: 'flex', alignItems: 'center', padding: '6px 12px',
+                    background: '#f8fafc', fontWeight: 600, fontSize: 'calc(11px * var(--font-size-scale))',
+                    color: '#64748b', borderBottom: '1px solid #e2e8f0', position: 'sticky', top: 0, zIndex: 1,
+                    letterSpacing: '0.04em',
                   }}
                 >
                   <span style={{ flex: 1 }}>ERP 字段</span>
-                  <span style={{ width: 40, textAlign: 'center' }}>→</span>
+                  <span style={{ width: 40, textAlign: 'center' }} />
                   <span style={{ flex: 1 }}>SPC 字段</span>
                   <span style={{ flex: 1 }}>备注</span>
                   <span style={{ width: 40 }} />
@@ -826,15 +912,16 @@ export default function SyncSqlConfig() {
                   <div
                     key={row.erp_field}
                     style={{
-                      display: 'flex', alignItems: 'center', padding: '6px 12px',
-                      borderBottom: idx < mappingRows.length - 1 ? '1px solid #f5f5f5' : undefined,
+                      display: 'flex', alignItems: 'center', padding: '5px 12px',
+                      borderBottom: idx < mappingRows.length - 1 ? '1px solid #f8fafc' : undefined,
                       background: row.spc_field ? '#f0fdf4' : undefined,
+                      fontSize: 'calc(12.5px * var(--font-size-scale))',
                     }}
                   >
-                    <code style={{ flex: 1, fontSize: 12, color: '#334155' }}>
+                    <code style={{ flex: 1, fontSize: 'calc(12px * var(--font-size-scale))', color: '#0f172a', fontFamily: 'Consolas, Menlo, monospace' }}>
                       {row.erp_field}
                     </code>
-                    <span style={{ width: 40, textAlign: 'center', color: '#94a3b8' }}>→</span>
+                    <span style={{ width: 40, textAlign: 'center', color: '#94a3b8', fontSize: 11 }}>→</span>
                     <div style={{ flex: 1 }}>
                       <Select
                         size="small"
@@ -890,137 +977,89 @@ export default function SyncSqlConfig() {
             <Input />
           </Form.Item>
 
-          {/* ---- 条件参数面板 ---- */}
-          <Divider style={{ margin: '16px 0' }}>
-            <SwapOutlined /> 条件参数配置
-          </Divider>
-          <Alert
-            message="条件参数说明"
-            description="在SQL中使用 :parameter_name 作为参数占位符，同步时可根据需要传入参数值"
-            type="info"
-            showIcon
-            style={{ marginBottom: 12 }}
-          />
+          {/* ---- ⑤ 条件参数面板 ---- */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0 12px' }}>
+            <span style={{ width: 20, height: 20, borderRadius: '50%', background: '#5b5bd6', color: '#fff', fontSize: 11, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>5</span>
+            <span style={{ fontWeight: 600, fontSize: 'calc(14px * var(--font-size-scale))' }}>条件参数</span>
+            <span style={{ fontWeight: 400, fontSize: 'calc(12px * var(--font-size-scale))', color: '#94a3b8' }}>SQL 中 :参数名 在执行前由手工触发表单注入</span>
+          </div>
           <div className="flex justify-between items-center" style={{ marginBottom: 8 }}>
-            <span style={{ fontSize: 12, color: '#64748b' }}>
+            <span style={{ fontSize: 'calc(12px * var(--font-size-scale))', color: '#64748b' }}>
               共 {conditionParams.length} 个条件参数
             </span>
-            <Button size="small" icon={<PlusOutlined />} onClick={addConditionParam}>
-              添加条件参数
-            </Button>
+            <Button size="small" icon={<PlusOutlined />} onClick={addConditionParam}>添加参数</Button>
           </div>
 
           {conditionParams.length === 0 ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="暂无条件参数，点击「添加条件参数」添加"
+              description="暂无条件参数，点击「添加参数」添加"
               style={{ margin: '8px 0 16px' }}
             />
           ) : (
-            <div
-              style={{
-                border: '1px solid #f0f0f0',
-                borderRadius: 8,
-                maxHeight: 400,
-                overflowY: 'auto',
-              }}
-            >
+            <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, maxHeight: 300, overflowY: 'auto' }}>
               {conditionParams.map((param, idx) => (
                 <div
                   key={idx}
                   style={{
-                    padding: 12,
-                    borderBottom: idx < conditionParams.length - 1 ? '1px solid #f5f5f5' : undefined,
-                    background: '#fafafa',
+                    display: 'grid',
+                    gridTemplateColumns: '1.2fr 0.8fr 1fr 0.6fr 1fr 30px',
+                    gap: 8,
+                    alignItems: 'center',
+                    padding: '8px 12px',
+                    borderBottom: idx < conditionParams.length - 1 ? '1px solid #f8fafc' : undefined,
+                    background: '#fff',
                   }}
                 >
-                  <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                    <Form.Item
-                      label="参数名"
-                      style={{ flex: 1, marginBottom: 0 }}
-                      required
-                    >
-                      <Input
-                        size="small"
-                        placeholder="如: customer_code"
-                        value={param.parameter_name}
-                        onChange={(e) => updateConditionParam(idx, 'parameter_name', e.target.value)}
-                      />
-                    </Form.Item>
-                    <Form.Item
-                      label="参数类型"
-                      style={{ width: 120, marginBottom: 0 }}
-                      required
-                    >
-                      <Select
-                        size="small"
-                        value={param.parameter_type}
-                        onChange={(val) => updateConditionParam(idx, 'parameter_type', val)}
-                        options={[
-                          { value: 'string', label: '字符串' },
-                          { value: 'number', label: '数字' },
-                          { value: 'date', label: '日期' },
-                          { value: 'list', label: '列表' },
-                          { value: 'boolean', label: '布尔' },
-                        ]}
-                      />
-                    </Form.Item>
+                  <Input
+                    size="small"
+                    placeholder=":参数名"
+                    value={param.parameter_name}
+                    onChange={(e) => updateConditionParam(idx, 'parameter_name', e.target.value)}
+                    style={{ fontFamily: 'Consolas, Menlo, monospace', fontSize: 'calc(12px * var(--font-size-scale))' }}
+                  />
+                  <Select
+                    size="small"
+                    value={param.parameter_type}
+                    onChange={(val) => updateConditionParam(idx, 'parameter_type', val)}
+                    style={{ width: '100%' }}
+                    options={[
+                      { value: 'string', label: 'string' },
+                      { value: 'number', label: 'number' },
+                      { value: 'date', label: 'date' },
+                      { value: 'list', label: 'list' },
+                      { value: 'boolean', label: 'boolean' },
+                    ]}
+                  />
+                  <Input
+                    size="small"
+                    placeholder="显示标签"
+                    value={param.label}
+                    onChange={(e) => updateConditionParam(idx, 'label', e.target.value)}
+                  />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Switch
+                      size="small"
+                      checked={param.required}
+                      onChange={(val) => updateConditionParam(idx, 'required', val)}
+                    />
+                    <span style={{ fontSize: 'calc(11px * var(--font-size-scale))', color: param.required ? '#d97706' : '#94a3b8' }}>必填</span>
                   </div>
-                  <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                    <Form.Item
-                      label="显示标签"
-                      style={{ flex: 1, marginBottom: 0 }}
-                      required
-                    >
-                      <Input
-                        size="small"
-                        placeholder="如: 客户代码"
-                        value={param.label}
-                        onChange={(e) => updateConditionParam(idx, 'label', e.target.value)}
-                      />
-                    </Form.Item>
-                    <Form.Item
-                      label="必填"
-                      style={{ width: 80, marginBottom: 0 }}
-                    >
-                      <Switch
-                        size="small"
-                        checked={param.required}
-                        onChange={(val) => updateConditionParam(idx, 'required', val)}
-                      />
-                    </Form.Item>
-                  </div>
-                  <div style={{ marginBottom: 8 }}>
-                    <Form.Item label="默认值" style={{ marginBottom: 0 }}>
-                      <Input
-                        size="small"
-                        placeholder="可选"
-                        value={param.default_value}
-                        onChange={(e) => updateConditionParam(idx, 'default_value', e.target.value)}
-                      />
-                    </Form.Item>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                    <Form.Item label="描述" style={{ flex: 1, marginBottom: 0 }}>
-                      <Input.TextArea
-                        size="small"
-                        rows={2}
-                        placeholder="参数说明"
-                        value={param.description}
-                        onChange={(e) => updateConditionParam(idx, 'description', e.target.value)}
-                      />
-                    </Form.Item>
+                  <Input
+                    size="small"
+                    placeholder="默认值"
+                    value={param.default_value}
+                    onChange={(e) => updateConditionParam(idx, 'default_value', e.target.value)}
+                  />
+                  <Tooltip title="移除此参数">
                     <Button
                       type="text"
                       size="small"
-                      danger
-                      icon={<DeleteOutlined />}
+                      icon={<MinusCircleOutlined />}
                       onClick={() => removeConditionParam(idx)}
-                      style={{ marginTop: 24 }}
-                    >
-                      删除
-                    </Button>
-                  </div>
+                      style={{ color: '#94a3b8' }}
+                    />
+                  </Tooltip>
                 </div>
               ))}
             </div>
