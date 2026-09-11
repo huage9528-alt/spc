@@ -42,6 +42,7 @@ from app.schemas.material.stock_check import (
     StockCheckWritebackOut,
     WritebackOverviewOut,
     TaskCoverageOut,
+    TaskCoverageMaterialOrdersOut,
     StockCheckExportBody,
 )
 from app.models.material.inventory_check import StockCheck, StockCheckItem
@@ -77,9 +78,11 @@ from app.services.material.stock_check_service import (
     get_stock_check_kpi,
     list_my_stock_check_items,
     get_task_material_coverage,
+    get_task_material_order_breakdown,
     _user_can_edit,
     _current_user_id,
     _resolve_user_names,
+    writeback_todo_criterion,
     StockCheckPermissionError,
     StockCheckConflictError,
 )
@@ -231,6 +234,7 @@ async def get_task_stock_coverage_view(
     sort_by: Optional[str] = Query(None, description="排序列: material_code/material_name/spec_model/wh_name/system_qty/req_qty/task_count/recent_check_date"),
     sort_order: str = Query("asc", pattern="^(asc|desc)$"),
     include_sample: bool = Query(False, description="包含样品单(HJY开头销售订单)对应的任务，默认排除"),
+    recent_days: Optional[int] = Query(None, ge=-1, le=100000, description="「已盘」判定窗口=近 N 天内实盘过;-1 或 99999=不限(全部历史);省略=服务端配置默认(7 天)"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     current_user: dict = Depends(PermissionChecker("materials.task_stock_check", "read")),
@@ -257,8 +261,30 @@ async def get_task_stock_coverage_view(
         unstocked=unstocked,
         sort_by=sort_by, sort_order=sort_order,
         include_sample=include_sample,
+        recent_days=recent_days,
     )
     return ResponseModel(data=TaskCoverageOut(**data))
+
+
+@router.get("/stock-check/task-coverage/material-orders", response_model=ResponseModel[TaskCoverageMaterialOrdersOut])
+async def get_task_coverage_material_orders_view(
+    start_date: date = Query(..., description="计划开工日期-起"),
+    end_date: date = Query(..., description="计划开工日期-止"),
+    material_id: int = Query(..., description="物料ID(erp_material_id)"),
+    include_sample: bool = Query(False, description="包含样品单(HJY开头销售订单)对应的任务，默认排除"),
+    current_user: dict = Depends(PermissionChecker("materials.task_stock_check", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """任务盘点覆盖 · 单物料「订单×需求量」明细（点击物料代码钻取，口径与列表一致）。"""
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
+    data = await get_task_material_order_breakdown(
+        db, start_date=start_date, end_date=end_date,
+        material_id=material_id, include_sample=include_sample,
+    )
+    if data is None:
+        raise HTTPException(status_code=404, detail="该日期范围内未找到此物料的需求记录")
+    return ResponseModel(data=TaskCoverageMaterialOrdersOut(**data))
 
 
 TASK_COVERAGE_EXPORT_COLUMNS = [
@@ -291,6 +317,7 @@ async def export_task_stock_coverage(
     sort_by: Optional[str] = Query(None, description="排序列: material_code/material_name/spec_model/wh_name/system_qty/req_qty/task_count/recent_check_date"),
     sort_order: str = Query("asc", pattern="^(asc|desc)$"),
     include_sample: bool = Query(False, description="包含样品单(HJY开头销售订单)对应的任务，默认排除"),
+    recent_days: Optional[int] = Query(None, ge=-1, le=100000, description="「已盘」判定窗口=近 N 天内实盘过;-1 或 99999=不限(全部历史);省略=服务端配置默认(7 天)"),
     current_user: dict = Depends(PermissionChecker("materials.task_stock_check", "read")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -315,6 +342,7 @@ async def export_task_stock_coverage(
         unstocked=unstocked,
         sort_by=sort_by, sort_order=sort_order,
         include_sample=include_sample,
+        recent_days=recent_days,
     )
 
     export_rows = []
@@ -465,6 +493,7 @@ async def recent(
     source: Optional[str] = Query(None, description="数据来源:k3/manual"),
     date_from: Optional[date] = Query(None, description="盘点日期起点 (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="盘点日期终点 (YYYY-MM-DD)"),
+    writeback_todo: Optional[bool] = Query(None, description="仅看 K3 待回写(已完结且存在 pending/failed 回写记录)"),
     sort_by: Optional[str] = Query(None, description="排序字段:check_no/order_no/check_date/total_materials/checked_materials/total_diff_qty/created_at/updated_at"),
     sort_order: Optional[str] = Query(None, description="asc/desc,默认 desc"),
     current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
@@ -483,6 +512,7 @@ async def recent(
         date_to=date_to,
         sort_by=sort_by,
         sort_order=sort_order,
+        writeback_todo=bool(writeback_todo),
     )
     await attach_list_extras(db, rows)
     filter_query = select(StockCheck)
@@ -503,6 +533,8 @@ async def recent(
         filter_query = filter_query.where(StockCheck.check_date >= date_from)
     if date_to:
         filter_query = filter_query.where(StockCheck.check_date <= date_to)
+    if writeback_todo:
+        filter_query = filter_query.where(*writeback_todo_criterion())
     total = (await db.execute(
         select(func.count()).select_from(filter_query.subquery())
     )).scalar() or 0
@@ -803,15 +835,9 @@ async def complete(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # 完结+回写计划先落库;K3 写入 best-effort,失败不阻断完结
+    # 完结+回写计划先落库;K3 写入改为手动触发(工作台「K3 回写」卡片),完结请求不触 K3
     await db.commit()
-    summary = {"total": 0, "success": 0, "failed": 0, "pending": 0}
-    if writebacks:
-        try:
-            summary = await execute_pending_writebacks(db, check_id, current_user)
-        except Exception:
-            logger.exception(f"盘点单 {check_id} K3 回写异常(可稍后重试)")
-            summary = {"total": len(writebacks), "success": 0, "failed": 0, "pending": len(writebacks)}
+    summary = {"total": len(writebacks), "success": 0, "failed": 0, "pending": len(writebacks)}
     head_out = await get_stock_check_with_items(db, check_id)
     out = await _to_check_out(db, head_out, current_user)
     out.writeback_summary = summary
@@ -1116,7 +1142,7 @@ async def remove_item(
     current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
     db: AsyncSession = Depends(get_db),
 ):
-    """从进行中的手动盘点单移除一条明细。已录入数据的行禁删。"""
+    """从进行中的手动/订单盘点单移除一条未盘明细。已录入数据的行禁删。"""
     try:
         head = await remove_item_from_check(db, item_id, current_user)
     except StockCheckPermissionError as e:

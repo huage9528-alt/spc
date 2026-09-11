@@ -7,6 +7,8 @@ interface UiPreferencesState {
   setColumnVisibility: (pageKey: string, visibleColumns: string[]) => void
   getColumnOrder: (pageKey: string, defaultOrder: string[]) => string[]
   setColumnOrder: (pageKey: string, order: string[]) => void
+  getColumnWidths: (pageKey: string, defaults: Record<string, number>) => Record<string, number>
+  setColumnWidths: (pageKey: string, widths: Record<string, number>) => void
   loadFromUser: (user: any) => void
   getFlag: (key: string, defaultValue?: any) => any
   setFlag: (key: string, value: any) => void
@@ -67,9 +69,28 @@ export const useUiPreferencesStore = create<UiPreferencesState>((set, get) => {
       }
       set({ preferences: next })
       localStorage.setItem(UI_PREFS_KEY, JSON.stringify(next))
-
       authApi.updatePreferences({ ui_preferences: next }).catch((err: Error) => {
         console.error('Failed to save column order preference:', err)
+      })
+    },
+
+    getColumnWidths: (pageKey, defaults) => {
+      const page = get().preferences[pageKey]
+      if (page && page.columnWidths && typeof page.columnWidths === 'object') {
+        return { ...defaults, ...page.columnWidths }
+      }
+      return defaults
+    },
+
+    setColumnWidths: (pageKey, widths) => {
+      const next = {
+        ...get().preferences,
+        [pageKey]: { ...get().preferences[pageKey], columnWidths: widths },
+      }
+      set({ preferences: next })
+      localStorage.setItem(UI_PREFS_KEY, JSON.stringify(next))
+      authApi.updatePreferences({ ui_preferences: next }).catch((err: Error) => {
+        console.error('Failed to save column widths preference:', err)
       })
     },
 

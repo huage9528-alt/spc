@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from datetime import date, datetime
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.order.sale_order import SaleOrder
@@ -261,21 +261,39 @@ class RiskEngine:
         green_count = 0
         now = datetime.now()
 
+        updates: list[dict] = []
         for order in orders:
             assessment = await self.assess_order(order)
-            order.risk_level = assessment["risk_level"]
-            order.risk_score = assessment["final_score"]
-            order.risk_factors = assessment["factors"]
-            order.risk_assessed_at = now
-            assessed += 1
-            if assessment["risk_level"] == "red":
-                red_count += 1
-            elif assessment["risk_level"] == "yellow":
-                yellow_count += 1
-            elif assessment["risk_level"] == "blue":
-                blue_count += 1
-            else:
-                green_count += 1
+            new_level = assessment["risk_level"]
+            new_score = assessment["final_score"]
+            new_factors = assessment["factors"]
+            if (
+                getattr(order, "risk_level", None) != new_level
+                or getattr(order, "risk_score", None) != new_score
+                or getattr(order, "risk_factors", None) != new_factors
+            ):
+                updates.append({
+                    "id": order.id,
+                    "risk_level": new_level,
+                    "risk_score": new_score,
+                    "risk_factors": new_factors,
+                    "risk_assessed_at": now,
+                })
+                if new_level == "red":
+                    red_count += 1
+                elif new_level == "yellow":
+                    yellow_count += 1
+                elif new_level == "blue":
+                    blue_count += 1
+                else:
+                    green_count += 1
+
+        assessed = len(updates)
+        if assessed:
+            await self.db.execute(
+                update(SaleOrder),
+                updates,
+            )
 
         await self.db.flush()
 

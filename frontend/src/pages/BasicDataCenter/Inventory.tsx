@@ -36,6 +36,7 @@ interface InventoryItem {
   recent_checked?: boolean
   recent_checked_date?: string | null
   recent_checked_check_no?: string | null
+  unit_of_measure?: string
 }
 
 interface InventoryByWhItem {
@@ -58,6 +59,7 @@ interface InventoryByWhItem {
   recent_checked?: boolean
   recent_checked_date?: string | null
   recent_checked_check_no?: string | null
+  unit_of_measure?: string
 }
 
 const numFmt = (v: number | null | undefined) => (v != null ? v.toLocaleString() : '-')
@@ -234,6 +236,7 @@ function dormantColumn(
 const DETAIL_EXPORT_OPTIONS: ExportColumnOption[] = [
   { field: 'material_code', label: '物料编码' },
   { field: 'material_name', label: '物料名称' },
+  { field: 'unit_of_measure', label: '单位' },
   { field: 'wh_code', label: '仓库编码' },
   { field: 'wh_name', label: '仓库名称' },
   { field: 'location_name', label: '库位名称' },
@@ -255,6 +258,7 @@ const DETAIL_EXPORT_OPTIONS: ExportColumnOption[] = [
 const BYWH_EXPORT_OPTIONS: ExportColumnOption[] = [
   { field: 'material_code', label: '物料编码' },
   { field: 'material_name', label: '物料名称' },
+  { field: 'unit_of_measure', label: '单位' },
   { field: 'wh_code', label: '仓库编码' },
   { field: 'wh_name', label: '仓库名称' },
   { field: 'location_count', label: '库位数' },
@@ -653,6 +657,7 @@ function InventoryDetail() {
   const allColumns = [
     { title: '物料编码', dataIndex: 'material_code', key: 'material_code', width: 120, sorter: true, filters: optList(filterOptions.material_codes), filterSearch: true },
     { title: '物料名称', dataIndex: 'material_name', key: 'material_name', width: 160, ellipsis: true, sorter: true },
+    { title: '单位', dataIndex: 'unit_of_measure', key: 'unit_of_measure', width: 60, align: 'center' as const },
     { title: '仓库编码', dataIndex: 'wh_code', key: 'wh_code', width: 100, sorter: true, filters: optList(filterOptions.wh_codes), filterSearch: true },
     { title: '仓库名称', dataIndex: 'wh_name', key: 'wh_name', width: 120, filters: optList(filterOptions.wh_names), filterSearch: true },
     { title: '库位名称', dataIndex: 'location_name', key: 'location_name', width: 120, ellipsis: true },
@@ -892,6 +897,7 @@ function InventoryByWarehouse() {
   const allColumns = [
     { title: '物料编码', dataIndex: 'material_code', key: 'material_code', width: 120, sorter: true, filters: optList(filterOptions.material_codes), filterSearch: true },
     { title: '物料名称', dataIndex: 'material_name', key: 'material_name', width: 180, ellipsis: true, sorter: true },
+    { title: '单位', dataIndex: 'unit_of_measure', key: 'unit_of_measure', width: 60, align: 'center' as const },
     { title: '仓库编码', dataIndex: 'wh_code', key: 'wh_code', width: 100, sorter: true, filters: optList(filterOptions.wh_codes), filterSearch: true },
     { title: '仓库名称', dataIndex: 'wh_name', key: 'wh_name', width: 140, filters: optList(filterOptions.wh_names), filterSearch: true },
     {

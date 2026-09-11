@@ -30,6 +30,7 @@ class SysUser(Base):
     role_id = Column(Integer, nullable=False)
     supplier_name = Column(String(100), nullable=True, comment="关联供应商名称")
     emp_code = Column(String(20), nullable=True, comment="关联员工工号")
+    scm_employee_id = Column(BigInteger, nullable=True, comment="关联员工ID（scm_employee.id）；emp_code 的整数外键，K3 回写等场景直接 JOIN 取 erp_user_id")
     wecom_user_id = Column(String(64), nullable=True, unique=True, comment="绑定企业微信userid")
     is_active = Column(Boolean, nullable=False, default=True)
     login_version = Column(Integer, nullable=False, default=0, comment="（已废弃，保留兼容）原 web 渠道登录版本号，现由 channel_sessions 取代")

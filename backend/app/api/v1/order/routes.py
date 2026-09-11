@@ -258,8 +258,8 @@ async def list_orders(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        query = select(SaleOrder)
-        count_query = select(func.count(SaleOrder.id))
+        query = select(SaleOrder).where(SaleOrder.is_deleted == 0)
+        count_query = select(func.count(SaleOrder.id)).where(SaleOrder.is_deleted == 0)
         customer_grade_joined = False
     
         if risk_level:
@@ -457,7 +457,7 @@ async def list_orders(
             func.sum(case((SaleOrder.risk_level == 'green', 1), else_=0)).label('green_count'),
             func.sum(SaleOrder.order_qty).label('order_qty_total'),
             func.sum(SaleOrder.order_amount).label('order_amount_total'),
-        )
+        ).where(SaleOrder.is_deleted == 0)
         # 应用与主查询相同的筛选条件
         if risk_level:
             levels = [x.strip() for x in risk_level.split(',') if x.strip()]

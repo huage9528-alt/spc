@@ -26,6 +26,8 @@ interface SupplierOption {
 }
 
 interface EmployeeOption {
+  id?: number
+  scm_employee_id?: number
   emp_code: string
   emp_name: string
   login_id?: string
@@ -53,6 +55,7 @@ interface UserItem {
   username: string
   display_name: string | null
   emp_code: string | null
+  scm_employee_id: number | null
   emp_name: string | null
   position_id: number | null
   position_name: string | null
@@ -292,6 +295,8 @@ export default function UserManagement() {
   const [unprovPosFilter, setUnprovPosFilter] = useState<string | undefined>()
   const [unprovOrgOptions, setUnprovOrgOptions] = useState<string[]>([])
   const [unprovPosOptions, setUnprovPosOptions] = useState<string[]>([])
+// 批量开通时,每行的自定义登录账号(emp_code -> username)。未自定义时使用 emp_name。
+const [unprovUsernames, setUnprovUsernames] = useState<Record<string, string>>({})
   const [provisionModalOpen, setProvisionModalOpen] = useState(false)
   const [provisioning, setProvisioning] = useState(false)
 
@@ -573,8 +578,8 @@ export default function UserManagement() {
     })
     if (!editingUser) {
       form.setFieldsValue({
-        username: employee.login_id || employee.emp_code,
-        password: employee.emp_code,
+        username: employee.emp_name || employee.login_id || employee.emp_code,
+        password: employee.emp_code || employee.login_id || employee.emp_name,
       })
     }
     if (!employee.role_id) {
@@ -727,10 +732,22 @@ export default function UserManagement() {
       if (posName) params.position_name = posName
       const res: any = await userApi.listUnprovisionedEmployees(params)
       const data = res?.data || {}
-      setUnprovEmployees(data.items || [])
+      const items = data.items || []
+      setUnprovEmployees(items)
       setUnprovTotalCount(data.total || 0)
       setUnprovOrgOptions(data.org_options || [])
       setUnprovPosOptions(data.position_options || [])
+      // 为新加载的员工初始化默认登录账号(emp_name); 已存在的覆盖保留
+      setUnprovUsernames(prev => {
+        const next = { ...prev }
+        for (const emp of items) {
+          const code = emp.emp_code
+          if (code && !(code in next)) {
+            next[code] = (emp.emp_name || '').trim()
+          }
+        }
+        return next
+      })
     } catch {
       // message.error('加载待开通员工列表失败')
     } finally {
@@ -743,6 +760,7 @@ export default function UserManagement() {
     setUnprovKeyword('')
     setUnprovOrgFilter(undefined)
     setUnprovPosFilter(undefined)
+    setUnprovUsernames({})
     setProvisionModalOpen(true)
     fetchUnprovisioned({ page: 1, pageSize: unprovPageSize, keyword: '', orgName: undefined, positionName: undefined })
   }
@@ -752,10 +770,21 @@ export default function UserManagement() {
       message.warning('请选择至少一名员工')
       return
     }
+    // 仅收集用户实际改过的 emp_code -> username; 未改动的让后端按 emp_name 默认生成
+    const usernames: Record<string, string> = {}
+    for (const code of unprovSelected) {
+      const custom = (unprovUsernames[code] || '').trim()
+      const emp = unprovEmployees.find(e => e.emp_code === code)
+      const defaultName = (emp?.emp_name || '').trim()
+      if (custom && custom !== defaultName) {
+        usernames[code] = custom
+      }
+    }
     setProvisioning(true)
     try {
       const res: any = await userApi.batchProvision({
         emp_codes: unprovSelected,
+        usernames,
         // role_id 不传 — 后端自动按员工岗位 + 组织匹配
       })
       const data = res?.data || {}
@@ -763,9 +792,15 @@ export default function UserManagement() {
       const skipped = data.skipped || 0
       const errors = data.errors || []
       const defaultPwd = data.default_password || '默认密码'
+      const newUsers: any[] = data.new_users || []
       const parts = [`成功开通 ${created} 个用户`]
       if (skipped > 0) parts.push(`跳过 ${skipped} 个已存在用户`)
       parts.push(`默认密码：${defaultPwd}`)
+      if (newUsers.length > 0) {
+        const sample = newUsers.slice(0, 3).map(u => u.username).join(', ')
+        const more = newUsers.length > 3 ? ` 等 +${newUsers.length - 3}` : ''
+        parts.push(`账号示例：${sample}${more}`)
+      }
       if (errors.length > 0) {
         parts.push(`${errors.length} 条异常（详情见日志）`)
         message.warning(parts.join('，'))
@@ -774,6 +809,7 @@ export default function UserManagement() {
       }
       setProvisionModalOpen(false)
       setUnprovSelected([])
+      setUnprovUsernames({})
       refreshAll()
     } catch {
       // error handled by interceptor
@@ -1834,7 +1870,22 @@ export default function UserManagement() {
             { title: '工号', dataIndex: 'emp_code', width: 140, className: 'sc-mono' },
             { title: '姓名', dataIndex: 'emp_name', width: 100 },
             {
-              title: '登录账号', dataIndex: 'login_id', width: 140,
+              title: '开通账号', dataIndex: 'emp_code', width: 160,
+              render: (_: string, r: any) => {
+                const code = r.emp_code
+                const value = code ? (unprovUsernames[code] ?? r.emp_name ?? '') : ''
+                return (
+                  <Input
+                    size="small"
+                    value={value}
+                    onChange={(e) => setUnprovUsernames(prev => ({ ...prev, [code]: e.target.value }))}
+                    placeholder="默认取姓名"
+                  />
+                )
+              },
+            },
+            {
+              title: '登录账号', dataIndex: 'login_id', width: 120,
               render: (v: string) => v || <span className="sc-note">—</span>,
             },
             {
@@ -1862,7 +1913,9 @@ export default function UserManagement() {
           }}
         />
         <div className="f-note" style={{ marginTop: 12 }}>
-          开通规则：角色按「岗位→角色」映射自动分配；无映射岗位开通后需在角色管理中补配。默认密码为工号，建议首次登录后修改。
+          开通规则：角色按「岗位→角色」映射自动分配；无映射岗位开通后需在角色管理中补配。
+          「开通账号」默认取员工姓名，可在行内直接修改；如与已存在账号冲突，会在错误列表中标出。
+          默认密码为工号，建议首次登录后修改。
         </div>
       </Modal>
 

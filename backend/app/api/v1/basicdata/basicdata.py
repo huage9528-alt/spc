@@ -2147,6 +2147,16 @@ async def list_inventory(
         db, [(inv.material_id, inv.wh_id) for inv in items], recent_days
     )
 
+    # 批量查询物料单位
+    material_ids = list({inv.material_id for inv in items})
+    unit_map: Dict[int, str] = {}
+    if material_ids:
+        unit_rows = (await db.execute(
+            select(Material.erp_material_id, Material.unit_of_measure)
+            .where(Material.erp_material_id.in_(material_ids))
+        )).all()
+        unit_map = {row[0]: row[1] or "" for row in unit_rows}
+
     out_items = []
     for inv in items:
         rc = recent_meta.get((inv.material_id, inv.wh_id)) or {}
@@ -2175,6 +2185,7 @@ async def list_inventory(
             "recent_checked": bool(rc.get("checked")),
             "recent_checked_date": rc.get("date"),
             "recent_checked_check_no": rc.get("check_no"),
+            "unit_of_measure": unit_map.get(inv.material_id, ""),
         })
 
     return ResponseModel(data={
@@ -2311,6 +2322,16 @@ async def list_inventory_by_warehouse(
 
     recent_meta = await _enrich_recent_checked(db, [(r[0], r[3]) for r in rows], recent_days)  # (material_id, wh_id)
 
+    # 批量查询物料单位
+    material_ids = list({r[0] for r in rows})
+    unit_map: Dict[int, str] = {}
+    if material_ids:
+        unit_rows = (await db.execute(
+            select(Material.erp_material_id, Material.unit_of_measure)
+            .where(Material.erp_material_id.in_(material_ids))
+        )).all()
+        unit_map = {row[0]: row[1] or "" for row in unit_rows}
+
     items = []
     for row in rows:
         (mat_id, mat_code, mat_name, wh_id, w_code, w_name,
@@ -2338,6 +2359,7 @@ async def list_inventory_by_warehouse(
             "recent_checked": bool(rc.get("checked")),
             "recent_checked_date": rc.get("date"),
             "recent_checked_check_no": rc.get("check_no"),
+            "unit_of_measure": unit_map.get(mat_id, ""),
         })
 
     return ResponseModel(data={
@@ -2394,6 +2416,7 @@ async def inventory_filter_options(
 INVENTORY_DETAIL_EXPORT_COLUMNS = [
     ExportColumn("material_code", "物料编码", 14),
     ExportColumn("material_name", "物料名称", 24),
+    ExportColumn("unit_of_measure", "单位", 8),
     ExportColumn("wh_code", "仓库编码", 10),
     ExportColumn("wh_name", "仓库名称", 14),
     ExportColumn("location_name", "库位名称", 14),
@@ -2415,6 +2438,7 @@ INVENTORY_DETAIL_EXPORT_COLUMNS = [
 INVENTORY_BYWH_EXPORT_COLUMNS = [
     ExportColumn("material_code", "物料编码", 14),
     ExportColumn("material_name", "物料名称", 24),
+    ExportColumn("unit_of_measure", "单位", 8),
     ExportColumn("wh_code", "仓库编码", 10),
     ExportColumn("wh_name", "仓库名称", 14),
     ExportColumn("location_count", "库位数", 10),
@@ -2471,12 +2495,23 @@ async def export_inventory(
         db, [(inv.material_id, inv.wh_id) for inv in items], recent_days
     )
 
+    # 批量查询物料单位
+    material_ids = list({inv.material_id for inv in items})
+    unit_map: Dict[int, str] = {}
+    if material_ids:
+        unit_rows = (await db.execute(
+            select(Material.erp_material_id, Material.unit_of_measure)
+            .where(Material.erp_material_id.in_(material_ids))
+        )).all()
+        unit_map = {row[0]: row[1] or "" for row in unit_rows}
+
     export_rows = []
     for inv in items:
         rc = recent_meta.get((inv.material_id, inv.wh_id)) or {}
         export_rows.append({
             "material_code": inv.material_code or "",
             "material_name": inv.material_name or "",
+            "unit_of_measure": unit_map.get(inv.material_id, ""),
             "wh_code": inv.wh_code or "",
             "wh_name": inv.wh_name or "",
             "location_name": inv.location_name or "",
@@ -2590,6 +2625,16 @@ async def export_inventory_by_warehouse(
 
     recent_meta = await _enrich_recent_checked(db, [(r[0], r[3]) for r in rows], recent_days)  # (material_id, wh_id)
 
+    # 批量查询物料单位
+    material_ids = list({r[0] for r in rows})
+    unit_map: Dict[int, str] = {}
+    if material_ids:
+        unit_rows = (await db.execute(
+            select(Material.erp_material_id, Material.unit_of_measure)
+            .where(Material.erp_material_id.in_(material_ids))
+        )).all()
+        unit_map = {row[0]: row[1] or "" for row in unit_rows}
+
     export_rows = []
     for row in rows:
         (mat_id, mat_code, mat_name, wh_id, w_code, w_name,
@@ -2600,6 +2645,7 @@ async def export_inventory_by_warehouse(
         export_rows.append({
             "material_code": mat_code or "",
             "material_name": mat_name or "",
+            "unit_of_measure": unit_map.get(mat_id, ""),
             "wh_code": w_code or "",
             "wh_name": w_name or "",
             "location_count": int(loc_cnt or 0),

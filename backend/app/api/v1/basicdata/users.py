@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
 
-from sqlalchemy import select, func, or_, cast, String
+from sqlalchemy import select, func, or_, and_, cast, String, exists
 from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -172,7 +172,7 @@ async def list_users(
     query = (
         select(SysUser, SysRole, Employee, Position, Organization, Manager)
         .join(SysRole, SysUser.role_id == SysRole.id)
-        .outerjoin(Employee, SysUser.emp_code == Employee.emp_code)
+        .outerjoin(Employee, SysUser.scm_employee_id == Employee.id)
         .outerjoin(Position, Employee.position_id == Position.id)
         .outerjoin(Organization, cast(Employee.org_id, String) == Organization.oa_org_id)
         .outerjoin(Manager, Employee.manager_oa_user_id == Manager.oa_user_id)
@@ -240,6 +240,7 @@ async def list_users(
                 "username": user.username,
                 "display_name": user.display_name,
                 "emp_code": user.emp_code,
+                "scm_employee_id": user.scm_employee_id,
                 "emp_name": employee.emp_name if employee else None,
                 "position_id": employee.position_id if employee else None,
                 "position_name": position.position_name if position else (employee.position if employee else None),
@@ -325,7 +326,7 @@ async def export_users(
     query = (
         select(SysUser, SysRole, Employee, Position, Organization)
         .join(SysRole, SysUser.role_id == SysRole.id)
-        .outerjoin(Employee, SysUser.emp_code == Employee.emp_code)
+        .outerjoin(Employee, SysUser.scm_employee_id == Employee.id)
         .outerjoin(Position, Employee.position_id == Position.id)
         .outerjoin(Organization, cast(Employee.org_id, String) == Organization.oa_org_id)
     )
@@ -533,7 +534,7 @@ async def sync_user_roles(
 
     result = await db.execute(
         select(SysUser, Employee, Position, Organization)
-        .join(Employee, SysUser.emp_code == Employee.emp_code)
+        .join(Employee, SysUser.scm_employee_id == Employee.id)
         .outerjoin(Position, Employee.position_id == Position.id)
         .outerjoin(Organization, cast(Employee.org_id, String) == Organization.oa_org_id)
     )
@@ -589,6 +590,8 @@ async def list_employee_options(
     result = await db.execute(query.order_by(Employee.emp_code.asc()).limit(200))
     return ResponseModel(data=[
         {
+            "id": employee.id,
+            "scm_employee_id": employee.id,
             "emp_code": employee.emp_code,
             "emp_name": employee.emp_name,
             "login_id": employee.login_id,
@@ -780,6 +783,7 @@ async def create_user(
         role_id=role.id,
         supplier_name=supplier_name,
         emp_code=employee.emp_code if employee else None,
+        scm_employee_id=employee.id if employee else None,
         wecom_user_id=body.wecom_user_id.strip() if body.wecom_user_id else None,
         is_active=body.is_active,
     )
@@ -817,6 +821,7 @@ async def update_user(
         user.supplier_name = await _validate_supplier_binding(role, body.supplier_name, db)
         user.role_id = role.id
         user.emp_code = employee.emp_code if employee else None
+        user.scm_employee_id = employee.id if employee else None
         if employee and body.display_name is None:
             user.display_name = employee.emp_name
     elif body.supplier_name is not None:
@@ -916,7 +921,7 @@ def _build_filtered_user_ids(
     query = (
         select(SysUser.id)
         .join(SysRole, SysUser.role_id == SysRole.id)
-        .outerjoin(Employee, SysUser.emp_code == Employee.emp_code)
+        .outerjoin(Employee, SysUser.scm_employee_id == Employee.id)
         .outerjoin(Position, Employee.position_id == Position.id)
         .outerjoin(Organization, cast(Employee.org_id, String) == Organization.oa_org_id)
     )
@@ -1076,6 +1081,7 @@ class BatchProvisionBody(BaseModel):
     emp_codes: List[str]
     role_id: Optional[int] = None
     default_password: Optional[str] = None
+    usernames: Optional[Dict[str, str]] = None  # emp_code → 自定义登录账号；未提供时按 emp_name 生成
 
 
 # ---------- 未开通用户的员工列表 ----------
@@ -1091,15 +1097,21 @@ async def list_unprovisioned_employees(
 ):
     """查询已同步员工数据但尚未开通系统用户的员工列表"""
 
-    # 已开通用户的 emp_code 集合
-    provisioned_sub = select(SysUser.emp_code).where(SysUser.emp_code.isnot(None))
+    # 已开通用户的判定: sys_user.emp_code = e.emp_code OR sys_user.scm_employee_id = e.id
+    # 用 NOT EXISTS 比 NOT IN 更准确地表达"两列任一匹配即视为已开通"
+    provisioned_exists = select(SysUser.id).where(
+        or_(
+            and_(SysUser.emp_code.isnot(None), SysUser.emp_code == Employee.emp_code),
+            and_(SysUser.scm_employee_id.isnot(None), SysUser.scm_employee_id == Employee.id),
+        )
+    )
 
     # 查找未开通的员工，关联岗位和组织
     query = (
         select(Employee, Position, Organization)
         .outerjoin(Position, Employee.position_id == Position.id)
         .outerjoin(Organization, cast(Employee.org_id, String) == Organization.oa_org_id)
-        .where(Employee.emp_code.not_in(provisioned_sub))
+        .where(~exists(provisioned_exists))
     )
 
     # 过滤条件：keyword 支持空格分隔多关键词（任一匹配即可）
@@ -1145,7 +1157,7 @@ async def list_unprovisioned_employees(
         .select_from(Employee)
         .outerjoin(Position, Employee.position_id == Position.id)
         .outerjoin(Organization, cast(Employee.org_id, String) == Organization.oa_org_id)
-        .where(Employee.emp_code.not_in(provisioned_sub))
+        .where(~exists(provisioned_exists))
     )
     options_result = await db.execute(options_query)
     all_position_names = set()
@@ -1160,6 +1172,8 @@ async def list_unprovisioned_employees(
     return ResponseModel(data={
         "items": [
             {
+                "id": emp.id,
+                "scm_employee_id": emp.id,
                 "emp_code": emp.emp_code,
                 "emp_name": emp.emp_name,
                 "login_id": emp.login_id,
@@ -1278,16 +1292,15 @@ async def batch_provision_users(
             errors.append(f"{emp_code}({emp.emp_name}): 无法确定角色，请先创建角色")
             continue
 
-        # 生成用户名
-        username = emp.login_id or emp.emp_code
-
-        # 检查 username 是否已被占用
-        dup_result = await db.execute(
-            select(SysUser).where(SysUser.username == username)
-        )
-        if dup_result.scalar_one_or_none():
-            # 用户名冲突，用 emp_code 作为用户名
-            username = emp.emp_code
+        # 解析用户名: 前端覆盖 > emp_name; 无覆盖且 emp_name 缺失则报错
+        override = (body.usernames or {}).get(emp.emp_code or "")
+        if override and override.strip():
+            username = override.strip()
+        elif emp.emp_name and emp.emp_name.strip():
+            username = emp.emp_name.strip()
+        else:
+            errors.append(f"{emp_code}: 员工姓名缺失，无法生成登录账号，请手动指定")
+            continue
 
         # 确定激活状态
         is_active = (emp.status in {0, 1, 2, 3}) if emp.status is not None else True
@@ -1300,6 +1313,7 @@ async def batch_provision_users(
                 hashed_password=hashed_pwd,
                 role_id=target_role_id,
                 emp_code=emp.emp_code,
+                scm_employee_id=emp.id,
                 is_active=is_active,
             )
             db.add(new_user)
@@ -1308,6 +1322,7 @@ async def batch_provision_users(
             created += 1
             newly_created_users.append({
                 "emp_code": emp.emp_code,
+                "scm_employee_id": emp.id,
                 "username": username,
                 "display_name": emp.emp_name,
                 "role_id": target_role_id,
@@ -1355,7 +1370,7 @@ async def wecom_bind_match(
             select(
                 SysUser.id, SysUser.username, SysUser.display_name, SysUser.emp_code, Employee.emp_name
             )
-            .outerjoin(Employee, SysUser.emp_code == Employee.emp_code)
+            .outerjoin(Employee, SysUser.scm_employee_id == Employee.id)
             .where(SysUser.wecom_user_id.is_(None))
             .order_by(SysUser.id)
         )

@@ -1,7 +1,7 @@
 """物料齐套中心 — 盘点完结 K3 回写记录模型
 
-设计文档: docs/superpowers/specs/2026-09-01-stockcheck-k3-writeback-design.md
-每行 = 一张待生成/已生成/失败的 K3 单据(按 盘点单×类型×仓库 分组,唯一约束幂等)。
+设计文档: docs/superpowers/specs/2026-09-11-stockcheck-k3-manager-dynamic-design.md
+每行 = 一张待生成/已生成/失败的 K3 单据(按 盘点单×类型×仓库×盘点人 分组,唯一约束幂等)。
 """
 
 from sqlalchemy import (
@@ -22,6 +22,8 @@ class StockCheckK3Writeback(Base):
     wh_id = Column(Integer, nullable=False, comment="仓库ID快照(调拨单为调出仓)")
     wh_code = Column(String(20), nullable=True, comment="仓库编码快照")
     wh_name = Column(String(50), nullable=True, comment="仓库名称快照")
+    counter_user_id = Column(BigInteger, nullable=True, comment="该分组盘点人 sys_user.id(NULL=历史/fallback)")
+    manager_id = Column(BigInteger, nullable=True, comment="盘点人映射的 K3 t_Emp.FItemID(scm_employee.erp_user_id,NULL=未映射/fallback)")
     status = Column(String(16), nullable=False, default="pending", server_default="pending", comment="pending/success/failed")
     erp_bill_no = Column(String(64), nullable=True, comment="已生成的 K3 单号")
     k3_inter_id = Column(BigInteger, nullable=True, comment="K3 ICStockBill.FInterID")
@@ -35,6 +37,6 @@ class StockCheckK3Writeback(Base):
     written_at = Column(DateTime, nullable=True, comment="K3 写入成功时间")
 
     __table_args__ = (
-        UniqueConstraint("check_id", "bill_type", "wh_id", name="uq_sckw_check_type_wh"),
+        UniqueConstraint("check_id", "bill_type", "wh_id", "counter_user_id", name="uq_sckw_check_type_wh_user"),
         Index("ix_sckw_status", "status"),
     )

@@ -10,7 +10,8 @@ import {
   SearchOutlined, CheckCircleOutlined, StopOutlined, ArrowLeftOutlined,
   HistoryOutlined, PlusOutlined, DownOutlined, DownloadOutlined, DeleteOutlined,
   AppstoreOutlined, ClockCircleOutlined, ArrowUpOutlined, ArrowDownOutlined,
-  BarsOutlined, WarningOutlined,
+  BarsOutlined, WarningOutlined, FullscreenOutlined, FullscreenExitOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons'
 import { useExport } from '@/hooks/useExport'
 import { materialApi, orderApi } from '@/services/api'
@@ -497,47 +498,16 @@ export default function StockCheckWorkbench() {
     }
   }, [activeCheck, items, isRowDirty, loadCheck])
 
-  const handleComplete = useCallback(async () => {
+  // ===== 完结弹窗（含 K3 回写分组预览：完结并回写 / 仅完结） =====
+  const [completeOpen, setCompleteOpen] = useState(false)
+  const [completing, setCompleting] = useState(false)
+  const [completeMode, setCompleteMode] = useState<'writeback' | 'only' | null>(null)
+
+  const handleComplete = useCallback(() => {
     if (!activeCheck) return
-    const incomplete = items.filter(it => it.actual_qty == null)
-    if (incomplete.length > 0) {
-      message.error(`还有 ${incomplete.length} 行未录入实盘数,请先填写后再标记完成`)
-      return
-    }
-    Modal.confirm({
-      title: '标记完成',
-      content: '完结后所有行将不可再修改,确认继续?',
-      onOk: async () => {
-        try {
-          const res: any = await materialApi.completeStockCheck(activeCheck.id, activeCheck.version ?? undefined)
-          setActiveCheck(res.data)
-          setItems(res.data.items || [])
-          captureBaseline(res.data.items || [])
-          const ws = res.data?.writeback_summary
-          if (ws && Number(ws.total) > 0) {
-            if (Number(ws.failed) > 0) {
-              message.warning(`已完结；K3 单据回写失败 ${ws.failed}/${ws.total} 张，可在下方「K3 回写」卡片重试`, 6)
-            } else if (Number(ws.success) < Number(ws.total)) {
-              message.info(`已完结；K3 单据回写未完成（${ws.success}/${ws.total}），请在「K3 回写」卡片查看`, 6)
-            } else {
-              message.success(`已完结；已生成 K3 单据 ${ws.success}/${ws.total} 张，待仓管员在 K3 审核`, 6)
-            }
-          } else {
-            message.success('已完结')
-          }
-          if (activeCheck?.id) loadWritebacks(activeCheck.id)
-        } catch (e: any) {
-          const code = e?.response?.data?.detail?.code ?? e?.response?.data?.code
-          if (code === 409) {
-            message.warning('盘点单状态刚被他人修改,正在刷新')
-            loadCheck(activeCheck.id)
-          } else {
-            message.error(e?.response?.data?.detail || e.message || '完结失败')
-          }
-        }
-      },
-    })
-  }, [activeCheck, items, loadCheck, captureBaseline])
+    // 允许部分盘点完结:未录实盘的行视为放弃(diff=0、不回写 K3),弹窗内另行警示
+    setCompleteOpen(true)
+  }, [activeCheck])
 
   const handleCancel = useCallback(async () => {
     if (!activeCheck) return
@@ -546,17 +516,30 @@ export default function StockCheckWorkbench() {
       content: '确认取消该盘点单?',
       okType: 'danger',
       onOk: async () => {
-        try {
-          const res: any = await materialApi.cancelStockCheck(activeCheck.id, activeCheck.version ?? undefined)
-          setActiveCheck(res.data)
-          message.success('已取消')
-        } catch (e: any) {
-          const code = e?.response?.data?.detail?.code ?? e?.response?.data?.code
-          if (code === 409) {
-            message.warning('盘点单状态刚被他人修改,正在刷新')
-            loadCheck(activeCheck.id)
-          } else {
-            message.error(e?.response?.data?.detail || e.message || '取消失败')
+        let curVersion: number | undefined = activeCheck.version ?? undefined
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const res: any = await materialApi.cancelStockCheck(activeCheck.id, curVersion)
+            setActiveCheck(res.data)
+            message.success('已取消')
+            return
+          } catch (e: any) {
+            const detail = e?.response?.data?.detail
+            const code = detail?.code ?? e?.response?.data?.code
+            if (attempt === 0 && code === 409) {
+              const sv = detail?.data?.server_version
+              if (typeof sv === 'number') {
+                curVersion = sv
+                continue
+              }
+            }
+            if (code === 409) {
+              message.warning('盘点单状态刚被他人修改,正在刷新')
+              loadCheck(activeCheck.id)
+            } else {
+              message.error(detail || e.message || '取消失败')
+            }
+            return
           }
         }
       },
@@ -603,6 +586,96 @@ export default function StockCheckWorkbench() {
       setWbRetrying(false)
     }
   }, [activeCheck?.id])
+
+  // ===== 完结弹窗 · K3 回写分组预览（与后端 plan_writebacks 同规则：diff≠0 且有仓库，按 类型×仓库 分组） =====
+  const writebackPreview = useMemo(() => {
+    const groups = new Map<string, { key: string; bill_type: 'gain' | 'loss_transfer'; wh_label: string; count: number; total: number }>()
+    const skipped: { material_code?: string | null; material_name?: string | null; diff: number }[] = []
+    let gainRows = 0
+    let lossRows = 0
+    for (const it of items) {
+      const diff = it.diff_qty != null ? Number(it.diff_qty) : 0
+      if (!diff) continue
+      if (diff > 0) gainRows += 1
+      else lossRows += 1
+      if (it.wh_id == null) {
+        skipped.push({ material_code: it.material_code, material_name: it.material_name, diff })
+        continue
+      }
+      const bill_type: 'gain' | 'loss_transfer' = diff > 0 ? 'gain' : 'loss_transfer'
+      const key = `${bill_type}-${it.wh_id}`
+      const g = groups.get(key) || {
+        key, bill_type,
+        wh_label: it.wh_name || it.wh_code || `仓库#${it.wh_id}`,
+        count: 0, total: 0,
+      }
+      g.count += 1
+      g.total += Math.abs(diff)
+      groups.set(key, g)
+    }
+    const isK3Source = (activeCheck?.source || '') === 'k3'
+    return {
+      bills: [...groups.values()].sort((a, b) => a.bill_type.localeCompare(b.bill_type) || a.wh_label.localeCompare(b.wh_label)),
+      skipped,
+      gainRows,
+      lossRows,
+      diffRows: gainRows + lossRows,
+      disabled: isK3Source,
+    }
+  }, [items, activeCheck?.source])
+
+  const doComplete = useCallback(async (withWriteback: boolean) => {
+    if (!activeCheck) return
+    setCompleteMode(withWriteback ? 'writeback' : 'only')
+    setCompleting(true)
+    try {
+      const res: any = await materialApi.completeStockCheck(activeCheck.id, activeCheck.version ?? undefined)
+      setActiveCheck(res.data)
+      setItems(res.data.items || [])
+      captureBaseline(res.data.items || [])
+      const ws = res.data?.writeback_summary
+      if (withWriteback && ws && Number(ws.total) > 0) {
+        try {
+          const wb: any = await materialApi.retryStockCheckWritebacks(activeCheck.id)
+          setWbOverview(wb.data)
+          const failed = (wb.data?.writebacks || []).filter((w: StockCheckWriteback) => w.status === 'failed').length
+          if (failed > 0) message.warning(`已完结；${failed} 张 K3 单据回写失败，请在「K3 回写」卡片查看原因并重试`, 6)
+          else message.success(`已完结；${ws.total} 张 K3 单据已生成（未审核），需仓管员在 K3 中审核`, 6)
+        } catch (e: any) {
+          message.warning(`已完结；K3 回写执行失败（${e?.response?.data?.detail || e.message || '网络异常'}），请在「K3 回写」卡片重试`, 6)
+          loadWritebacks(activeCheck.id)
+        }
+      } else if (ws && Number(ws.total) > 0) {
+        message.info(`已完结；${ws.total} 张 K3 单据待手动提交，请在「K3 回写」卡片操作`, 6)
+      } else {
+        message.success('已完结')
+      }
+      setCompleteOpen(false)
+    } catch (e: any) {
+      const code = e?.response?.data?.detail?.code ?? e?.response?.data?.code
+      if (code === 409) {
+        message.warning('盘点单状态刚被他人修改,正在刷新')
+        loadCheck(activeCheck.id)
+        setCompleteOpen(false)
+      } else {
+        message.error(e?.response?.data?.detail || e.message || '完结失败')
+      }
+    } finally {
+      setCompleting(false)
+      setCompleteMode(null)
+    }
+  }, [activeCheck, captureBaseline, loadCheck, loadWritebacks])
+
+  // 台账页「K3 回写」行操作带 ?wb=1 进入时，滚到 K3 回写卡片
+  const wbAnchorDone = useRef(false)
+  useEffect(() => {
+    if (wbAnchorDone.current) return
+    if (searchParams.get('wb') === '1' && activeCheck?.status === 'completed' && !wbLoading) {
+      wbAnchorDone.current = true
+      const el = document.getElementById('k3-writeback')
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [searchParams, activeCheck?.status, wbLoading])
 
   // ===== 补入子BOM / 刷新仓库 / 协同人 =====
   const handleRefreshBom = useCallback(async () => {
@@ -847,6 +920,65 @@ export default function StockCheckWorkbench() {
     if (segFilter === 'checked') return searchedItems.filter((it) => it.is_checked === 1 || hasRecentMark(it))
     return searchedItems.filter((it) => it.diff_qty != null && Number(it.diff_qty) !== 0)
   }, [searchedItems, segFilter])
+
+  // ===== 明细表自适应高度：整页收敛在视口内（窗口不出现滚动条），仅表格内部滚动 =====
+  const detailSectionRef = useRef<HTMLDivElement | null>(null)
+  const [detailMounted, setDetailMounted] = useState(false)
+  const attachDetailSection = useCallback((node: HTMLDivElement | null) => {
+    detailSectionRef.current = node
+    setDetailMounted((prev) => (prev === !!node ? prev : !!node))
+  }, [])
+  const [tableScrollY, setTableScrollY] = useState<number>(560)
+  const measureTableScrollY = useCallback(() => {
+    const el = detailSectionRef.current
+    if (!el || !el.clientHeight) return
+    const tableEl = el.querySelector<HTMLElement>('.ant-table')
+    const bodyEl = el.querySelector<HTMLElement>('.ant-table-body')
+    const pad = dirtyItems.length > 0 ? 56 : 8
+    const avail = el.clientHeight - pad - 4
+    if (avail < 140) return
+    // 表头 + 汇总行等固定骨架高度：由 DOM 实测得出（body 滚动容器高度之外的差值）
+    const chrome = tableEl && bodyEl && bodyEl.offsetHeight > 0
+      ? Math.max(50, tableEl.offsetHeight - bodyEl.offsetHeight)
+      : 92
+    const next = Math.max(160, Math.floor(avail - chrome))
+    setTableScrollY((prev) => (Math.abs(next - prev) >= 2 ? next : prev))
+  }, [dirtyItems.length])
+
+  useEffect(() => {
+    // 明细表在数据加载完成后才挂载：node 出现后再建立 ResizeObserver / resize 监听，
+    // 这样浏览器缩放、拖拽窗口等引起的视口变化才能持续驱动表格高度自适应
+    if (!detailMounted) return
+    measureTableScrollY()
+    const el = detailSectionRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => measureTableScrollY())
+    ro.observe(el)
+    window.addEventListener('resize', measureTableScrollY)
+    const vv = window.visualViewport
+    vv?.addEventListener('resize', measureTableScrollY)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measureTableScrollY)
+      vv?.removeEventListener('resize', measureTableScrollY)
+    }
+  }, [measureTableScrollY, detailMounted])
+
+  // ===== 页面内全屏模式（大屏）：隐藏信息卡/统计卡等上部区块，表格占满整个浏览器窗口 =====
+  const [fullscreen, setFullscreen] = useState(false)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFullscreen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  useEffect(() => {
+    if (loading) return
+    const raf = requestAnimationFrame(measureTableScrollY)
+    return () => cancelAnimationFrame(raf)
+  }, [loading, tableItems.length, activeCheck?.status, fullscreen, measureTableScrollY])
 
   // 表头列筛选(物料编码/仓库/盘点人)是 antd 表内状态,onChange 时同步一份,导出时按同口径复筛
   const [columnFilters, setColumnFilters] = useState<Record<string, unknown>>({})
@@ -1142,7 +1274,7 @@ export default function StockCheckWorkbench() {
       render: (_: any, r: StockCheckItem) => {
         const recentMark = hasRecentMark(r)
         const canRemove = !readonly
-          && activeCheck?.check_type === 'manual'
+          && (activeCheck?.check_type === 'manual' || activeCheck?.check_type === 'order')
           && (activeCheck.status === 'in_progress' || activeCheck.status === 'open')
           && r.is_checked === 0
           && r.actual_qty == null
@@ -1236,9 +1368,26 @@ export default function StockCheckWorkbench() {
   ]
 
   return (
-    <div className="sc-page" style={{ paddingBottom: dirtyItems.length > 0 ? 56 : 0 }}>
+    <div
+      className="sc-page"
+      style={
+        fullscreen
+          ? {
+              position: 'fixed', inset: 0, zIndex: 9999,
+              background: '#f8fafc',
+              padding: '10px 20px 14px',
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            }
+          : {
+              // 整页收敛在视口内（窗口不出现滚动条），仅明细表内部滚动
+              height: 'calc(100vh - 104px)',
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            }
+      }
+    >
       {/* ===== 信息头卡 ===== */}
-      <Card styles={{ body: { padding: '16px 20px' } }} style={{ marginBottom: 12 }}>
+      {!fullscreen && (
+        <Card styles={{ body: { padding: '16px 20px' } }} style={{ marginBottom: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/stock-check')}>返回</Button>
           <ScTag variant={STATUS_MAP[activeCheck.status || '']?.variant || 'wait'}>
@@ -1325,9 +1474,11 @@ export default function StockCheckWorkbench() {
             <Button type="link" size="small" icon={<PlusOutlined />} onClick={() => setAddPickerOpen(true)}>添加物料</Button>
           )}
         </div>
-      </Card>
+        </Card>
+      )}
 
       {/* ===== SSE 协同提示条 ===== */}
+      {!fullscreen && (
       <div
         className="sc-sync-bar"
         style={syncBanner ? { background: '#fffbeb', borderColor: '#fde68a', color: '#b45309' } : undefined}
@@ -1350,18 +1501,82 @@ export default function StockCheckWorkbench() {
           </span>
         )}
       </div>
+      )}
 
-      {/* ===== K3 回写卡片（已完结盘点单） ===== */}
-      {activeCheck?.status === 'completed' && (
-        <Card size="small" title="K3 回写" style={{ marginTop: 12 }}
+      {/* ===== 进度卡带 ===== */}
+      {!fullscreen && (
+        <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
+          {statCards.map((c) => (
+            <Col key={c.label} xs={12} md={8} xl={4}>
+              <div className="sc-stat-card slim" style={{ '--accent': c.accent, '--accent-bg': c.accentBg, height: '100%' } as CSSProperties}>
+                <div className="sc-stat-icon">{c.icon}</div>
+                <div style={{ minWidth: 0 }}>
+                  <div className="sc-stat-label">{c.label}</div>
+                  <div className="sc-stat-value" style={{ ...c.valueStyle, whiteSpace: 'nowrap' }}>{c.value}</div>
+                </div>
+              </div>
+            </Col>
+          ))}
+        </Row>
+      )}
+
+      {/* ===== K3 回写卡片（已完结盘点单 · 台账「K3 回写」行操作锚点 #k3-writeback） ===== */}
+      {!fullscreen && activeCheck?.status === 'completed' && (() => {
+        const wbs = wbOverview?.writebacks || []
+        const skippedItems = wbOverview?.skipped_items ?? []
+        const loaded = wbOverview != null
+        // 加载中:不渲染任何回写卡片(原页面 area 留空),避免把"加载未完成"误判为"盘平"
+        if (wbLoading && !loaded) return null
+        // 加载完成且零数据(无回写记录 + 无跳过行):完全盘平 → 轻量绿框确认
+        if (loaded && wbs.length === 0 && skippedItems.length === 0) {
+          return (
+            <Card size="small" id="k3-writeback" style={{ marginBottom: 12 }}>
+              <Alert type="success" showIcon
+                message="已盘平，无盘差行，无需回写 K3"
+                description="盘差行（diff≠0 且关联仓库）才会按（类型×仓库）分组生成 K3 未审核单据；全部行 actual = snapshot 时不生成任何单据。" />
+            </Card>
+          )
+        }
+        // 加载完成 + 有跳过行(无仓库盘差) + 零回写记录:有盘差但都被跳过
+        if (loaded && wbs.length === 0) {
+          return (
+            <Card size="small" title="K3 回写" id="k3-writeback" style={{ marginBottom: 12 }}>
+              <Alert type="warning" showIcon style={{ marginBottom: 8 }}
+                message={`${skippedItems.length} 行盘差物料未关联仓库，未生成 K3 单据`}
+                description={skippedItems.map((s, i) => (
+                  <span key={i}>
+                    {s.material_code || s.material_name || '-'}（差异 {s.diff_qty}）{i < skippedItems.length - 1 ? '、' : ''}
+                  </span>
+                ))} />
+              <Alert type="info" showIcon message="无可生成的 K3 单据：盘差行均因缺少仓库而被跳过。关联仓库后重新提交盘点可补生成。" />
+            </Card>
+          )
+        }
+        const pendingCount = wbs.filter((w) => w.status === 'pending').length
+        const failedCount = wbs.filter((w) => w.status === 'failed').length
+        const successCount = wbs.filter((w) => w.status === 'success').length
+        const todoCount = pendingCount + failedCount
+        return (
+        <Card size="small" title="K3 回写" id="k3-writeback" style={{ marginBottom: 12 }}
           extra={
-            wbOverview && wbOverview.writebacks.some((w) => w.status === 'failed') ? (
-              <Button size="small" loading={wbRetrying} onClick={retryWritebacks}>重试失败单据</Button>
-            ) : null
+            <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <Tag color="success">已生成 {successCount}</Tag>
+              {pendingCount > 0 && <Tag color="warning">待写入 {pendingCount}</Tag>}
+              {failedCount > 0 && <Tag color="error">失败 {failedCount}</Tag>}
+              <Tooltip title="刷新回写状态">
+                <Button size="small" icon={<ReloadOutlined />} loading={wbLoading}
+                  onClick={() => activeCheck?.id && loadWritebacks(activeCheck.id)} />
+              </Tooltip>
+              {todoCount > 0 && (
+                <Button size="small" type="primary" loading={wbRetrying} onClick={retryWritebacks}>
+                  执行 K3 回写（{todoCount}）
+                </Button>
+              )}
+            </span>
           }
         >
           <Alert type="info" showIcon style={{ marginBottom: 8 }}
-            message="盘盈生成 K3 盘盈入库单、盘亏生成调拨单（调入库存检查不良仓）；单据为未审核状态，需仓管员在 K3 中审核后库存才会调整，并经 ERP 同步回流本系统。" />
+            message="盘盈生成 K3 盘盈入库单、盘亏生成调拨单（调入库存检查不良仓）；单据为未审核状态，需仓管员在 K3 中审核后库存才会调整，并经 ERP 同步回流本系统。成功单据不会重复生成。" />
           {wbOverview && wbOverview.skipped_items.length > 0 && (
             <Alert type="warning" showIcon style={{ marginBottom: 8 }}
               message="以下盘差行无仓库信息，未生成 K3 单据"
@@ -1371,46 +1586,81 @@ export default function StockCheckWorkbench() {
                 </span>
               ))} />
           )}
-          <Table size="small" rowKey="id" loading={wbLoading}
-            dataSource={wbOverview?.writebacks || []} pagination={false}
-            columns={[
-              {
-                title: '类型', dataIndex: 'bill_type', width: 110,
-                render: (v: string) => (v === 'gain' ? '盘盈入库单' : '盘亏调拨单'),
-              },
-              { title: '仓库', dataIndex: 'wh_name', width: 140, render: (v: string, r: StockCheckWriteback) => v || r.wh_code || r.wh_id },
-              { title: '明细行数', dataIndex: 'item_count', width: 90 },
-              { title: '数量合计', dataIndex: 'total_qty', width: 110 },
-              {
-                title: '状态', dataIndex: 'status', width: 90,
-                render: (v: string) =>
-                  v === 'success' ? <Tag color="success">已生成</Tag> :
-                  v === 'failed' ? <Tag color="error">失败</Tag> :
-                  <Tag color="default">待写入</Tag>,
-              },
-              { title: 'K3 单号', dataIndex: 'erp_bill_no', width: 130, render: (v: string) => v || '-' },
-              {
-                title: '失败原因', dataIndex: 'error_msg', ellipsis: true,
-                render: (v: string) => v || '-',
-              },
-            ]} />
+          {todoCount > 0 ? (
+            <Table size="small" rowKey="id" loading={wbLoading}
+              dataSource={wbOverview?.writebacks || []} pagination={false}
+              columns={[
+                {
+                  title: '类型', dataIndex: 'bill_type', width: 110,
+                  render: (v: string) => (v === 'gain' ? '盘盈入库单' : '盘亏调拨单'),
+                },
+                { title: '仓库', dataIndex: 'wh_name', width: 120, render: (v: string, r: StockCheckWriteback) => v || r.wh_code || r.wh_id },
+                { title: '明细行数', dataIndex: 'item_count', width: 80 },
+                { title: '数量合计', dataIndex: 'total_qty', width: 100 },
+                {
+                  title: '状态', dataIndex: 'status', width: 80,
+                  render: (v: string) =>
+                    v === 'success' ? <Tag color="success">已生成</Tag> :
+                    v === 'failed' ? <Tag color="error">失败</Tag> :
+                    <Tag color="default">待写入</Tag>,
+                },
+                { title: 'K3 单号', dataIndex: 'erp_bill_no', width: 120, render: (v: string) => v || '-' },
+                {
+                  title: '写入时间', dataIndex: 'written_at', width: 130,
+                  render: (v: string) => (v ? <span className="sc-mono">{formatDateTime(v)}</span> : <span className="sc-diff-flat">—</span>),
+                },
+                {
+                  title: '失败原因', dataIndex: 'error_msg', ellipsis: true,
+                  render: (v: string) => v || '-',
+                },
+                {
+                  title: '操作', key: 'op', width: 60,
+                  render: (_v: unknown, r: StockCheckWriteback) =>
+                    r.status === 'pending' ? (
+                      <Button type="link" size="small" style={{ padding: 0 }} onClick={retryWritebacks}>写入</Button>
+                    ) : r.status === 'failed' ? (
+                      <Button type="link" size="small" style={{ padding: 0 }} onClick={retryWritebacks}>重试</Button>
+                    ) : (
+                      <span className="sc-diff-flat">—</span>
+                    ),
+                },
+              ]} />
+          ) : (
+            <Alert type="success" showIcon
+              message={`全部 ${successCount} 张 K3 单据已生成（未审核），待仓管员在 K3 中审核`}
+              description={wbs
+                .filter((w) => w.status === 'success' && w.erp_bill_no)
+                .map((w) => `${w.bill_type === 'gain' ? '盘盈' : '盘亏调拨'} ${w.erp_bill_no}（${w.wh_name || w.wh_code || `仓库#${w.wh_id}`}）`)
+                .join('　')} />
+          )}
         </Card>
-      )}
+        );
+      })()}
 
-      {/* ===== 进度卡带 ===== */}
-      <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
-        {statCards.map((c) => (
-          <Col key={c.label} xs={12} md={8} xl={4}>
-            <div className="sc-stat-card slim" style={{ '--accent': c.accent, '--accent-bg': c.accentBg, height: '100%' } as CSSProperties}>
-              <div className="sc-stat-icon">{c.icon}</div>
-              <div style={{ minWidth: 0 }}>
-                <div className="sc-stat-label">{c.label}</div>
-                <div className="sc-stat-value" style={{ ...c.valueStyle, whiteSpace: 'nowrap' }}>{c.value}</div>
-              </div>
-            </div>
-          </Col>
-        ))}
-      </Row>
+      {/* ===== 全屏模式 · 摘要条 ===== */}
+      {fullscreen && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/stock-check')}>返回</Button>
+          <ScTag variant={STATUS_MAP[activeCheck.status || '']?.variant || 'wait'}>
+            {STATUS_MAP[activeCheck.status || '']?.label || activeCheck.status}
+          </ScTag>
+          <ScTag variant={typeTag.variant}>{typeTag.label}盘点</ScTag>
+          {(activeCheck.co_checkers || []).length > 0 && (
+            <ScTag variant="plain">
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
+              协同盘点
+            </ScTag>
+          )}
+          {activeCheck.can_edit === false && <ScTag variant="warn">只读（无修改权限）</ScTag>}
+          <span className="sc-mono" style={{ fontWeight: 600 }}>{activeCheck.check_no}</span>
+          {activeCheck.order_no && (
+            <Button type="link" size="small" className="sc-mono" style={{ padding: 0 }} onClick={() => navigate(`/orders/${activeCheck.order_no}`)}>
+              {activeCheck.order_no}
+            </Button>
+          )}
+          <span className="sc-note" style={{ marginLeft: 'auto', flexShrink: 0 }}>ESC 或右上角按钮退出全屏</span>
+        </div>
+      )}
 
       {/* ===== 工具条 ===== */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -1453,24 +1703,44 @@ export default function StockCheckWorkbench() {
             </Button>
           </span>
         )}
-        <span style={{ marginLeft: 'auto' }} data-tour="stock-check-actions">
+        <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 8 }} data-tour="stock-check-actions">
+          <Tooltip title={fullscreen ? '退出全屏 (ESC)' : '全屏'}>
+            <Button
+              icon={fullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+              onClick={() => setFullscreen((v) => !v)}
+            >
+              {fullscreen ? '退出全屏' : '全屏'}
+            </Button>
+          </Tooltip>
           <Button type="primary" icon={<CheckCircleOutlined />} disabled={readonly} onClick={handleComplete}>
             标记完成
           </Button>
         </span>
       </div>
 
-      {/* ===== 明细表 ===== */}
-      <div data-tour="stock-check-table">
-        <Card styles={{ body: { padding: 0 } }}>
-          <Spin spinning={loading}>
-            <Table
-              rowKey="id"
-              size="small"
-              dataSource={tableItems}
-              columns={columns as any}
-              pagination={false}
-              scroll={{ x: 1300, y: 560 }}
+      {/* ===== 明细表（占满剩余高度，表格内部滚动） ===== */}
+      <div
+        data-tour="stock-check-table"
+        ref={attachDetailSection}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          // 底部预留空间，避免 fixed 保存条遮挡表格内容
+          paddingBottom: dirtyItems.length > 0 ? 56 : 8,
+        }}
+      >
+        <Card styles={{ body: { padding: 0, flex: 1, minHeight: 0 } }} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <Spin spinning={loading}>
+              <Table
+                rowKey="id"
+                size="small"
+                dataSource={tableItems}
+                columns={columns as any}
+                pagination={false}
+                scroll={{ x: 1300, y: tableScrollY }}
               onChange={(_pagination, filters) => setColumnFilters(filters as Record<string, unknown>)}
               rowClassName={(r: StockCheckItem) => (r.actual_qty == null && !hasRecentMark(r) ? 'sc-unchecked' : '')}
               rowSelection={readonly ? undefined : {
@@ -1519,7 +1789,8 @@ export default function StockCheckWorkbench() {
                 )
               }}
             />
-          </Spin>
+            </Spin>
+          </div>
         </Card>
       </div>
 
@@ -1536,6 +1807,84 @@ export default function StockCheckWorkbench() {
       )}
 
       <Tour open={tourOpen} steps={tourSteps} onClose={handleTourClose} onFinish={handleTourClose} />
+
+      {/* ===== 完结确认弹窗（K3 回写分组预览 · 完结并回写 / 仅完结） ===== */}
+      {(() => {
+        // source='k3' 的单后端永不回写(plan_writebacks 直接跳过)，不展示回写预览与按钮
+        const wbAvailable = !writebackPreview.disabled && writebackPreview.bills.length > 0
+        // 未盘行(未录实盘且非近期已盘免盘):完结后视为放弃盘点
+        const uncheckedCount = items.filter(it => it.actual_qty == null && !hasRecentMark(it)).length
+        return (
+        <Modal
+          open={completeOpen}
+          title={`完结盘点 · ${activeCheck?.check_no ?? ''}`}
+          width={600}
+          maskClosable={false}
+          onCancel={() => { if (!completing) setCompleteOpen(false) }}
+          footer={
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ marginRight: 'auto', fontSize: 12, color: '#94a3b8' }}>回写失败不影响完结结果</span>
+              {wbAvailable && (
+                <Button loading={completing && completeMode === 'only'} disabled={completing && completeMode !== 'only'} onClick={() => doComplete(false)}>
+                  仅完结，稍后回写
+                </Button>
+              )}
+              <Button type="primary" icon={<CheckCircleOutlined />}
+                loading={completing && completeMode === 'writeback'}
+                disabled={completing && completeMode !== 'writeback'}
+                onClick={() => doComplete(true)}>
+                {wbAvailable ? '完结并回写 K3' : '完结'}
+              </Button>
+            </span>
+          }
+        >
+          <div style={{ marginBottom: 12, color: '#475569' }}>
+            应盘 <b>{activeCheck?.total_materials ?? '—'}</b> 项 · 已盘 <b>{activeCheck?.checked_materials ?? '—'}</b> 项 · 盘差 <b>{writebackPreview.diffRows}</b> 行（盈 {writebackPreview.gainRows} · 亏 {writebackPreview.lossRows}）· 完结后所有行不可再修改
+          </div>
+          {uncheckedCount > 0 && (
+            <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+              message={`还有 ${uncheckedCount} 行未盘点`}
+              description="完结后未盘行视为放弃盘点：不产生差异、不生成 K3 单据，且不可再录入。如需计入这些物料，请先完成盘点或点「重盘」。" />
+          )}
+          {wbAvailable ? (
+            <>
+              <div style={{ fontSize: 12.5, color: '#475569', fontWeight: 500, marginBottom: 6 }}>
+                将按（单据类型 × 仓库）分组生成 <b style={{ color: '#0f172a' }}>{writebackPreview.bills.length} 张 K3 单据</b>（未审核）：
+              </div>
+              <Table size="small" rowKey="key" pagination={false} dataSource={writebackPreview.bills}
+                columns={[
+                  {
+                    title: '单据类型', dataIndex: 'bill_type', width: 210,
+                    render: (v: string) => (v === 'gain' ? '盘盈入库单（YADJ）' : '盘亏调拨单（CHG · 调入不良仓）'),
+                  },
+                  { title: '仓库', dataIndex: 'wh_label', width: 120 },
+                  { title: '行数', dataIndex: 'count', width: 70, align: 'right' as const },
+                  {
+                    title: '数量合计', dataIndex: 'total', width: 100, align: 'right' as const,
+                    render: (v: number) => (
+                      <span style={{ fontWeight: 500, color: '#0f172a' }}>{v}</span>
+                    ),
+                  },
+                ]} />
+              {writebackPreview.skipped.length > 0 && (
+                <Alert type="warning" showIcon style={{ marginTop: 10 }}
+                  message={`${writebackPreview.skipped.length} 行盘差物料未关联仓库，不生成单据`}
+                  description={writebackPreview.skipped.map((s, i) => (
+                    <span key={i}>
+                      {s.material_code || s.material_name || '-'}（差异 {s.diff}）{i < writebackPreview.skipped.length - 1 ? '、' : ''}
+                    </span>
+                  ))} />
+              )}
+              <Alert type="info" showIcon style={{ marginTop: 10 }}
+                message="单据写入 K3 后为未审核状态，需仓管员在 K3 中审核后库存才会调整。若 K3 暂不可用或部分失败，完结不受影响，可稍后在本页「K3 回写」卡片重试（成功单据不会重复生成）。" />
+            </>
+          ) : (
+            <Alert type="info" showIcon
+              message={writebackPreview.disabled ? 'K3 导入单不回写（K3 单据已存在）。' : '无盘差行，完结后不生成 K3 单据。'} />
+          )}
+        </Modal>
+        )
+      })()}
 
       {/* ===== 弹层 ===== */}
       <MaterialPickerModal

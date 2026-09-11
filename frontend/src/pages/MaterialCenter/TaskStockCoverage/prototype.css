@@ -50,7 +50,13 @@
   font-size: var(--fs-13);
   color: var(--text-1);
   line-height: 1.5;
-  padding: 20px 24px 32px;
+  box-sizing: border-box;
+  padding: 0;
+  /* 整页收敛在视口内：窗口不出现滚动条，仅内部区块滚动（与重设计系列页面一致） */
+  height: calc(100vh - 104px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .tsc a { color: var(--brand-600); text-decoration: none; }
@@ -190,6 +196,30 @@
   border-bottom: none;
 }
 .tsc tr.aggregate .lbl { color: var(--gray-500); font-weight: 500; }
+/* 固定列宽下合计行文案允许换行，避免溢出 */
+.tsc tr.aggregate td.lbl { white-space: normal; }
+
+/* ---------- 列宽拖动（视图 A 主表）：fixed 布局 + colgroup 控宽 ---------- */
+.tsc .list-card table.tbl { table-layout: fixed; }
+/* 固定列宽下超长内容截断省略，避免跨列重叠（可换行单元格不受影响） */
+.tsc .list-card table.tbl td { overflow: hidden; text-overflow: ellipsis; }
+/* 表头吸顶：垂直滚动时固定在表格区顶部（border-collapse 下 sticky 单元格边框
+   会不随吸顶移动，改用 box-shadow 画底线规避） */
+.tsc .list-card .tbl th {
+  position: sticky; top: 0; z-index: 20;
+  border-bottom: none;
+  box-shadow: 0 1px 0 var(--border);
+}
+.tsc .th-resizer {
+  position: absolute; top: 0; bottom: 0; right: 0; width: 7px;
+  cursor: col-resize; touch-action: none; user-select: none; z-index: 6;
+}
+.tsc .th-resizer::after {
+  content: ''; position: absolute; top: 30%; bottom: 30%; right: 2px; width: 2px; border-radius: 1px;
+  background: transparent; transition: background .12s;
+}
+.tsc .th-resizer:hover::after { background: var(--brand-200, #c7d7fe); }
+.tsc .th-resizer:active::after { background: var(--brand-500); }
 
 /* ---------- 表头排序 / 筛选（统一列控制渲染，图标右聚对齐） ---------- */
 .tsc .th-cell { display: inline-flex; align-items: center; gap: 2px; position: relative; max-width: 100%; }
@@ -321,6 +351,15 @@
 .tsc .smp-toggle.on { border-color: var(--brand-400); background: var(--brand-50); }
 .tsc .smp-toggle.on span { color: var(--brand-600); font-weight: 500; }
 
+/* 「已盘窗口」选择 pill（字号随 --font-size-scale 缩放） */
+.tsc .rd-pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 30px; padding: 0 12px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  font-size: var(--fs-12); color: var(--text-2); white-space: nowrap;
+}
+.tsc .rd-pill > svg { width: 13px; height: 13px; color: var(--text-3); flex-shrink: 0; }
+
 .tsc .nb-alert {
   display: flex; align-items: flex-start; gap: 9px;
   padding: 10px 14px; margin-bottom: 12px;
@@ -335,9 +374,12 @@
 .tsc .rate-mini span { font-size: calc(11px * var(--font-size-scale)); color: var(--text-3); font-variant-numeric: tabular-nums; }
 
 .tsc .mat-cell .code { font-variant-numeric: tabular-nums; letter-spacing: .01em; color: var(--text-1); font-weight: 500; }
+.tsc .mat-cell .code-link { color: var(--brand-600); cursor: pointer; }
+.tsc .mat-cell .code-link:hover { text-decoration: underline; }
 .tsc .mat-cell .sub {
-  font-size: calc(11px * var(--font-size-scale)); color: var(--text-3); margin-top: 1px; white-space: nowrap;
-  max-width: 300px; overflow: hidden; text-overflow: ellipsis;
+  /* 物料名称完整显示：自动换行，不截断 */
+  font-size: calc(11px * var(--font-size-scale)); color: var(--text-3); margin-top: 1px;
+  white-space: normal; word-break: break-all; line-height: 1.45;
 }
 .tsc .wh-none { color: var(--gray-400); font-style: italic; }
 
@@ -388,8 +430,23 @@
 .tsc .wh-foot { display: flex; gap: 8px; padding: 10px 16px 14px; }
 .tsc .wh-foot .btn { flex: 1; }
 
-.tsc .variant { display: none; }
-.tsc .variant.show { display: block; }
+.tsc .variant { display: none; flex: 1 1 auto; min-height: 0; flex-direction: column; overflow: hidden; }
+.tsc .variant.show { display: flex; }
+
+/* ---------- 视口收敛布局（窗口不出现滚动条） ---------- */
+/* 视图 A：统计卡/工具栏固定，表格区内部滚动，分页条常驻卡片底部 */
+.tsc .list-card {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.tsc .list-card .tbl-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.tsc .list-card .pager { flex: 0 0 auto; }
+/* 视图 C：仓库执行包卡片区内部滚动 */
+.tsc .wh-grid {
+  flex: 1 1 auto; min-height: 0;
+  overflow: auto; align-content: start;
+}
+.tsc .batch-bar { flex: 0 0 auto; }
 
 .tsc .hint-line { font-size: calc(11.5px * var(--font-size-scale)); color: var(--text-3); }
 

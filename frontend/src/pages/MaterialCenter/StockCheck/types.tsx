@@ -99,6 +99,8 @@ export interface StockCheck {
   completed_at?: string | null
   gain_count?: number | null
   loss_count?: number | null
+  writeback_pending?: number | null
+  writeback_failed?: number | null
   remark?: string | null
   covered_products?: CoveredProduct[] | null
   co_checker_user_ids?: number[] | null
@@ -143,6 +145,7 @@ export interface StockCheckKpiData {
   pending_gain_count: number
   pending_loss_count: number
   recent7_checked_materials: number
+  writeback_todo_checks?: number
 }
 
 // 标签变体（对照原型 styles.css 的 tag 配色）

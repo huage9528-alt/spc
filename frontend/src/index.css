@@ -1009,6 +1009,12 @@ tr.ant-table-row:hover .sc-row-act { opacity: 1; }
 }
 .sc-page .ant-table-thead > tr > th::before { display: none; }
 .sc-page .ant-table-column-sort { background: transparent !important; }
+/* 表头：标题溢出省略，排序/筛选图标与文字不重叠 */
+.sc-page .ant-table-thead > tr > th .ant-table-column-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .sc-page .ant-table-tbody > tr > td {
   padding: 8px 12px;
   color: #475569;

@@ -10,7 +10,7 @@ class Employee(Base):
     __tablename__ = "scm_employee"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    emp_code = Column(String(20), nullable=False, unique=True, comment="员工工号")
+    emp_code = Column(String(20), nullable=True, unique=True, comment="员工工号（可空；ERP 同步不再用 oa_user_id/login_id 兜底填充）")
     emp_name = Column(String(50), nullable=False, comment="员工姓名")
     org_id = Column(BigInteger, nullable=True, comment="所属组织ID（主部门）")
     position_id = Column(BigInteger, nullable=True, comment="岗位ID")

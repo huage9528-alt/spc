@@ -57,6 +57,7 @@ class SaleOrder(Base):
     assembly_start_date = Column(Date, comment="组装上线日期")
     assembly_complete_date = Column(Date, comment="组装完成日期")
     is_closed = Column(Integer, nullable=False, server_default='0', default=0, comment="是否关闭")
+    is_deleted = Column(Integer, nullable=False, server_default='0', default=0, comment="是否删除 0否1是")
     remark = Column(Text, comment="备注")
 
     # ── 风险评估字段 ──
