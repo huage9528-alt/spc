@@ -15,6 +15,7 @@ from app.api.v1.production.production_daily_report import router as daily_report
 from app.api.v1.production.workshop_daily_report import router as workshop_daily_report_router
 from app.api.v1.production.reports import router as reports_router
 from app.api.v1.production.labor_price_audit import router as labor_price_audit_router
+from app.api.v1.production.order_wage_lookup import router as order_wage_lookup_router
 
 router = APIRouter()
 
@@ -33,3 +34,4 @@ router.include_router(daily_report_router, prefix="/daily-reports", tags=["生�
 router.include_router(workshop_daily_report_router, prefix="/workshop-daily-reports", tags=["车间日报表"])
 router.include_router(reports_router, prefix="/reports", tags=["报工"])
 router.include_router(labor_price_audit_router, prefix="/labor-price-audits", tags=["工价审核"])
+router.include_router(order_wage_lookup_router, prefix="/order-wage-lookup", tags=["订单工价查询"])

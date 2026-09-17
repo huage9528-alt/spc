@@ -177,4 +177,8 @@ export const productionApi = {
   createReport: (data: Record<string, any>) => api.post('/production/reports', data),
   listReports: (params: Record<string, any>) => api.get('/production/reports', { params }),
   dailyReportDraft: (params: Record<string, any>) => api.get('/production/reports/daily-report-draft', { params }),
+  // 订单工价查询
+  lookupOrderWage: (params: Record<string, any>) => api.get('/production/order-wage-lookup', { params }),
+  lookupAssemblyTaskOrders: (params: Record<string, any>) => api.get('/production/order-wage-lookup/task-orders', { params }),
+  syncOrderWageFromOA: () => api.post('/production/order-wage-lookup/sync-oa', null, { timeout: 180000 }),
 }

@@ -79,6 +79,7 @@ import Assembly from './pages/ProductionCenter/Assembly/index'
 import Packaging from './pages/ProductionCenter/Packaging/index'
 import ProcessExceptions from './pages/ProductionCenter/ProcessExceptions/index'
 import ProductProcessCapacity from './pages/ProductionCenter/ProductProcessCapacity/index'
+import OrderWageLookup from './pages/ProductionCenter/OrderWageLookup/index'
 import DailyReports from './pages/ProductionCenter/DailyReports/index'
 import WorkshopDailyReportForm from './pages/ProductionCenter/DailyReports/ReportForm'
 import ProductionReports from './pages/ProductionCenter/ProductionReports/index'
@@ -226,6 +227,7 @@ export default function App() {
                             <Route path="assembly" element={<Assembly/>}/>
                             <Route path="packaging" element={<Packaging/>}/>
                             <Route path="product-process-capacities" element={<ProductProcessCapacity/>}/>
+                            <Route path="order-wage-lookup" element={<OrderWageLookup/>}/>
                             <Route path="process-exceptions" element={<ProcessExceptions/>}/>
                             <Route path="daily-reports" element={<DailyReports/>}/>
                             <Route path="production-reports" element={<ProductionReports/>}/>

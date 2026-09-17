@@ -201,6 +201,7 @@ declare_permission("production.packaging", "包装管理", module="production", 
 declare_permission("production.exceptions", "工序异常池", module="production", parent_code="production", route_path="/process-exceptions", sort_order=9)
 declare_permission("production.daily_report", "生产日报表", module="production", parent_code="production", route_path="/daily-reports", sort_order=10)
 declare_permission("production.labor_price_audit", "工价审核", module="production", parent_code="production", route_path="/labor-price-audits", sort_order=11)
+declare_permission("production.order_wage_lookup", "订单工价查询", module="production", parent_code="production", route_path="/order-wage-lookup", sort_order=12, actions=["read"])
 
 # 异常与质量中心
 declare_permission("exceptions", "异常与质量中心", module="exceptions", sort_order=6)

@@ -9,6 +9,8 @@ ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
     "admin": {
         "production.schedule_plans": FULL_ACTIONS,
         "production.daily_report": FULL_ACTIONS,
+        "production.labor_price_audit": ["read"],
+        "production.order_wage_lookup": ["read"],
         "exceptions.product_samples": FULL_ACTIONS,
         "rules.order_standards": FULL_ACTIONS,
         "rules.work_instructions": FULL_ACTIONS,
@@ -20,6 +22,7 @@ ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
     },
     "planner": {
         "production.schedule_plans": ["read", "update"],
+        "production.order_wage_lookup": ["read"],
         "exceptions.product_samples": ["read", "update"],
         "materials.scrap_inventory": ["read"],
         "materials.task_stock_check": ["read"],
@@ -30,6 +33,7 @@ ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
     },
     "manager": {
         "production.schedule_plans": ["read", "update"],
+        "production.order_wage_lookup": ["read"],
         "exceptions.product_samples": ["read", "update"],
         "rules.order_standards": ["read", "update"],
         "rules.work_instructions": ["read", "update"],
@@ -47,6 +51,8 @@ ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
     "quality": {
         "materials.subcontract_orders": ["read"],
     },
+    "org27_pos76": {
+        "production.order_wage_lookup": ["read"],
     "purchase_manager": {
         "materials.task_stock_check": ["read"],
     },
