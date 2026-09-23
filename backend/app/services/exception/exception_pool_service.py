@@ -6,8 +6,6 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.exception.risk_issue import RiskIssue
-from app.models.exception.issue_log import IssueLog
-from app.models.exception.change_log import ChangeLog
 from app.models.exception.quality_issue import QualityIssue
 from app.models.production.process_exception import ProcessException
 from app.schemas.exception.schemas import (
@@ -123,46 +121,6 @@ async def get_exception_pool(
                 severity=r.severity,
                 owner=r.responsible_person,
                 order_no=r.order_no,
-                created_at=r.created_at,
-            ))
-
-    # --- IssueLog (read-only, always show) ---
-    if not source_type or source_type == "issue_log":
-        q = select(IssueLog)
-        if keyword:
-            like = f'%{keyword}%'
-            q = q.where(IssueLog.description.ilike(like))
-        result = await db.execute(q.order_by(IssueLog.created_at.desc()))
-        for r in result.scalars().all():
-            items.append(ExceptionPoolItem(
-                source_type="issue_log",
-                source_id=r.id,
-                source_no=f"IL-{r.seq_no or r.id:04d}",
-                title=r.description,
-                status='open',  # IssueLog has no status field
-                severity=None,
-                owner=r.recorder,
-                order_no=None,
-                created_at=r.created_at,
-            ))
-
-    # --- ChangeLog (read-only, always show) ---
-    if not source_type or source_type == "change_log":
-        q = select(ChangeLog)
-        if keyword:
-            like = f'%{keyword}%'
-            q = q.where(ChangeLog.change_content.ilike(like))
-        result = await db.execute(q.order_by(ChangeLog.created_at.desc()))
-        for r in result.scalars().all():
-            items.append(ExceptionPoolItem(
-                source_type="change_log",
-                source_id=r.id,
-                source_no=f"CL-{r.seq_no or r.id:04d}",
-                title=r.change_content,
-                status='open',  # ChangeLog has no status field
-                severity=None,
-                owner=r.modifier,
-                order_no=None,
                 created_at=r.created_at,
             ))
 

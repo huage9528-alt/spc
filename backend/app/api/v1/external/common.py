@@ -16,6 +16,15 @@ class ExternalPage(BaseModel, Generic[T]):
     page_size: int = Field(..., description="每页条数")
 
 
+class ExternalDataPage(ExternalPage[T]):
+    """带数据新鲜度元信息的分页响应（齐套/供给类接口专用；MCP 层读取顶层 data_as_of/stale）"""
+
+    data_as_of: Optional[str] = Field(None, description="数据业务时点（源表最近成功同步时间最小值，ISO 8601）")
+    data_confidence: Optional[str] = Field(None, description="数据置信度 high/medium/low")
+    stale: Optional[bool] = Field(None, description="数据是否超过新鲜度阈值（24h）")
+    request_id: Optional[str] = Field(None, description="调用方请求 ID（回显）")
+
+
 class ExternalQuery(BaseModel):
     """对外接口 query 参数基类
 

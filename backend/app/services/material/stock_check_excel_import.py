@@ -29,6 +29,7 @@ from app.services.material.stock_check_service import (
     QUICK_CHECK_TITLE_PREFIX,
     _close_stale_quick_checks,
     _current_user_id,
+    _exclude_check_wh_from_stock_map,
     _gen_check_no,
     _get_stock_by_warehouse,
     _next_seq_for_today,
@@ -274,6 +275,8 @@ async def import_quick_count_excel(
     stock_map: Dict[Tuple[int, int], Tuple[str, Decimal, Optional[datetime]]] = {}
     for i in range(0, len(mids), IMPORT_CHUNK_SIZE):
         stock_map.update(await _get_stock_by_warehouse(db, mids[i:i + IMPORT_CHUNK_SIZE]))
+    # 库存检查不良仓不纳入快捷盘点(与搜索/录入口径一致): 自动匹配/展开/精确名匹配均跳过
+    stock_map = _exclude_check_wh_from_stock_map(stock_map)
     whs_by_mid: Dict[int, List[Tuple[int, str]]] = {}
     for (mid, wh_id), (wh_name, _q, _t) in stock_map.items():
         whs_by_mid.setdefault(mid, []).append((wh_id, wh_name))

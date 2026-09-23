@@ -48,6 +48,12 @@ K3_FENTRYID_STEP = 1           # FEntryID 步长: 生产库实证 1 递增
 K3_GAIN_INVENTORY_TYPE = 36700
 K3_TRANSFER_REF_TYPE = 12561
 
+# K3 回写阶段按 wh_name 排除的盘点行。
+# 库存检查不良仓是盘亏在 K3 的目标仓(t_Stock.FItemID=92852),其盘点行本身不是
+# K3 库存盘点的合法对象;源头候选仓库已通过 stock_check_service.CHECK_EXCLUDED_WH_NAMES
+# 排除,此处为双重防御:历史脏数据 / 迁移残留 / 绕过 UI 校验的追加都不会触发 K3 单据。
+EXCLUDED_WH_NAMES_FOR_WRITEBACK = {"库存检查不良仓"}
+
 
 async def plan_writebacks(db: AsyncSession, head: StockCheck) -> List[StockCheckK3Writeback]:
     """完结事务内调用:按盘差行×盘点人分组生成 pending 回写记录。幂等(已有记录则跳过)。
@@ -70,6 +76,12 @@ async def plan_writebacks(db: AsyncSession, head: StockCheck) -> List[StockCheck
     diff_items = [
         it for it in items
         if Decimal(str(it.diff_qty or 0)) != 0 and it.wh_id is not None
+    ]
+    # K3 回写阶段双重防御:库存检查不良仓本身不是盘点对象,其盘差不生成 K3 单据
+    # (这类行通过 get_writeback_overview.skipped_items 透出给前端)
+    diff_items = [
+        it for it in diff_items
+        if (it.wh_name or "").strip() not in EXCLUDED_WH_NAMES_FOR_WRITEBACK
     ]
 
     # 一次 JOIN 查盘点人 → K3 员工 ID (counter_user_id -> erp_user_id)
@@ -117,7 +129,7 @@ async def plan_writebacks(db: AsyncSession, head: StockCheck) -> List[StockCheck
 
 
 async def get_writeback_overview(db: AsyncSession, check_id: int) -> Dict:
-    """回写记录列表 + 无仓库被跳过的盘差行清单。"""
+    """回写记录列表 + 跳过清单(含 wh_id=NULL 与 wh_name=库存检查不良仓 的盘差行)。"""
     records = (await db.execute(
         select(StockCheckK3Writeback)
         .where(StockCheckK3Writeback.check_id == check_id)
@@ -127,21 +139,28 @@ async def get_writeback_overview(db: AsyncSession, check_id: int) -> Dict:
         select(StockCheckItem)
         .where(
             StockCheckItem.check_id == check_id,
-            StockCheckItem.wh_id.is_(None),
             StockCheckItem.diff_qty != 0,
         )
     )).scalars().all()
+    skipped_items: List[Dict] = []
+    for it in skipped:
+        reason: Optional[str] = None
+        if it.wh_id is None:
+            reason = "盘点行无仓库(wh_id=NULL)，不生成 K3 单据"
+        elif (it.wh_name or "").strip() in EXCLUDED_WH_NAMES_FOR_WRITEBACK:
+            reason = "盘点行仓库为库存检查不良仓，不生成 K3 单据"
+        if reason is None:
+            continue
+        skipped_items.append({
+            "material_code": it.material_code,
+            "material_name": it.material_name,
+            "unit": it.unit,
+            "diff_qty": Decimal(str(it.diff_qty or 0)),
+            "reason": reason,
+        })
     return {
         "writebacks": list(records),
-        "skipped_items": [
-            {
-                "material_code": it.material_code,
-                "material_name": it.material_name,
-                "unit": it.unit,
-                "diff_qty": Decimal(str(it.diff_qty or 0)),
-            }
-            for it in skipped
-        ],
+        "skipped_items": skipped_items,
     }
 
 

@@ -54,7 +54,7 @@ interface OrgNode {
 
 interface OrgInfo {
   org_name: string
-  parentKey: string | null
+  ancestors: string[]
 }
 
 interface OrgTreeSelectNode {
@@ -100,16 +100,16 @@ const csvEscape = (v: unknown): string => {
 
 const flattenOrgTree = (
   nodes: OrgNode[],
-  parentKey: string | null,
+  ancestors: string[],
   byKey: Map<string, OrgInfo>,
   byInternal: Map<number, OrgInfo>,
 ) => {
   for (const n of nodes) {
     const key = String(n.oa_org_id || n.id)
-    const info: OrgInfo = { org_name: n.org_name, parentKey }
+    const info: OrgInfo = { org_name: n.org_name, ancestors }
     byKey.set(key, info)
     if (!byInternal.has(n.id)) byInternal.set(n.id, info)
-    if (n.children?.length) flattenOrgTree(n.children, key, byKey, byInternal)
+    if (n.children?.length) flattenOrgTree(n.children, [...ancestors, n.org_name], byKey, byInternal)
   }
 }
 
@@ -180,7 +180,7 @@ export default function Employees() {
         const roots: OrgNode[] = res.data || []
         const byKey = new Map<string, OrgInfo>()
         const byInternal = new Map<number, OrgInfo>()
-        flattenOrgTree(roots, null, byKey, byInternal)
+        flattenOrgTree(roots, [], byKey, byInternal)
         setOrgByKey(byKey)
         setOrgByInternal(byInternal)
         setOrgTreeData(toOrgTreeData(roots))
@@ -214,16 +214,17 @@ export default function Employees() {
   }
 
   const resolveOrg = (orgId?: number | null): OrgInfo | undefined =>
-    orgId == null ? undefined : orgByInternal.get(orgId) ?? orgByKey.get(String(orgId))
+    orgId == null ? undefined : orgByKey.get(String(orgId)) ?? orgByInternal.get(orgId)
 
   const renderOrgPath = (orgId?: number | null) => {
     if (orgId == null) return <span className="sc-note">—</span>
     const info = resolveOrg(orgId)
     if (!info) return <span className="sc-mono">#{orgId}</span>
-    const parent = info.parentKey ? orgByKey.get(info.parentKey) : undefined
     return (
       <div>
-        {parent && <div style={{ fontSize: 11, color: '#94a3b8' }}>{parent.org_name}</div>}
+        {info.ancestors.length > 0 && (
+          <div style={{ fontSize: 11, color: '#94a3b8' }}>{info.ancestors.join(' / ')}</div>
+        )}
         <div>{info.org_name}</div>
       </div>
     )
@@ -231,18 +232,9 @@ export default function Employees() {
 
   const buildOrgCrumb = (orgId?: number | null): string[] => {
     if (orgId == null) return []
-    const names: string[] = []
-    let cur = resolveOrg(orgId)
-    let guard = 0
-    while (cur && guard < 20) {
-      names.unshift(cur.org_name)
-      if (!cur.parentKey) break
-      const parent = orgByKey.get(cur.parentKey)
-      if (!parent) break
-      cur = parent
-      guard += 1
-    }
-    return names
+    const info = resolveOrg(orgId)
+    if (!info) return []
+    return [...info.ancestors, info.org_name]
   }
 
   const handleAdd = () => {

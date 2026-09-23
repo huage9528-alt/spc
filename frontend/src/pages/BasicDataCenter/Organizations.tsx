@@ -304,6 +304,7 @@ export default function Organizations() {
       return
     }
     setEmployeesLoading(true)
+    const params = { ...(kw ? { keyword: kw } : {}), status: '0,1,2,3' }
     try {
       if (sc === 'sub') {
         const tree: OrganizationTreeNode[] = (window as any).lastOrgTreeData || []
@@ -316,7 +317,7 @@ export default function Organizations() {
         }
         const results = await Promise.all(
           capped.map(id =>
-            api.get(`/basicdata/organizations/${id}/employees`, kw ? { params: { keyword: kw } } : undefined).catch(() => null),
+            api.get(`/basicdata/organizations/${id}/employees`, { params }).catch(() => null),
           ),
         )
         const byId = new Map<number, Employee>()
@@ -331,7 +332,7 @@ export default function Organizations() {
       } else {
         const res: any = await api.get(
           `/basicdata/organizations/${queryId}/employees`,
-          kw ? { params: { keyword: kw } } : undefined,
+          { params },
         )
         setEmployees(res.data?.items || [])
       }

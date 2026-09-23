@@ -1,6 +1,7 @@
-"""CSV导入服务 — 解析 1.点检.csv 和 2.跑单.csv 到数据库"""
+"""订单导入服务 — 解析 1.点检.csv / 2.跑单.csv / 出货计划表(CSV/XLSX) 到数据库"""
 
 import csv
+import io
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.core.audit import log_audit
 from app.models.order.sale_order import SaleOrder
 from app.models.order.run_order import RunOrder
 
@@ -317,3 +319,142 @@ async def import_run_order_csv(filepath: str, db: AsyncSession) -> dict:
 
     await db.flush()
     return {'created': created, 'updated': updated, 'skipped': skipped}
+
+
+# ── 出货计划表导入（销售订单号 + 计划时间 → sale_order.shipping_plan）──
+
+SHIPPING_PLAN_ORDER_COLUMN = "销售订单号"
+SHIPPING_PLAN_DATE_COLUMN = "计划时间"
+IMPORT_HEADER_SCAN_ROWS = 10
+
+
+def _decode_upload_text(content: bytes) -> str:
+    """上传文件解码：优先 UTF-8(BOM)，回退 GBK/GB18030（出货计划表常为 GBK）"""
+    for encoding in ("utf-8-sig", "gbk", "gb18030"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def _read_upload_rows(content: bytes, filename: str) -> list[list[str]]:
+    """读取上传的 .csv / .xlsx 为二维字符串表（单元格去空白，日期归一为 YYYY-MM-DD）"""
+    if filename.lower().endswith(".xlsx"):
+        from openpyxl import load_workbook
+
+        def to_text(cell) -> str:
+            if cell is None:
+                return ""
+            if isinstance(cell, datetime):
+                return cell.strftime("%Y-%m-%d")
+            if isinstance(cell, date):
+                return cell.isoformat()
+            return str(cell).strip()
+
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        try:
+            sheet = workbook.active
+            return [[to_text(cell) for cell in row] for row in sheet.iter_rows(values_only=True)]
+        finally:
+            workbook.close()
+    return [
+        [(cell or "").strip() for cell in row]
+        for row in csv.reader(io.StringIO(_decode_upload_text(content)))
+    ]
+
+
+def _locate_header(rows: list[list[str]]) -> Optional[tuple[int, int, int]]:
+    """在前 N 行内找含「销售订单号」「计划时间」的表头行，返回 (表头行索引, 订单号列, 计划时间列)"""
+    for idx, row in enumerate(rows[:IMPORT_HEADER_SCAN_ROWS]):
+        if SHIPPING_PLAN_ORDER_COLUMN in row and SHIPPING_PLAN_DATE_COLUMN in row:
+            return idx, row.index(SHIPPING_PLAN_ORDER_COLUMN), row.index(SHIPPING_PLAN_DATE_COLUMN)
+    return None
+
+
+async def import_shipping_plan(content: bytes, filename: str, db: AsyncSession, operator: str = "system") -> dict:
+    """导入出货计划表：按表头名取「销售订单号」「计划时间」，只更新订单头 shipping_plan。
+
+    - 支持 .csv(UTF-8/GBK) 与 .xlsx；计划时间无年份按当前年（复用 _parse_date）
+    - 重号订单取最新一条（id 最大），与 1.点检导入一致
+    - 实际变更写 audit_log，供订单总控台「出货计划变更时间线」展示
+    """
+    rows = _read_upload_rows(content, filename)
+    located = _locate_header(rows)
+    if not located:
+        raise ValueError(
+            f"未找到表头：前 {IMPORT_HEADER_SCAN_ROWS} 行需同时包含"
+            f"「{SHIPPING_PLAN_ORDER_COLUMN}」和「{SHIPPING_PLAN_DATE_COLUMN}」两列"
+        )
+    header_idx, order_col, date_col = located
+    header = rows[header_idx]
+    customer_col = header.index("客户编号") if "客户编号" in header else None
+    qty_col = header.index("数量") if "数量" in header else None
+
+    def cell(row: list[str], col: Optional[int]) -> str:
+        return row[col].strip() if col is not None and col < len(row) else ""
+
+    updated = unchanged = not_found = invalid = 0
+    result_rows: list[dict] = []
+
+    for row_no, row in enumerate(rows[header_idx + 1:], start=header_idx + 2):
+        order_no = cell(row, order_col)
+        plan_raw = cell(row, date_col)
+        if not order_no and not plan_raw:
+            continue
+
+        row_result = {
+            "row_no": row_no,
+            "order_no": order_no,
+            "customer_code": cell(row, customer_col),
+            "qty": cell(row, qty_col),
+            "plan_date": None,
+        }
+
+        if not order_no:
+            invalid += 1
+            result_rows.append({**row_result, "status": "invalid", "message": "销售订单号为空"})
+            continue
+
+        plan_date = _parse_date(plan_raw)
+        if plan_date is None:
+            invalid += 1
+            result_rows.append({**row_result, "status": "invalid", "message": f"计划时间无法解析：{plan_raw or '(空)'}"})
+            continue
+        row_result["plan_date"] = plan_date.isoformat()
+
+        order_result = await db.execute(
+            select(SaleOrder).where(SaleOrder.order_no == order_no).order_by(SaleOrder.id.desc()).limit(1)
+        )
+        order = order_result.scalar_one_or_none()
+        if not order:
+            not_found += 1
+            result_rows.append({**row_result, "status": "not_found", "message": "订单不存在"})
+            continue
+
+        if order.shipping_plan == plan_date:
+            unchanged += 1
+            result_rows.append({**row_result, "status": "unchanged", "message": "出货计划无变化"})
+            continue
+
+        old_plan = order.shipping_plan
+        await log_audit(
+            db, "sale_order", order.id, "update",
+            old_obj=order, update_data={"shipping_plan": plan_date}, operator=operator,
+        )
+        order.shipping_plan = plan_date
+        updated += 1
+        result_rows.append({
+            **row_result,
+            "status": "updated",
+            "message": f"{old_plan.isoformat() if old_plan else '(空)'} → {plan_date.isoformat()}",
+        })
+
+    await db.flush()
+    return {
+        "updated": updated,
+        "unchanged": unchanged,
+        "not_found": not_found,
+        "invalid": invalid,
+        "rows": result_rows,
+    }

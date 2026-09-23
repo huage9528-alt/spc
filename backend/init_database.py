@@ -43,14 +43,10 @@ from app.models.production.workshop_daily_report import (  # noqa: F401
     WorkshopDailyReportTask,
 )
 from app.models.exception.risk_issue import RiskIssue
-from app.models.exception.issue_log import IssueLog
-from app.models.exception.change_log import ChangeLog
 from app.models.exception.quality_issue import QualityIssue
+from app.models.quality.supplier_claim import SupplierClaim, SupplierClaimApprovalLog  # noqa: F401
 from app.models.rules.risk_rule import RiskRule
-from app.models.rules.inspection_rule import InspectionRule
 from app.models.rules.node_standard import NodeStandard
-from app.models.rules.responsibility_map import ResponsibilityMap
-from app.models.rules.status_dictionary import StatusDictionary
 from app.models.common.business_document import BusinessDocument, BusinessDocumentVersion
 from app.models.basicdata.user import SysUser, SysRole
 from app.models.basicdata.audit_log import AuditLog
@@ -132,6 +128,9 @@ class DatabaseInitializer:
         new_columns = {
             "sync_log": {
                 "server_id": "VARCHAR(64)",
+            },
+            "kitting_run": {
+                "blocked_count": "INTEGER NOT NULL DEFAULT 0",
             },
             "sale_order": {
                 "line_no": "VARCHAR(32) NOT NULL DEFAULT ''",
@@ -356,6 +355,10 @@ class DatabaseInitializer:
                 "source": "VARCHAR(16) NOT NULL DEFAULT 'manual'",
                 "erp_bill_no": "VARCHAR(64)",
                 "erp_inter_id": "BIGINT",
+                "audit_status": "VARCHAR(16)",
+                "audit_by": "VARCHAR(100)",
+                "audit_at": "TIMESTAMP",
+                "audit_comment": "TEXT",
             },
             "scm_inventory_check_item": {
                 "level": "INTEGER",
@@ -369,6 +372,10 @@ class DatabaseInitializer:
                 "counted_by": "VARCHAR(100)",
                 "counted_at": "TIMESTAMP",
                 "version": "INTEGER NOT NULL DEFAULT 0",
+                "audit_failed": "INTEGER NOT NULL DEFAULT 0",
+                "appeal_status": "VARCHAR(16)",
+                "appeal_reason": "TEXT",
+                "appeal_at": "TIMESTAMP",
             },
             "production_daily_report": {
                 "oa_detail_id": "INTEGER",
@@ -408,6 +415,10 @@ class DatabaseInitializer:
                 "wecom_user_id": "VARCHAR(64)",
                 "channel_sessions": "JSONB",
                 "scm_employee_id": "BIGINT",
+            },
+            "notification": {
+                "sender_id": "INTEGER",
+                "sender_name": "VARCHAR(64)",
             },
         }
         # 删除已废弃的列
@@ -452,6 +463,26 @@ class DatabaseInitializer:
                     print("  sys_user.channel_sessions backfilled from login_version/last_token_jti")
         except Exception as e:
             print(f"  sys_user.channel_sessions backfill skipped: {e}")
+        # 盘点抽检:存量已完结单视为已通过(NULL=老单兼容,回填后新完结单都会显式写值)
+        try:
+            async with self.engine.begin() as conn:
+                await conn.execute(text(
+                    "UPDATE scm_inventory_check SET audit_status = 'passed' "
+                    "WHERE status = 'completed' AND audit_status IS NULL"
+                ))
+            print("  scm_inventory_check.audit_status backfilled for completed checks")
+        except Exception as e:
+            print(f"  scm_inventory_check.audit_status backfill skipped: {e}")
+        # 盘点复议:复议申请通知改用独立类型(前端据此跳转复议待裁决队列),存量按标题回填(幂等)
+        try:
+            async with self.engine.begin() as conn:
+                await conn.execute(text(
+                    "UPDATE notification SET type = 'stock_check_appeal' "
+                    "WHERE type = 'stock_check_audit' AND title LIKE '%收到复议申请%'"
+                ))
+            print("  notification.stock_check_appeal backfilled for appeal applications")
+        except Exception as e:
+            print(f"  notification.stock_check_appeal backfill skipped: {e}")
         # 删除废弃列
         for table, cols in drop_columns.items():
             for col in cols:
@@ -476,7 +507,12 @@ class DatabaseInitializer:
             print(f"  subcontract_order_detail.price comment skipped: {e}")
 
         # 数据供给旧通用查询模型已下线：删除死表（幂等，每条独立事务）
-        for dead_table in ("data_supply_config", "field_mapping"):
+        # 2026-09 下线菜单模块对应表：问题日志/变更日志/点检规则/责任归属/状态字典
+        for dead_table in (
+            "data_supply_config", "field_mapping",
+            "issue_log", "change_log",
+            "inspection_rule", "responsibility_map", "status_dictionary",
+        ):
             try:
                 async with self.engine.begin() as conn:
                     await conn.execute(text(f"DROP TABLE IF EXISTS {dead_table}"))
@@ -672,6 +708,22 @@ class DatabaseInitializer:
                 print("  scm_inventory_check.erp_bill_no unique index ensured")
             except Exception as e:
                 print(f"  scm_inventory_check.erp_bill_no index skipped: {e}")
+            try:
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_scm_inventory_check_audit_status "
+                    "ON scm_inventory_check (audit_status)"
+                ))
+                print("  scm_inventory_check.audit_status index ensured")
+            except Exception as e:
+                print(f"  scm_inventory_check.audit_status index skipped: {e}")
+            try:
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_scm_inventory_check_item_appeal_status "
+                    "ON scm_inventory_check_item (appeal_status)"
+                ))
+                print("  scm_inventory_check_item.appeal_status index ensured")
+            except Exception as e:
+                print(f"  scm_inventory_check_item.appeal_status index skipped: {e}")
 
     async def migrate_production_daily_report_index(self):
         """将 production_daily_report 的唯一索引由 (oa_id) 改为 (oa_id, oa_detail_id)，
@@ -1049,18 +1101,11 @@ class DatabaseInitializer:
                             "production.schedule_plans": ["create", "read", "update", "delete"],
                             "production.daily_report": ["create", "read", "update", "delete"],
                             "exceptions.pool": ["create", "read", "update", "delete", "import"],
-                            "exceptions.issue_log": ["create", "read", "update", "delete", "import"],
-                            "exceptions.change_log": ["create", "read", "update", "delete", "import"],
                             "exceptions.quality": ["create", "read", "update", "delete", "import"],
                             "exceptions.product_samples": ["create", "read", "update", "delete"],
                             "exceptions.closure": ["create", "read", "update", "delete", "import"],
-                            "meetings": ["create", "read", "update", "delete"],
-                            "npi": ["create", "read", "update", "delete"],
                             "rules.risk_rules": ["create", "read", "update", "delete"],
-                            "rules.inspection": ["create", "read", "update", "delete"],
                             "rules.node_standards": ["create", "read", "update", "delete"],
-                            "rules.responsibility": ["create", "read", "update", "delete"],
-                            "rules.status_dict": ["create", "read", "update", "delete"],
                             "rules.order_standards": ["create", "read", "update", "delete"],
                             "rules.work_instructions": ["create", "read", "update", "delete"],
                             "basicdata.import": ["create", "read", "update", "delete", "import"],
@@ -1108,13 +1153,9 @@ class DatabaseInitializer:
                             "production.exceptions": ["read", "update", "import"],
                             "production.schedule_plans": ["read", "update"],
                             "exceptions.pool": ["read"],
-                            "exceptions.issue_log": ["read"],
-                            "exceptions.change_log": ["read"],
                             "exceptions.quality": ["read"],
                             "exceptions.product_samples": ["read", "update"],
                             "exceptions.closure": ["read"],
-                            "meetings": ["read"],
-                            "npi": ["read"],
                             "basicdata.import": ["read"],
                             "basicdata.data": ["read"],
                             "basicdata.feedback": ["create", "read"],
@@ -1147,12 +1188,8 @@ class DatabaseInitializer:
                             "purchase.price_change": ["create", "read", "update"],
                             "purchase.price_change.pending": ["read"],
                             "exceptions.pool": ["read"],
-                            "exceptions.issue_log": ["read"],
-                            "exceptions.change_log": ["read"],
                             "exceptions.quality": ["read"],
                             "exceptions.closure": ["read"],
-                            "meetings": ["read"],
-                            "npi": ["read"],
                             "basicdata.import": ["read"],
                             "basicdata.data": ["read"],
                             "basicdata.feedback": ["create", "read"],
@@ -1190,12 +1227,8 @@ class DatabaseInitializer:
                             "production.packaging": ["read", "update"],
                             "production.exceptions": ["read", "update"],
                             "exceptions.pool": ["read", "update"],
-                            "exceptions.issue_log": ["read", "update"],
-                            "exceptions.change_log": ["read", "update"],
                             "exceptions.quality": ["read", "update"],
                             "exceptions.closure": ["read", "update"],
-                            "meetings": ["create", "read", "update", "delete"],
-                            "npi": ["read"],
                             "basicdata.import": ["read"],
                             "basicdata.data": ["read"],
                             "basicdata.feedback": ["create", "read", "update"],
@@ -1229,12 +1262,8 @@ class DatabaseInitializer:
                             "purchase.price_change.pending": ["read"],
                             "purchase.price_change.config": ["create", "read", "update", "delete"],
                             "exceptions.pool": ["read", "update"],
-                            "exceptions.issue_log": ["read", "update"],
-                            "exceptions.change_log": ["read", "update"],
                             "exceptions.quality": ["read", "update"],
                             "exceptions.closure": ["read", "update"],
-                            "meetings": ["read"],
-                            "npi": ["read"],
                             "basicdata.import": ["read"],
                             "basicdata.data": ["read"],
                             "basicdata.feedback": ["create", "read", "update"],
@@ -1656,6 +1685,27 @@ class DatabaseInitializer:
             except Exception as e:
                 print(f"Error seeding price change rule config: {e}")
                 raise
+
+    async def seed_supplier_claim_approval_config(self):
+        """供应商索赔单默认审批链（仅首次插入，不覆盖运行时修改）。"""
+        async with AsyncSessionLocal() as session:
+            existing = await session.execute(text("SELECT id FROM approval_config WHERE biz_type = 'supplier_claim'"))
+            if existing.fetchone():
+                return
+            default_nodes = [
+                {"seq": 1, "label": "索赔部门意见", "role": "purchase_manager"},
+                {"seq": 2, "label": "上级部门意见", "role": "manager",
+                 "condition": {"field": "claim_amount", "op": ">=", "value": 1000}},
+                {"seq": 3, "label": "总经理意见", "role": "general_manager",
+                 "condition": {"field": "claim_amount", "op": ">=", "value": 5000}},
+                {"seq": 4, "label": "财务结算", "role": "finance"},
+            ]
+            await session.execute(text(
+                "INSERT INTO approval_config (biz_type, biz_name, nodes, is_active, updated_by) "
+                "VALUES ('supplier_claim', '供应商索赔单', :nodes, TRUE, 'system')"
+            ), {"nodes": json.dumps(default_nodes)})
+            await session.commit()
+            print("Supplier claim default approval config seeded")
 
     async def seed_sample_data(self):
         """Seed comprehensive sample data for dashboard visualization"""
@@ -2185,6 +2235,42 @@ ORDER BY FModifyDate DESC
                         created_by="admin",
                     ),
                     SyncSqlConfig(
+                        sync_type="transfer_orders",
+                        description="调拨单明细 — K3 仓库调拨单（FTranType=41，直接调拨）",
+                        sql_text="""
+SELECT
+    CAST(b.FBillNo AS VARCHAR(64))          AS transfer_no,
+    CAST(e.FEntryID AS INT)                 AS entry_id,
+    CAST(e.FItemID AS INT)                  AS material_id,
+    CAST(it.FNumber AS VARCHAR(64))         AS material_code,
+    CAST(it.FName AS VARCHAR(256))          AS material_name,
+    CAST(e.FQty AS DECIMAL(15,2))           AS qty,
+    CAST(src.FNumber AS VARCHAR(32))        AS from_wh_code,
+    CAST(dst.FNumber AS VARCHAR(32))        AS to_wh_code,
+    CAST(b.FDate AS DATE)                   AS transfer_date,
+    CAST(b.FDate AS DATE)                   AS expected_arrival_date,
+    CASE WHEN b.FStatus = 1 THEN 'confirmed' ELSE 'draft' END AS status,
+    b.FCheckDate                            AS erp_updated_at
+FROM k3sv.AIS20161019115614.dbo.ICStockBill b
+JOIN k3sv.AIS20161019115614.dbo.ICStockBillEntry e ON e.FInterID = b.FInterID
+LEFT JOIN k3sv.AIS20161019115614.dbo.t_ICItem it ON it.FItemID = e.FItemID
+LEFT JOIN k3sv.AIS20161019115614.dbo.t_Stock src ON src.FItemID = e.FSCStockID
+LEFT JOIN k3sv.AIS20161019115614.dbo.t_Stock dst ON dst.FItemID = e.FDCStockID
+WHERE b.FTranType = 41
+  AND b.FCancellation = 0
+  AND b.FDate >= DATEADD(DAY, -120, GETDATE())
+  AND b.FDate <= DATEADD(DAY, 1, GETDATE())
+ORDER BY b.FDate DESC, b.FBillNo, e.FEntryID
+                        """.strip(),
+                        field_mapping_json=None,
+                        is_active=True,
+                        sync_enabled=True,
+                        sync_interval="6h",
+                        sync_strategy="full",
+                        sync_priority=8,
+                        created_by="admin",
+                    ),
+                    SyncSqlConfig(
                         sync_type="inventory",
                         description="即时库存 — 从ERP库存表拉取（全量快照）",
                         sql_text="-- TODO: 配置 ERP 即时库存查询 SQL，返回字段需包含: material_id, material_code, material_name, wh_id, wh_code, wh_name, location_id, location_name, qty_on_hand, locked_qty, balance_qty, qty_in_transit, unit_price, ending_balance, batch_no；可选: last_inbound_at(最后入库时间), last_outbound_at(最后出库时间), last_picking_at(最后领料时间)\nSELECT NULL AS material_id, NULL AS material_code, NULL AS material_name, NULL AS wh_id, NULL AS wh_code, NULL AS wh_name, NULL AS location_id, NULL AS location_name, NULL AS qty_on_hand, NULL AS locked_qty, NULL AS balance_qty, NULL AS qty_in_transit, NULL AS unit_price, NULL AS ending_balance, NULL AS batch_no, NULL AS last_inbound_at, NULL AS last_outbound_at, NULL AS last_picking_at WHERE 1 = 0",
@@ -2374,6 +2460,7 @@ ORDER BY FModifyDate DESC
             await self.seed_roles()
             await self.seed_users()
             await self.seed_price_change_rule_config()
+            await self.seed_supplier_claim_approval_config()
             await self.seed_risk_rules()
             await self.seed_normal_order_standards()
             await self.seed_base_conditions()

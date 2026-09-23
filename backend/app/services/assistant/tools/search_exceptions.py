@@ -1,4 +1,4 @@
-"""Tool: 搜索异常 / 品质异常 / 问题日志 / 变更日志"""
+"""Tool: 搜索异常 / 品质异常"""
 
 from typing import Any, Dict
 
@@ -7,8 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.exception.risk_issue import RiskIssue
 from app.models.exception.quality_issue import QualityIssue
-from app.models.exception.issue_log import IssueLog
-from app.models.exception.change_log import ChangeLog
 from app.services.assistant.tool_registry import register_tool
 
 PARAMETERS = {
@@ -32,8 +30,8 @@ PARAMETERS = {
         },
         "exception_type": {
             "type": "string",
-            "enum": ["risk", "quality", "issue_log", "change_log"],
-            "description": "异常类别: risk=风险问题, quality=品质异常, issue_log=问题日志, change_log=变更日志。不指定则查全部。",
+            "enum": ["risk", "quality"],
+            "description": "异常类别: risk=风险问题, quality=品质异常。不指定则查全部。",
         },
         "limit": {
             "type": "integer",
@@ -46,7 +44,7 @@ PARAMETERS = {
 
 @register_tool(
     name="search_exceptions",
-    description="搜索异常与质量中心数据，包括风险问题、品质异常、问题日志、变更日志。支持按关键词、订单号、风险等级、状态、异常类别等条件查询。返回完整的异常信息。",
+    description="搜索异常与质量中心数据，包括风险问题、品质异常。支持按关键词、订单号、风险等级、状态、异常类别等条件查询。返回完整的异常信息。",
     parameters=PARAMETERS,
     display_name="异常与质量查询",
 )
@@ -161,70 +159,6 @@ async def search_exceptions(db: AsyncSession, params: Dict[str, Any]) -> Dict[st
                 "audit_comment": r.audit_comment,
                 "auditor": r.auditor,
                 "created_at": str(r.created_at) if r.created_at else None,
-            })
-
-    # --- 问题日志 ---
-    if not exception_type or exception_type == "issue_log":
-        q = select(IssueLog)
-        cq = select(func.count(IssueLog.id))
-        filters = []
-        if keyword:
-            filters.append(IssueLog.description.ilike(f"%{keyword}%"))
-        for f in filters:
-            q = q.where(f)
-            cq = cq.where(f)
-        cnt = (await db.execute(cq)).scalar() or 0
-        total += cnt
-        q = q.order_by(IssueLog.record_date.desc().nullslast())
-        if limit:
-            q = q.limit(limit)
-        rows = (await db.execute(q)).scalars().all()
-        for r in rows:
-            items.append({
-                "type": "issue_log",
-                "title": f"问题日志 #{r.seq_no or r.id}",
-                "subtitle": r.description[:80] if r.description else "",
-                "url": "/issue-log",
-                "tags": [],
-                # 完整字段
-                "seq_no": r.seq_no,
-                "recorder": r.recorder,
-                "record_date": str(r.record_date) if r.record_date else None,
-                "description": r.description,
-                "impact": r.impact,
-                "interaction": r.interaction,
-            })
-
-    # --- 变更日志 ---
-    if not exception_type or exception_type == "change_log":
-        q = select(ChangeLog)
-        cq = select(func.count(ChangeLog.id))
-        filters = []
-        if keyword:
-            filters.append(ChangeLog.change_content.ilike(f"%{keyword}%"))
-        for f in filters:
-            q = q.where(f)
-            cq = cq.where(f)
-        cnt = (await db.execute(cq)).scalar() or 0
-        total += cnt
-        q = q.order_by(ChangeLog.change_date.desc().nullslast())
-        if limit:
-            q = q.limit(limit)
-        rows = (await db.execute(q)).scalars().all()
-        for r in rows:
-            items.append({
-                "type": "change_log",
-                "title": f"变更日志 #{r.seq_no or r.id}",
-                "subtitle": r.change_content[:80] if r.change_content else "",
-                "url": "/change-log",
-                "tags": [],
-                # 完整字段
-                "seq_no": r.seq_no,
-                "modifier": r.modifier,
-                "change_date": str(r.change_date) if r.change_date else None,
-                "change_content": r.change_content,
-                "impact": r.impact,
-                "interaction": r.interaction,
             })
 
     return {"total": total, "items": items}

@@ -78,6 +78,7 @@ const FALLBACK_PERMISSION_TREE: PermTreeNode[] = [
       { key: 'materials.supplier_risk', label: '供应商风险分析' },
       { key: 'materials.supplier_payment', label: '供应商付款排程' },
       { key: 'materials.stock_check', label: '物料盘点' },
+      { key: 'materials.occupancy', label: '物料占用分析' },
     ],
   },
   {
@@ -97,25 +98,18 @@ const FALLBACK_PERMISSION_TREE: PermTreeNode[] = [
     key: 'exceptions', label: '异常与质量中心',
     children: [
       { key: 'exceptions.pool', label: '异常总池' },
-      { key: 'exceptions.issue_log', label: '问题日志' },
-      { key: 'exceptions.change_log', label: '变更日志' },
       { key: 'exceptions.quality', label: '品质异常' },
       { key: 'exceptions.product_samples', label: '产品封样' },
       { key: 'exceptions.closure', label: '闭环跟踪' },
     ],
   },
-  { key: 'meetings', label: '会议与任务中心' },
-  { key: 'npi', label: '新品/NPI项目中心' },
   {
     key: 'rules', label: '规则配置中心',
     children: [
       { key: 'rules.risk_rules', label: '预警规则' },
-      { key: 'rules.inspection', label: '点检规则' },
       { key: 'rules.node_standards', label: '节点标准' },
       { key: 'rules.order_standards', label: '订单标准' },
       { key: 'rules.work_instructions', label: '作业指导书' },
-      { key: 'rules.responsibility', label: '责任归属' },
-      { key: 'rules.status_dict', label: '状态字典' },
     ],
   },
   {

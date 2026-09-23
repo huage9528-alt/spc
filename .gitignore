@@ -5,6 +5,7 @@ __pycache__/
 dist/
 venv/
 .env
+.env.local
 
 # Node
 node_modules/

@@ -145,6 +145,8 @@ async def _insert_handler_notifications(db: AsyncSession, fb: Feedback) -> list[
             content=content,
             ref_type="feedback",
             ref_id=fb.id,
+            sender_id=fb.submitter_id,
+            sender_name=fb.submitter_name,
             priority=priority,
             is_read=False,
         ))
@@ -168,6 +170,8 @@ async def _insert_submitter_progress_notification(
         content=action_desc,
         ref_type="feedback",
         ref_id=fb.id,
+        sender_id=_get_user_id(actor_user),
+        sender_name=actor_user.get("username"),
         priority=priority,
         is_read=False,
     ))

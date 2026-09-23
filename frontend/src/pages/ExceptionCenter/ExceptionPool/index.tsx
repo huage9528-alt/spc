@@ -12,8 +12,6 @@ const SOURCE_TYPE_MAP: Record<string, { label: string; color: string }> = {
   risk_issue: { label: '风险问题', color: 'red' },
   quality_issue: { label: '品质异常', color: 'orange' },
   process_exception: { label: '工序异常', color: 'purple' },
-  issue_log: { label: '问题日志', color: 'blue' },
-  change_log: { label: '变更日志', color: 'cyan' },
 }
 
 const STATUS_MAP: Record<string, { label: string; color: string }> = {

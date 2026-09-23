@@ -23,6 +23,7 @@ from app.models.material.purchase_invoice import PurchaseInvoice
 from app.models.material.payment_apply import PaymentApply
 from app.models.material.subcontract_order import SubcontractOrder
 from app.models.material.subcontract_order_detail import SubcontractOrderDetail
+from app.models.material.transfer_order import TransferOrder
 from app.models.basicdata.sync_sql_config import SyncSqlConfig
 from app.models.basicdata.customer import Customer
 from app.models.basicdata.supplier import Supplier
@@ -3276,6 +3277,76 @@ class ERPSyncService:
         return stats
 
     # ------------------------------------------------------------------
+    # 调拨单同步（K3 仓库调拨 FTranType=41）
+    # ------------------------------------------------------------------
+    async def sync_transfer_orders(self, since: Optional[datetime] = None, custom_params: Optional[dict] = None) -> dict:
+        """同步仓库调拨单。幂等依据: (transfer_no, entry_id)。
+
+        调拨单量小（月均百余单），采用「近 120 天窗口快照 + 陈旧行清理」策略：
+        K3 侧取消/删除的单据从快照消失即清理，可识别取消变更。since 不参与过滤。
+        注意：本账套调拨均为直接调拨（审核即入库存），在途口径见 kitting_calc_service。
+        """
+        stats = {"synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}
+
+        try:
+            await self._connect_erp()
+            sql_text, mapping = await self._load_sql_config("transfer_orders")
+
+            params = {}
+            if custom_params:
+                params.update(custom_params)
+                logger.info(f"调拨单使用自定义参数: {custom_params}")
+
+            rows = await self._execute_erp_sql(sql_text, params)
+            logger.info(f"从 ERP 获取到 {len(rows)} 条调拨单明细记录")
+
+            stats = await self._bulk_upsert(
+                TransferOrder,
+                rows,
+                mapping,
+                key_fields=["transfer_no", "entry_id"],
+                label="调拨单",
+            )
+
+            erp_keys: set[tuple] = set()
+            for row in rows:
+                row_dict = self._map_row(row, mapping)
+                no = row_dict.get("transfer_no")
+                eid = row_dict.get("entry_id")
+                if no:
+                    erp_keys.add((str(no), eid if eid is not None else 1))
+
+            if erp_keys:
+                # 清理限定近 120 天窗口：窗口外的历史行保留，避免历史单据被误删
+                existing = await self.spc_db.execute(
+                    select(TransferOrder).where(
+                        TransferOrder.data_source == "erp",
+                        TransferOrder.transfer_date >= (datetime.now() - timedelta(days=120)).date(),
+                    )
+                )
+                deleted_count = 0
+                for t in existing.scalars().all():
+                    if (t.transfer_no, t.entry_id) not in erp_keys:
+                        await self.spc_db.delete(t)
+                        deleted_count += 1
+                if deleted_count:
+                    await self.spc_db.flush()
+                    await self.spc_db.commit()
+                    logger.info(f"调拨单清理: 删除 {deleted_count} 条 ERP 中已不存在的记录")
+
+            await self.spc_db.flush()
+            await self.spc_db.commit()
+            logger.info(f"调拨单同步完成: {stats}")
+
+        except Exception as e:
+            stats["errors"].append(str(e))
+            logger.exception(f"调拨单同步异常: {e}")
+        finally:
+            self._close_erp(keep_alive=True)
+
+        return stats
+
+    # ------------------------------------------------------------------
     # 全量同步
     # ------------------------------------------------------------------
     async def sync_all(self, since: Optional[datetime] = None, custom_params: Optional[dict] = None) -> dict:
@@ -3309,6 +3380,7 @@ class ERPSyncService:
             results["inventory"] = await self.sync_inventory(since, custom_params)
             results["subcontract_orders"] = await self.sync_subcontract_orders(since, custom_params)
             results["subcontract_order_details"] = await self.sync_subcontract_order_details(since, custom_params)
+            results["transfer_orders"] = await self.sync_transfer_orders(since, custom_params)
             return results
         finally:
             self._close_erp()

@@ -31,6 +31,29 @@ def _get_user_id(current_user: dict) -> int:
     return int(current_user.get("user_id") or current_user.get("sub"))
 
 
+# 展示用类型标签（与前端分类导航一致）
+TYPE_LABELS = {
+    "announcement": "公告",
+    "feedback": "问题反馈",
+    "feedback_alert": "反馈提醒",
+    "system": "系统",
+    "price_change": "调价单",
+    "supplier_claim": "索赔单",
+    "stock_check_audit": "盘点抽检",
+    "stock_check_appeal": "复议待裁决",
+    "material_alert": "物料提醒",
+    "exception_alert": "异常提醒",
+    "approval_timeout": "审批超时",
+}
+
+
+def _display_title(notif_type: str, title: str) -> str:
+    """标题统一带 [类型] 前缀；已带前缀（历史/创建点自带）不重复加。"""
+    if title.startswith("["):
+        return title
+    return f"[{TYPE_LABELS.get(notif_type, notif_type)}]{title}"
+
+
 # ---------- 创建通知 ----------
 @router.post("", response_model=ResponseModel)
 async def create_notification(
@@ -45,11 +68,15 @@ async def create_notification(
         content=request.content,
         type=request.type,
         priority=request.priority,
+        sender_id=uid,
+        sender_name=current_user.get("username"),
         is_read=False,
     )
     db.add(notification)
     await db.commit()
     await db.refresh(notification)
+    # commit 后 SSE 推送未读计数（Redis 失败静默丢弃）
+    await publish_unread_update(db, uid)
     return ResponseModel(data={"id": notification.id})
 
 
@@ -59,6 +86,7 @@ async def list_notifications(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     type: Optional[str] = None,
+    exclude_types: Optional[str] = None,
     is_read: Optional[bool] = None,
     current_user: dict = Depends(PermissionChecker("topbar.notifications", "read")),
     db: AsyncSession = Depends(get_db),
@@ -67,6 +95,10 @@ async def list_notifications(
     base = [Notification.user_id == uid]
     if type:
         base.append(Notification.type == type)
+    if exclude_types:
+        exclude_list = [t.strip() for t in exclude_types.split(",") if t.strip()]
+        if exclude_list:
+            base.append(Notification.type.notin_(exclude_list))
     if is_read is not None:
         base.append(Notification.is_read == is_read)
 
@@ -89,10 +121,12 @@ async def list_notifications(
             {
                 "id": r.id,
                 "type": r.type,
-                "title": r.title,
+                "title": _display_title(r.type, r.title),
                 "content": r.content,
                 "ref_type": r.ref_type,
                 "ref_id": r.ref_id,
+                "sender_id": r.sender_id,
+                "sender_name": r.sender_name,
                 "priority": r.priority,
                 "is_read": r.is_read,
                 "read_at": r.read_at.strftime("%Y-%m-%d %H:%M") if r.read_at else None,

@@ -36,6 +36,10 @@ class StockCheck(Base):
     source = Column(String(16), nullable=False, default="manual", server_default="manual", comment="数据来源 manual/k3")
     erp_bill_no = Column(String(64), nullable=True, comment="K3 盘盈盘亏单号(YADJ/KADJ),幂等键")
     erp_inter_id = Column(BigInteger, nullable=True, comment="K3 ICStockBill.FInterID")
+    audit_status = Column(String(16), nullable=True, index=True, comment="抽检状态 pending/passed/rejected;NULL=存量老单(视为已通过)")
+    audit_by = Column(String(100), nullable=True, comment="最近一次抽检处理人姓名快照")
+    audit_at = Column(DateTime, nullable=True, comment="最近一次抽检处理时间")
+    audit_comment = Column(Text, nullable=True, comment="通过说明/发回原因")
 
     __table_args__ = (
         Index("ix_scm_inventory_check_order_date", "order_no", "check_date"),
@@ -74,8 +78,50 @@ class StockCheckItem(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     version = Column(Integer, nullable=False, default=0, comment="乐观锁版本号,每次更新+1")
+    audit_failed = Column(Integer, nullable=False, default=0, server_default="0", comment="抽检问题行标记 0/1;重录实盘数时清零")
+    appeal_status = Column(String(16), nullable=True, index=True, comment="复议状态 pending/accepted/rejected;NULL=无复议")
+    appeal_reason = Column(Text, nullable=True, comment="复议申请原因")
+    appeal_at = Column(DateTime, nullable=True, comment="复议申请时间")
 
     __table_args__ = (
         Index("ix_sci_wh", "check_id", "material_id", "wh_id"),
         Index("ix_sci_counted_by_date", "counted_by_user_id", "counted_at"),
+    )
+
+
+class StockCheckAuditLog(Base):
+    """盘点单财务抽检处置历史(仅追加,一轮一条)"""
+    __tablename__ = "scm_inventory_check_audit_log"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    check_id = Column(BigInteger, ForeignKey("scm_inventory_check.id", ondelete="CASCADE"), nullable=False, index=True)
+    round_no = Column(Integer, nullable=False, comment="第几轮抽检,从1递增")
+    action = Column(String(16), nullable=False, comment="pass/pass_exemption/reject")
+    comment = Column(Text, nullable=True)
+    rejected_item_ids = Column(JSONB, nullable=True, comment="reject/flag 轮的问题行 item.id 快照(自动比对不一致行∪手动勾选行)")
+    operated_by_user_id = Column(BigInteger, nullable=True)
+    operated_by = Column(String(100), nullable=True, comment="操作人姓名快照")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_scial_check_round", "check_id", "round_no"),
+    )
+
+
+class StockCheckAuditItem(Base):
+    """抽检复点明细(每轮每抽中行一条,历史不可变);pass/reject 均写入,exempt 不写"""
+    __tablename__ = "scm_inventory_check_audit_item"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    check_id = Column(BigInteger, ForeignKey("scm_inventory_check.id", ondelete="CASCADE"), nullable=False)
+    round_no = Column(Integer, nullable=False, comment="与 audit_log.round_no 对应")
+    item_id = Column(BigInteger, ForeignKey("scm_inventory_check_item.id", ondelete="CASCADE"), nullable=False)
+    audit_qty = Column(Numeric(18, 4), nullable=False, comment="财务复点数")
+    actual_qty_snapshot = Column(Numeric(18, 4), nullable=True, comment="复点时该行盘点人实盘数快照")
+    matches = Column(Integer, nullable=False, comment="复点数==实盘快照 0/1(actual_qty 为空视为不一致)")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_scai_check_round", "check_id", "round_no"),
+        Index("ix_scai_item", "item_id"),
     )

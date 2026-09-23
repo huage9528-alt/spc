@@ -1254,13 +1254,13 @@ class PriceChangeService:
 
     # ==================== 通知 ====================
 
-    async def _notify_user(self, user_id: int, title: str, content: str, *, ref_type: str = "price_change", ref_id: int = None, priority: str = "normal"):
+    async def _notify_user(self, user_id: int, title: str, content: str, *, ref_type: str = "price_change", ref_id: int = None, priority: str = "normal", sender_name: str = None, sender_id: int = None):
         """给指定用户推一条通知（顶栏铃铛可见）"""
         try:
             await self.db.execute(text("""
-                INSERT INTO notification (user_id, type, title, content, ref_type, ref_id, priority, is_read, created_at)
-                VALUES (:uid, 'price_change', :title, :content, :rt, :rid, :p, FALSE, NOW())
-            """), {"uid": user_id, "title": title, "content": content, "rt": ref_type, "rid": ref_id, "p": priority})
+                INSERT INTO notification (user_id, type, title, content, ref_type, ref_id, sender_id, sender_name, priority, is_read, created_at)
+                VALUES (:uid, 'price_change', :title, :content, :rt, :rid, :sid, :sender, :p, FALSE, NOW())
+            """), {"uid": user_id, "title": title, "content": content, "rt": ref_type, "rid": ref_id, "sid": sender_id, "sender": sender_name, "p": priority})
         except Exception as e:
             logger.warning(f"通知推送失败 user_id={user_id} title={title}: {e}")
 
@@ -1299,7 +1299,12 @@ class PriceChangeService:
         title = f"[调价单] {title_prefix} - {label}"
         content = f"调价单 {no}（供应商：{supplier}，申请人：{applicant}）需要您{label}。"
         for uid in target_uids:
-            await self._notify_user(uid, title, content, ref_id=change_id, priority="high")
+            # applicant 可能是 user_id 或 username，能转 int 就带上提出人 id
+            try:
+                applicant_id = int(applicant)
+            except (TypeError, ValueError):
+                applicant_id = None
+            await self._notify_user(uid, title, content, ref_id=change_id, priority="high", sender_name=applicant, sender_id=applicant_id)
 
         await self._notify_approvers_wecom(target_uids, change_id, no, supplier, applicant, label)
 

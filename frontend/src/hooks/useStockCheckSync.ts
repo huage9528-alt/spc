@@ -41,6 +41,20 @@ export interface StatusChangedPayload {
   head_version: number
   checked_by?: string
   completed_at?: string | null
+  audit_status?: string
+  audit_by?: string
+  audit_comment?: string | null
+}
+
+export interface AuditChangedPayload {
+  check_id: number
+  status?: string
+  audit_status?: string
+  audit_action?: string
+  head_version?: number
+  audit_by?: string
+  audit_comment?: string | null
+  [k: string]: any
 }
 
 export interface CoCheckersChangedPayload {
@@ -80,6 +94,7 @@ export function useStockCheckSync(opts: {
   onItemUpdated: (p: ItemUpdatedPayload) => void
   onItemsBatchUpdated?: (p: ItemsBatchUpdatedPayload) => void
   onStatusChanged: (p: StatusChangedPayload) => void
+  onAuditChanged?: (p: AuditChangedPayload) => void
   onCoCheckersChanged: (p: CoCheckersChangedPayload) => void
   onBomRefreshed: (p: BomRefreshedPayload) => void
   onWarehousesRefreshed?: (p: WarehousesRefreshedPayload) => void
@@ -90,8 +105,8 @@ export function useStockCheckSync(opts: {
   const [lastEventAt, setLastEventAt] = useState<number | null>(null)
   const esRef = useRef<EventSource | null>(null)
   // 用 ref 持有最新回调,避免回调变化导致重连
-  const cbRef = useRef({ onSnapshot, onItemUpdated, onItemsBatchUpdated: opts.onItemsBatchUpdated, onStatusChanged, onCoCheckersChanged, onBomRefreshed, onWarehousesRefreshed: opts.onWarehousesRefreshed, onPresence })
-  cbRef.current = { onSnapshot, onItemUpdated, onItemsBatchUpdated: opts.onItemsBatchUpdated, onStatusChanged, onCoCheckersChanged, onBomRefreshed, onWarehousesRefreshed: opts.onWarehousesRefreshed, onPresence }
+  const cbRef = useRef({ onSnapshot, onItemUpdated, onItemsBatchUpdated: opts.onItemsBatchUpdated, onStatusChanged, onAuditChanged: opts.onAuditChanged, onCoCheckersChanged, onBomRefreshed, onWarehousesRefreshed: opts.onWarehousesRefreshed, onPresence })
+  cbRef.current = { onSnapshot, onItemUpdated, onItemsBatchUpdated: opts.onItemsBatchUpdated, onStatusChanged, onAuditChanged: opts.onAuditChanged, onCoCheckersChanged, onBomRefreshed, onWarehousesRefreshed: opts.onWarehousesRefreshed, onPresence }
 
   const currentUserId = useAuthStore.getState().currentUser?.id ?? 0
 
@@ -136,6 +151,9 @@ export function useStockCheckSync(opts: {
         case 'status_changed':
           cbRef.current.onStatusChanged(env.payload)
           break
+        case 'audit_changed':
+          cbRef.current.onAuditChanged?.(env.payload)
+          break
         case 'co_checkers_changed':
           cbRef.current.onCoCheckersChanged(env.payload)
           break
@@ -152,7 +170,7 @@ export function useStockCheckSync(opts: {
           break
       }
     }
-    ;['snapshot', 'item_updated', 'items_batch_updated', 'status_changed', 'co_checkers_changed', 'bom_refreshed', 'warehouses_refreshed', 'presence', 'error'].forEach(
+    ;['snapshot', 'item_updated', 'items_batch_updated', 'status_changed', 'audit_changed', 'co_checkers_changed', 'bom_refreshed', 'warehouses_refreshed', 'presence', 'error'].forEach(
       (t) => es.addEventListener(t, dispatch as EventListener),
     )
 

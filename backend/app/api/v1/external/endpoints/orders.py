@@ -2,6 +2,10 @@
 
 为外部系统定制的订单查询接口。基于 SaleOrder 表（按 order_no + line_no 唯一），
 提供外部常用的查询参数和精简字段集，区别于内部 /api/v1/orders 的复杂查询逻辑。
+
+订单状态为**派生值**（非原始 status 列）：基于 erp_status（0 未审核 / 1 审核 /
+2 部分关闭 / 3 已关闭）判断；erp_status=3（已关闭）时结合 delivery_completed_date
+区分：有发货完成日期 → completed（已完成），无 → cancelled（已取消）。
 """
 
 from datetime import date, datetime
@@ -9,7 +13,7 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -26,10 +30,43 @@ from ..registry import register_external
 router = APIRouter(prefix="/orders", tags=["订单"])
 router_details = APIRouter(prefix="/order-details", tags=["订单"])
 
+# 派生状态码：erp_status 0/1/2 → 固定映射；3 → completed/cancelled（看发货完成日期）
+_ERP_STATUS_TO_DERIVED = {
+    0: "pending_review",
+    1: "in_progress",
+    2: "partially_closed",
+}
+
+
+def derive_order_status(erp_status: Optional[int], delivery_completed_date, raw_status: Optional[str]) -> str:
+    """派生订单状态；erp_status 为空或未知时回退原始 status 字段（默认 open）"""
+    if erp_status == 3:
+        return "completed" if delivery_completed_date else "cancelled"
+    return _ERP_STATUS_TO_DERIVED.get(erp_status, raw_status or "open")
+
+
+def _status_filter_condition(status_value: str):
+    """status 过滤：派生码 → ERP 状态条件；其他值按原始 status 列匹配（兼容旧值）"""
+    if status_value == "pending_review":
+        return SaleOrder.erp_status == 0
+    if status_value == "in_progress":
+        return SaleOrder.erp_status == 1
+    if status_value == "partially_closed":
+        return SaleOrder.erp_status == 2
+    if status_value == "completed":
+        return and_(SaleOrder.erp_status == 3, SaleOrder.delivery_completed_date.isnot(None))
+    if status_value == "cancelled":
+        return and_(SaleOrder.erp_status == 3, SaleOrder.delivery_completed_date.is_(None))
+    return SaleOrder.status == status_value
+
 
 class OrdersListQuery(PageParamsMixin):
     keyword: Optional[str] = Field(None, description="关键字（订单号 / 客户 / 产品名 模糊匹配）")
-    status: Optional[str] = Field(None, description="订单状态，多选逗号分隔，如 open,closed")
+    status: Optional[str] = Field(
+        None,
+        description="订单状态（派生值），多选逗号分隔：pending_review / in_progress / "
+        "partially_closed / completed / cancelled（兼容旧原始值如 open）",
+    )
     customer_code: Optional[str] = Field(None, description="客户编码精确匹配")
     risk_level: Optional[str] = Field(None, description="风险等级，多选逗号分隔，如 red,yellow")
     promised_date_start: Optional[date] = Field(None, description="合同交期范围起 YYYY-MM-DD")
@@ -49,7 +86,13 @@ class OrderOut(BaseModel):
     order_qty: Optional[float] = Field(None, description="订单数量")
     completed_qty: Optional[float] = Field(None, description="完工数量")
     order_amount: Optional[float] = Field(None, description="订单金额")
-    status: Optional[str] = Field(None, description="订单状态")
+    status: Optional[str] = Field(
+        None,
+        description="订单状态（派生值）：pending_review 未审核 / in_progress 进行中 / "
+        "partially_closed 部分关闭 / completed 已完成 / cancelled 已取消",
+    )
+    erp_status: Optional[int] = Field(None, description="ERP 订单状态原始值（0 未审核 / 1 审核 / 2 部分关闭 / 3 已关闭）")
+    delivery_completed_date: Optional[date] = Field(None, description="发货完成日期（erp_status=3 时用于区分已完成/已取消）")
     risk_level: Optional[str] = Field(None, description="风险等级")
     promised_date: Optional[date] = Field(None, description="合同交期")
     planned_start_date: Optional[date] = Field(None, description="计划开工日期")
@@ -61,7 +104,7 @@ class OrderOut(BaseModel):
             summary="订单列表", description="endpoint_code: orders.list")
 @register_external(
     "orders.list", "订单列表", method="GET", path="/orders/list",
-    description="销售订单行列表查询，支持关键字、状态、客户、风险等级、合同交期范围、增量同步",
+    description="销售订单行列表查询，支持关键字、派生状态、客户、风险等级、合同交期范围、增量同步",
     tags=["订单"],
 )
 @log_external_call("orders.list")
@@ -88,12 +131,10 @@ async def orders_list(
 
     if q.status:
         statuses = [s.strip() for s in q.status.split(",") if s.strip()]
-        if len(statuses) == 1:
-            query = query.where(SaleOrder.status == statuses[0])
-            count_query = count_query.where(SaleOrder.status == statuses[0])
-        elif statuses:
-            query = query.where(SaleOrder.status.in_(statuses))
-            count_query = count_query.where(SaleOrder.status.in_(statuses))
+        if statuses:
+            status_cond = or_(*[_status_filter_condition(s) for s in statuses])
+            query = query.where(status_cond)
+            count_query = count_query.where(status_cond)
 
     if q.customer_code:
         query = query.where(SaleOrder.customer_code == q.customer_code)
@@ -142,7 +183,9 @@ async def orders_list(
             "order_qty": float(r.order_qty) if r.order_qty is not None else None,
             "completed_qty": float(r.completed_qty) if r.completed_qty is not None else None,
             "order_amount": float(r.order_amount) if r.order_amount is not None else None,
-            "status": r.status,
+            "status": derive_order_status(r.erp_status, r.delivery_completed_date, r.status),
+            "erp_status": r.erp_status,
+            "delivery_completed_date": r.delivery_completed_date.isoformat() if r.delivery_completed_date else None,
             "risk_level": r.risk_level,
             "promised_date": r.promised_date.isoformat() if r.promised_date else None,
             "planned_start_date": r.planned_start_date.isoformat() if r.planned_start_date else None,

@@ -13,6 +13,7 @@ from app.services.exception.risk_scheduler import risk_scheduler  # noqa: F401
 from app.services.scheduler.overdue_checker import overdue_checker  # noqa: F401
 from app.services.scheduler.capacity_sync_scheduler import capacity_sync_scheduler  # noqa: F401
 from app.services.scheduler.data_supply_alert import data_supply_alert_scheduler  # noqa: F401
+from app.services.scheduler.approval_timeout_reminder import approval_timeout_reminder  # noqa: F401
 
 
 class SafeJSONEncoder(json.JSONEncoder):
@@ -92,7 +93,7 @@ async def lifespan(app: FastAPI):
     _check_erp_connection()
     # 启动时：同步权限定义到数据库
     try:
-        from app.core.permission_registry import sync_permissions_to_db, cleanup_deprecated_permissions
+        from app.core.permission_registry import sync_permissions_to_db, cleanup_deprecated_permissions, migrate_permission_actions
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as db:
             await sync_permissions_to_db(db)
@@ -101,6 +102,11 @@ async def lifespan(app: FastAPI):
                 await cleanup_deprecated_permissions(db)
             except Exception as e:
                 logger.warning(f"[权限注册] 清理废弃权限失败: {e}")
+            # 盘点抽检动作迁移(read/manage → 标准增删改查),幂等
+            try:
+                await migrate_permission_actions(db)
+            except Exception as e:
+                logger.warning(f"[权限注册] 盘点抽检动作迁移失败: {e}")
             # 清理上次未完成的同步任务（服务重启导致的僵尸 running/pending 任务）。
             # 仅清理本实例（按 server_id）的任务：多实例共用一个库时，
             # 不能把其它实例正在执行的任务误标为失败。
@@ -138,6 +144,8 @@ async def lifespan(app: FastAPI):
     # 启动时：开启逾期未到料检查
     overdue_checker.start()
     data_supply_alert_scheduler.start()
+    # 启动时：开启审批超时提醒
+    approval_timeout_reminder.start()
     # 启动时：开启 OA 工序产能定时同步（白天每小时增量 + 凌晨3点全量兜底）
     capacity_sync_scheduler.start()
     # 启动时：开启写回 Worker
@@ -164,6 +172,7 @@ async def lifespan(app: FastAPI):
     capacity_sync_scheduler.stop()
     overdue_checker.stop()
     data_supply_alert_scheduler.stop()
+    approval_timeout_reminder.stop()
     risk_scheduler.stop()
     scheduler.stop()
 

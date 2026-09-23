@@ -14,6 +14,8 @@ from app.models.material.payment_apply import PaymentApply
 from app.models.material.subcontract_order import SubcontractOrder
 from app.models.material.subcontract_order_detail import SubcontractOrderDetail
 from app.models.material.supplier_message import SupplierMessage
+from app.models.material.kitting import KittingResult, KittingRun, KittingShortage  # noqa: F401
+from app.models.material.transfer_order import TransferOrder  # noqa: F401
 
 # 生产协同中心
 from app.models.production.process_progress import ProcessProgress
@@ -32,18 +34,16 @@ from app.models.production.production_report import ProductionReport  # noqa: F4
 
 # 异常与质量中心
 from app.models.exception.risk_issue import RiskIssue
-from app.models.exception.issue_log import IssueLog
-from app.models.exception.change_log import ChangeLog
 from app.models.exception.quality_issue import QualityIssue
 
 from app.models.common.business_document import BusinessDocument, BusinessDocumentVersion
 
 # 规则配置中心
 from app.models.rules.risk_rule import RiskRule
-from app.models.rules.inspection_rule import InspectionRule
 from app.models.rules.node_standard import NodeStandard
-from app.models.rules.responsibility_map import ResponsibilityMap
-from app.models.rules.status_dictionary import StatusDictionary
+
+# 品质管理
+from app.models.quality.supplier_claim import SupplierClaim, SupplierClaimApprovalLog  # noqa: F401
 
 # 基础数据与集成中心
 from app.models.basicdata.user import SysUser, SysRole
@@ -83,17 +83,12 @@ __all__ = [
     "ProductionSchedulePlan",
     # 异常与质量中心
     "RiskIssue",
-    "IssueLog",
-    "ChangeLog",
     "QualityIssue",
     "BusinessDocument",
     "BusinessDocumentVersion",
     # 规则配置中心
     "RiskRule",
-    "InspectionRule",
     "NodeStandard",
-    "ResponsibilityMap",
-    "StatusDictionary",
     # 基础数据与集成中心
     "SysUser",
     "SysRole",
@@ -110,4 +105,7 @@ __all__ = [
     "DataSupplyCallLog",
     "ShareLink",
     "ShareLinkRecipient",
+    # 品质管理
+    "SupplierClaim",
+    "SupplierClaimApprovalLog",
 ]

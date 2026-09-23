@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import type { CSSProperties } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import {
   Table, Input, Button, message, Modal, Row, Col, Spin, Popover, Tour,
-  Tooltip, DatePicker, Dropdown, Tabs, Progress, Checkbox, Badge, Tag,
+  Tooltip, DatePicker, Dropdown, Tabs, Progress, Checkbox, Badge, Tag, Select,
 } from 'antd'
 import type { MenuProps } from 'antd'
 import {
@@ -60,6 +60,21 @@ const STATUS_OPTIONS = [
 
 const STATUS_CHIP_ORDER = ['in_progress', 'open', 'completed', 'cancelled'] as const
 
+// 抽检状态 Tag（原型 .tag-audit-*：软底语义色 + dot; NULL=存量老单,列显示 —）
+const AUDIT_TAG: Record<string, { label: string; cls: string }> = {
+  pending: { label: '待抽检', cls: 'sca-audit-pending' },
+  passed: { label: '已通过', cls: 'sca-audit-passed' },
+  rejected: { label: '已发回', cls: 'sca-audit-rejected' },
+}
+
+// 列表「抽检」列: null 显示 —; pending 仅完结单可见(reject 后回 in_progress 也保留已发回标记)
+function auditTagOf(r: StockCheck): ReactNode {
+  const s = r.audit_status
+  if (!s || (s === 'pending' && r.status !== 'completed')) return <span className="sc-diff-flat">—</span>
+  const t = AUDIT_TAG[s]
+  return t ? <span className={`sc-tag ${t.cls}`}><span className="dot" />{t.label}</span> : <span className="sc-diff-flat">—</span>
+}
+
 const STOCK_CHECK_EXPORT_OPTIONS: ExportColumnOption[] = [
   { field: 'material_code', label: '物料编码' },
   { field: 'material_name', label: '物料名称' },
@@ -115,6 +130,7 @@ export default function StockCheckPage() {
   const [statusFilter, setStatusFilter] = useState<string[]>(['in_progress'])
   const [wbTodoOnly, setWbTodoOnly] = useState(false)
   const [typeFilter, setTypeFilter] = useState<string | null>(null)
+  const [auditFilter, setAuditFilter] = useState<string | null>(null)
   const [dateFrom, setDateFrom] = useState<string>()
   const [dateTo, setDateTo] = useState<string>()
   const [statsOpen, setStatsOpen] = useState(false)
@@ -163,12 +179,13 @@ export default function StockCheckPage() {
         writeback_todo: wbTodoOnly || undefined,
         check_type: typeFilter && typeFilter !== 'k3' ? typeFilter : undefined,
         source: typeFilter === 'k3' ? 'k3' : undefined,
+        audit_status: auditFilter || undefined,
         date_from: dateFrom,
         date_to: dateTo,
       })
       return { items: res.data?.items || [], total: res.data?.total || 0 }
     },
-    extraDeps: [appliedKeyword, statusFilter, wbTodoOnly, typeFilter, dateFrom, dateTo],
+    extraDeps: [appliedKeyword, statusFilter, wbTodoOnly, typeFilter, auditFilter, dateFrom, dateTo],
   })
 
   // ===== Tab 2 · 物料台账 =====
@@ -427,6 +444,7 @@ export default function StockCheckPage() {
             status: statusFilter.length ? statusFilter.join(',') : undefined,
             check_type: typeFilter && typeFilter !== 'k3' ? typeFilter : undefined,
             source: typeFilter === 'k3' ? 'k3' : undefined,
+            audit_status: auditFilter || undefined,
             date_from: dateFrom,
             date_to: dateTo,
           }).then((res: any) => ({ items: res.data?.items || [], total: res.data?.total || 0 })),
@@ -584,6 +602,10 @@ export default function StockCheckPage() {
           </span>
         )
       },
+    },
+    {
+      title: '抽检', dataIndex: 'audit_status', width: 90,
+      render: (_v: any, r: StockCheck) => auditTagOf(r),
     },
     {
       title: '协同人', dataIndex: 'co_checkers', width: 110,
@@ -781,9 +803,32 @@ export default function StockCheckPage() {
                 {kpi?.writeback_todo_checks ?? 0}
               </span>
             </span>
+            <span
+              className={`sc-chip${auditFilter === 'pending' && !wbTodoOnly && statusFilter.join(',') === 'completed' ? ' on' : ''}`}
+              onClick={() => { setWbTodoOnly(false); setAuditFilter('pending'); setStatusFilter(['completed']) }}
+            >
+              待抽检
+            </span>
+            <Select
+              allowClear
+              placeholder="抽检状态"
+              style={{ width: 104 }}
+              value={auditFilter ?? undefined}
+              onChange={(v) => {
+                setAuditFilter(v ?? null)
+                // 抽检状态与单据状态联动,避免与状态 chips 冲突导致空结果
+                if (v === 'pending' || v === 'passed') setStatusFilter(['completed'])
+                else if (v === 'rejected') setStatusFilter(['in_progress'])
+              }}
+              options={[
+                { value: 'pending', label: '待抽检' },
+                { value: 'passed', label: '已通过' },
+                { value: 'rejected', label: '已发回' },
+              ]}
+            />
           </span>
         )}
-        <span className="sc-toolbar-hint">盘点完结按盘差回写 K3 盘盈/调拨单 · 库存经 K3 审核与同步回流调整</span>
+        <span className="sc-toolbar-hint">盘点完结后进入财务抽检 · 抽检通过才计划 K3 盘盈/调拨单</span>
         <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
           <Popover
             trigger="click"
@@ -913,7 +958,7 @@ export default function StockCheckPage() {
                         <Table.Summary.Cell index={5} align="right">
                           <DiffPair gain={gain} loss={loss} />
                         </Table.Summary.Cell>
-                        <Table.Summary.Cell index={6} colSpan={5} />
+                        <Table.Summary.Cell index={6} colSpan={6} />
                       </Table.Summary.Row>
                     )
                   }}

@@ -4,14 +4,14 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Table, Input, Button, message, Modal, Card, Row, Col, InputNumber,
   Spin, Tour, Drawer, Empty, Tooltip, Segmented, Select, Dropdown,
-  Alert, Tag,
+  Alert, Tag, Switch,
 } from 'antd'
 import {
-  SearchOutlined, CheckCircleOutlined, StopOutlined, ArrowLeftOutlined,
+  AimOutlined, SearchOutlined, CheckCircleOutlined, StopOutlined, ArrowLeftOutlined,
   HistoryOutlined, PlusOutlined, DownOutlined, DownloadOutlined, DeleteOutlined,
   AppstoreOutlined, ClockCircleOutlined, ArrowUpOutlined, ArrowDownOutlined,
   BarsOutlined, WarningOutlined, FullscreenOutlined, FullscreenExitOutlined,
-  ReloadOutlined,
+  ReloadOutlined, SafetyCertificateOutlined,
 } from '@ant-design/icons'
 import { useExport } from '@/hooks/useExport'
 import { materialApi, orderApi } from '@/services/api'
@@ -30,7 +30,7 @@ import { useStockCheckSync } from '@/hooks/useStockCheckSync'
 import ConflictModal, { ConflictDraft } from './ConflictModal'
 import { useAuthStore } from '@/store/auth'
 import { STATUS_MAP, AVATAR_COLORS, checkTypeTag, AvatarStack, ScTag } from './types'
-import type { StockCheck, StockCheckItem, MaterialCandidate, MaterialHistoryItem, StockCheckWriteback, WritebackOverview } from './types'
+import type { StockCheck, StockCheckItem, MaterialCandidate, MaterialHistoryItem, StockCheckWriteback, WritebackOverview, StockCheckAuditLog } from './types'
 
 const STOCK_CHECK_EXPORT_OPTIONS: ExportColumnOption[] = [
   { field: 'material_code', label: '物料编码' },
@@ -72,6 +72,28 @@ function hasRecentMark(r: StockCheckItem): boolean {
   return !!r.recent_checked_check_no && !r.force_recount
 }
 
+// 抽检状态 Tag（原型 .tag-audit-*：软底语义色 + dot，与列表页/抽检工作台一致）
+const AUDIT_TAG: Record<string, { label: string; cls: string }> = {
+  pending: { label: '待抽检', cls: 'sca-audit-pending' },
+  passed: { label: '已通过', cls: 'sca-audit-passed' },
+  rejected: { label: '已发回', cls: 'sca-audit-rejected' },
+}
+
+function AuditTag({ status }: { status?: string | null }) {
+  if (!status) return null
+  const t = AUDIT_TAG[status]
+  if (!t) return <span className="sc-tag sc-tag-plain">{status}</span>
+  return <span className={`sc-tag ${t.cls}`}><span className="dot" />{t.label}</span>
+}
+
+// 抽检动作中文名（时间线用）
+const AUDIT_ACTION_LABEL: Record<string, string> = {
+  pass: '通过',
+  pass_exemption: '免检',
+  reject: '发回重填',
+  flag: '过程标记',
+}
+
 export default function StockCheckWorkbench() {
   const navigate = useNavigate()
   const { checkId } = useParams()
@@ -88,6 +110,7 @@ export default function StockCheckWorkbench() {
   const [productFilter, setProductFilter] = useState<string>('all')
   const [whFilter, setWhFilter] = useState<string>('all')
   const [segFilter, setSegFilter] = useState<SegKey>('all')
+  const [auditFailedOnly, setAuditFailedOnly] = useState(false)
   const [selectedKeys, setSelectedKeys] = useState<Key[]>([])
 
   // ===== 脏行基线 =====
@@ -125,11 +148,29 @@ export default function StockCheckWorkbench() {
     loadCheck(checkIdNum)
   }, [checkIdNum, activeCheck?.id, loadCheck])
 
+  // ===== 财务抽检历史（时间线 + 复点数列数据源）=====
+  const [auditLogs, setAuditLogs] = useState<StockCheckAuditLog[]>([])
+  // 时间线默认收起(一行摘要),展开才占空间
+  const [tlOpen, setTlOpen] = useState(false)
+  const loadAuditLogs = useCallback(async (id: number) => {
+    try {
+      const res: any = await materialApi.getStockCheckAuditLogs(id)
+      setAuditLogs(res.data || [])
+    } catch (e) {
+      console.warn('加载抽检历史失败', e)
+    }
+  }, [])
+  useEffect(() => {
+    if (activeCheck?.id == null) return
+    loadAuditLogs(activeCheck.id)
+  }, [activeCheck?.id, loadAuditLogs])
+
   // 切换盘点单: 重置过滤/选择, 支持 ?product= 预筛
   useEffect(() => {
     setSelectedKeys([])
     setWhFilter('all')
     setSegFilter('all')
+    setAuditFailedOnly(false)
     setSearchText('')
     setProductFilter(searchParams.get('product') || 'all')
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -231,10 +272,21 @@ export default function StockCheckWorkbench() {
       }
     },
     onStatusChanged: (p) => {
-      setActiveCheck((prev) => (prev ? { ...prev, status: p.status, version: p.head_version } : prev))
+      // reject 发回时 payload 带 audit_status,合并进单头供「已发回」Tag/Alert 展示
+      setActiveCheck((prev) => (prev ? { ...prev, status: p.status, version: p.head_version, ...(p.audit_status ? { audit_status: p.audit_status } : {}) } : prev))
+      if (p.audit_status && activeCheck?.id) loadAuditLogs(activeCheck.id)
       if (p.status === 'completed' || p.status === 'cancelled') {
         setSyncBanner(`该盘点单已被 ${p.checked_by || '他人'} ${p.status === 'completed' ? '完成' : '取消'}`)
       }
+    },
+    onAuditChanged: (p) => {
+      // 财务抽检处置(通过/免检/过程标记):整单刷新 + 时间线/复点数重载
+      const cid = activeCheck?.id
+      if (cid) {
+        loadCheck(cid)
+        loadAuditLogs(cid)
+      }
+      setSyncBanner(`财务已抽检处置（${p.audit_by || '财务'}），数据已刷新`)
     },
     onCoCheckersChanged: (p) => {
       setActiveCheck((prev) =>
@@ -648,7 +700,8 @@ export default function StockCheckWorkbench() {
       } else if (ws && Number(ws.total) > 0) {
         message.info(`已完结；${ws.total} 张 K3 单据待手动提交，请在「K3 回写」卡片操作`, 6)
       } else {
-        message.success('已完结')
+        // 完结即入待抽检;K3 回写计划移至财务抽检通过时生成
+        message.success(res.data?.audit_status === 'pending' ? '已完结，等待财务抽检' : '已完结', 6)
       }
       setCompleteOpen(false)
     } catch (e: any) {
@@ -915,11 +968,14 @@ export default function StockCheckWorkbench() {
   }), [searchedItems])
 
   const tableItems = useMemo(() => {
-    if (segFilter === 'all') return searchedItems
-    if (segFilter === 'unchecked') return searchedItems.filter((it) => it.is_checked !== 1 && !hasRecentMark(it))
-    if (segFilter === 'checked') return searchedItems.filter((it) => it.is_checked === 1 || hasRecentMark(it))
-    return searchedItems.filter((it) => it.diff_qty != null && Number(it.diff_qty) !== 0)
-  }, [searchedItems, segFilter])
+    let list = searchedItems
+    if (segFilter === 'all') list = searchedItems
+    else if (segFilter === 'unchecked') list = searchedItems.filter((it) => it.is_checked !== 1 && !hasRecentMark(it))
+    else if (segFilter === 'checked') list = searchedItems.filter((it) => it.is_checked === 1 || hasRecentMark(it))
+    else list = searchedItems.filter((it) => it.diff_qty != null && Number(it.diff_qty) !== 0)
+    if (auditFailedOnly) list = list.filter((it) => it.audit_failed === 1)
+    return list
+  }, [searchedItems, segFilter, auditFailedOnly])
 
   // ===== 明细表自适应高度：整页收敛在视口内（窗口不出现滚动条），仅表格内部滚动 =====
   const detailSectionRef = useRef<HTMLDivElement | null>(null)
@@ -1015,6 +1071,74 @@ export default function StockCheckWorkbench() {
     }
     if (skipped > 0) message.warning(`${skipped} 行无库存快照或近期已盘,已跳过`)
   }, [selectedItems, updateItem])
+
+  // ===== 复议(发回后盘点人认为复点有误) =====
+  const [appealOpen, setAppealOpen] = useState(false)
+  const [appealReason, setAppealReason] = useState('')
+  const [appealing, setAppealing] = useState(false)
+  const submitAppeal = useCallback(async () => {
+    if (!activeCheck) return
+    const ids = selectedItems.filter((it) => it.audit_failed === 1 && it.appeal_status !== 'pending').map((it) => it.id)
+    if (ids.length === 0) {
+      message.warning('请先勾选被标记的问题行')
+      return
+    }
+    if (!appealReason.trim()) {
+      message.warning('申请复议必须填写原因（说明为何认为复点有误）')
+      return
+    }
+    setAppealing(true)
+    try {
+      await materialApi.appealStockCheckItems(activeCheck.id, {
+        item_ids: ids,
+        reason: appealReason.trim(),
+        expected_version: activeCheck.version ?? undefined,
+      })
+      message.success(`已对 ${ids.length} 行申请复议，待财务重新裁决；复议期间这些行暂无需改数`)
+      setAppealOpen(false)
+      setSelectedKeys([])
+      await loadCheck(activeCheck.id)
+      void loadAuditLogs(activeCheck.id)
+    } catch (e: any) {
+      const code = e?.response?.data?.detail?.code ?? e?.response?.status
+      if (code === 409) {
+        message.warning('盘点单状态刚被他人修改，正在刷新')
+        await loadCheck(activeCheck.id)
+        setAppealOpen(false)
+      } else {
+        const detail = e?.response?.data?.detail
+        message.error((typeof detail === 'string' ? detail : detail?.message) || e.message || '复议申请失败')
+      }
+    } finally {
+      setAppealing(false)
+    }
+  }, [activeCheck, selectedItems, appealReason, loadCheck])
+
+  // 财务裁决复议(抽检工作台用,工作台本身不裁决)
+  const appealTagOf = (it: StockCheckItem) => {
+    if (it.appeal_status === 'pending') {
+      return (
+        <Tooltip title={`复议中：${it.appeal_reason || '—'}（待财务重新裁决，暂无需改数）`}>
+          <span className="sc-tag sca-audit-flag"><span className="dot" />复议中</span>
+        </Tooltip>
+      )
+    }
+    if (it.appeal_status === 'accepted') {
+      return (
+        <Tooltip title="复议已支持：财务认可该行实盘数">
+          <span className="sc-tag sca-audit-passed"><span className="dot" />复议通过</span>
+        </Tooltip>
+      )
+    }
+    if (it.appeal_status === 'rejected') {
+      return (
+        <Tooltip title={`复议被驳回：${it.appeal_reason || '维持原标记'}（请修正该行实盘数）`}>
+          <span className="sc-tag sca-audit-rejected"><span className="dot" />复议驳回</span>
+        </Tooltip>
+      )
+    }
+    return null
+  }
 
   // 扫码/回车定位唯一匹配行: 在当前过滤结果(tableItems)中匹配, 唯一命中时聚焦该行实盘录入框
   const handleSearchEnter = useCallback(() => {
@@ -1114,6 +1238,24 @@ export default function StockCheckWorkbench() {
     return a - b
   }
 
+  // 最近一轮 reject/flag 的复点明细: item_id → 复点数/比对结果(供「财务复点」只读列)
+  // auditLogs 按轮次升序,遍历后 Map 留下最后一轮 reject/flag 的数据
+  const auditQtyMap = useMemo(() => {
+    const m = new Map<number, { audit_qty: number; matches: number | null; snapshot: number | null }>()
+    for (const log of auditLogs) {
+      if (log.action !== 'reject' && log.action !== 'flag') continue
+      m.clear()
+      for (const it of log.items || []) {
+        m.set(it.item_id, {
+          audit_qty: Number(it.audit_qty),
+          matches: it.matches ?? null,
+          snapshot: it.actual_qty_snapshot != null ? Number(it.actual_qty_snapshot) : null,
+        })
+      }
+    }
+    return m
+  }, [auditLogs])
+
   // ===== 明细表列 =====
   const columns = useMemo(() => [
     {
@@ -1123,7 +1265,11 @@ export default function StockCheckWorkbench() {
       onFilter: (v: any, r: StockCheckItem) => r.material_code === v,
       render: (v: any, r: StockCheckItem) => (
         <div style={{ lineHeight: 1.2 }}>
-          <div className="sc-mono" style={{ color: '#0f172a', fontWeight: 500 }}>{v || '—'}</div>
+          <div className="sc-mono" style={{ color: '#0f172a', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            {v || '—'}
+            {r.audit_failed === 1 && r.appeal_status !== 'accepted' && <span className="sca-mini-mark">问题行</span>}
+            {appealTagOf(r)}
+          </div>
           <div className="sc-sub" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {r.material_name || '—'}{r.spec_model ? ` · ${r.spec_model}` : ''}
           </div>
@@ -1250,6 +1396,22 @@ export default function StockCheckWorkbench() {
       render: (v: any) => renderDiff(v),
     },
     {
+      title: '财务复点', key: 'audit_qty', width: 96, align: 'right' as const,
+      render: (_: any, r: StockCheckItem) => {
+        const a = auditQtyMap.get(r.id)
+        if (!a) return <span className="sc-diff-flat">—</span>
+        // matches=0: 财务复点数与复点时的实盘快照不一致 → 红字
+        return (
+          <Tooltip title={`财务复点 ${a.audit_qty} · 复点时实盘快照 ${a.snapshot ?? '未录'}${a.matches === 0 ? ' · 不一致' : ' · 一致'}`}>
+            <div className="sca-rd-cell">
+              <div className="v" style={a.matches === 0 ? { color: '#dc2626' } : undefined}>{a.audit_qty}</div>
+              <div className={`cmp ${a.matches === 0 ? 'bad' : 'ok'}`}>{a.matches === 0 ? '不符' : '一致'}</div>
+            </div>
+          </Tooltip>
+        )
+      },
+    },
+    {
       title: '盘点人', dataIndex: 'checked_by', width: 132,
       sorter: (a: StockCheckItem, b: StockCheckItem) => (a.checked_by || '').localeCompare(b.checked_by || ''),
       filters: checkerFilterOptions,
@@ -1298,7 +1460,7 @@ export default function StockCheckWorkbench() {
       },
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [readonly, activeCheck, presenceByItem, isRowDirty, handleEditingFocus, handleEditingBlur, updateItem, handleForceRecount, handleMarkEven, openMaterialHistory, handleRemoveItem, materialFilterOptions, whFilterOptions, checkerFilterOptions, nullsLast])
+  ], [readonly, activeCheck, presenceByItem, isRowDirty, handleEditingFocus, handleEditingBlur, updateItem, handleForceRecount, handleMarkEven, openMaterialHistory, handleRemoveItem, materialFilterOptions, whFilterOptions, checkerFilterOptions, nullsLast, auditQtyMap])
 
   if (!activeCheck) {
     return (
@@ -1394,6 +1556,9 @@ export default function StockCheckWorkbench() {
             {STATUS_MAP[activeCheck.status || '']?.label || activeCheck.status}
           </ScTag>
           <ScTag variant={typeTag.variant}>{typeTag.label}盘点</ScTag>
+          {activeCheck.audit_status && (activeCheck.audit_status !== 'pending' || activeCheck.status === 'completed') && (
+            <AuditTag status={activeCheck.audit_status} />
+          )}
           {(activeCheck.co_checkers || []).length > 0 && (
             <ScTag variant="plain">
               <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
@@ -1416,6 +1581,75 @@ export default function StockCheckWorkbench() {
             <Button danger ghost icon={<StopOutlined />} disabled={readonly} onClick={handleCancel}>取消盘点</Button>
           </span>
         </div>
+        {activeCheck.status === 'in_progress' && activeCheck.audit_status !== 'rejected' && (() => {
+          const flaggedRows = items.filter((it) => it.audit_failed === 1)
+          const appealableRows = flaggedRows.filter((it) => it.appeal_status !== 'pending')
+          if (flaggedRows.length === 0) return null
+          return (
+            <div className="sca-reject-banner" style={{ background: '#f0f9ff', borderColor: '#bae6fd' }}>
+              <AimOutlined style={{ color: '#0284c7', flexShrink: 0, marginTop: 1 }} />
+              <div>
+                <div className="rb-title" style={{ color: '#075985' }}>财务过程标记了 {flaggedRows.length} 行问题行</div>
+                <div className="rb-body">红底行为财务复点标记的行，请核对；若认为复点有误，可申请复议由财务重新裁决。</div>
+              </div>
+              {appealableRows.length > 0 && (
+                <Button size="small" style={{ marginLeft: 'auto', flexShrink: 0, alignSelf: 'center' }} onClick={() => {
+                  setAuditFailedOnly(true)
+                  setSelectedKeys(appealableRows.map((it) => it.id))
+                  setAppealReason('')
+                  setAppealOpen(true)
+                }}>
+                  申请复议（{appealableRows.length} 行）
+                </Button>
+              )}
+            </div>
+          )
+        })()}
+        {activeCheck.audit_status === 'rejected' && (() => {
+          // 可复议行: 被标记且不在复议待裁决中(被驳回的行可再次申请)
+          const appealableRows = items.filter((it) => it.audit_failed === 1 && it.appeal_status !== 'pending')
+          const pendingAppeals = items.filter((it) => it.appeal_status === 'pending').length
+          const pickAndOpen = () => {
+            setAuditFailedOnly(true)
+            setSelectedKeys(appealableRows.map((it) => it.id))
+            setAppealReason('')
+            setAppealOpen(true)
+          }
+          return (
+            <div className="sca-reject-banner">
+              <WarningOutlined style={{ color: '#dc2626', flexShrink: 0, marginTop: 1 }} />
+              <div>
+                <div className="rb-title">抽检未通过，已发回重填</div>
+                <div className="rb-body">
+                  {activeCheck.audit_comment || '未填写原因'}。已盘数据全部保留，请修正红底问题行后重新完结，再次进入待抽检。
+                </div>
+                <div className="rb-meta">
+                  处理人 {activeCheck.audit_by || '—'}
+                  {activeCheck.audit_at ? ` · ${formatDateTime(activeCheck.audit_at)}` : ''}
+                  {' · 已通知创建人与共同盘点人'}
+                  {pendingAppeals > 0 && ` · ${pendingAppeals} 行复议待财务裁决`}
+                </div>
+              </div>
+              {appealableRows.length > 0 && (
+                <Button style={{ marginLeft: 'auto', flexShrink: 0, alignSelf: 'center' }} onClick={pickAndOpen}>
+                  <Tooltip title="认为复点有误？可对问题行申请复议，由财务重新裁决">
+                    申请复议（{appealableRows.length} 行）
+                  </Tooltip>
+                </Button>
+              )}
+            </div>
+          )
+        })()}
+        {activeCheck.status === 'completed' && activeCheck.audit_status === 'pending' && (
+          <div className="sca-reject-banner" style={{ background: '#fffbeb', borderColor: '#fde68a', marginBottom: 12 }}>
+            <SafetyCertificateOutlined style={{ color: '#d97706', flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <div className="rb-title" style={{ color: '#b45309' }}>盘点已完结，等待财务抽检</div>
+              <div className="rb-body">抽检通过后才会按（类型 × 仓库）计划 K3 盘盈/调拨单据 · 财务可在盘点抽检工作台复点核对或免检通过</div>
+            </div>
+            <Button size="small" style={{ marginLeft: 'auto', flexShrink: 0 }} onClick={() => navigate('/stock-check-audit')}>查看抽检队列</Button>
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 40, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <div>
             <div className="sc-meta-k">关联订单</div>
@@ -1463,6 +1697,48 @@ export default function StockCheckWorkbench() {
             </div>
           </div>
         </div>
+        {auditLogs.length > 0 && (() => {
+          const last = auditLogs[auditLogs.length - 1]
+          const rejected = auditLogs.filter((l) => l.action === 'reject').length
+          return (
+            <div style={{ marginTop: 10, borderTop: '1px dashed #e2e8f0', paddingTop: 8 }}>
+              <div
+                style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none', fontSize: 'calc(12px * var(--font-size-scale))', color: '#475569' }}
+                onClick={() => setTlOpen((v) => !v)}
+              >
+                <span style={{ fontWeight: 500, color: '#334155' }}>抽检记录</span>
+                <span>{auditLogs.length} 轮{rejected > 0 ? ` · 发回 ${rejected} 次` : ''}</span>
+                <span style={{ color: '#94a3b8' }}>
+                  最近：{AUDIT_ACTION_LABEL[last.action] || last.action} · {last.operated_by || '—'} · {last.created_at ? formatDateTime(last.created_at) : '—'}
+                </span>
+                <Button type="link" size="small" style={{ padding: 0, marginLeft: 'auto' }}>
+                  {tlOpen ? '收起' : '展开全部'}
+                </Button>
+              </div>
+              {tlOpen && (
+                <div className="sca-hist" style={{ marginTop: 8 }}>
+                  {[...auditLogs].reverse().map((log) => {
+                    const checked = (log.items || []).length
+                    const matched = (log.items || []).filter((i) => i.matches === 1).length
+                    const cls = log.action === 'reject' ? 'h-reject' : log.action === 'flag' ? 'h-flag' : 'h-pass'
+                    return (
+                      <div key={log.id} className={`sca-hist-item ${cls}`}>
+                        <div className="t">
+                          第 {log.round_no} 轮 · {AUDIT_ACTION_LABEL[log.action] || log.action} · {log.operated_by || '—'} · {log.created_at ? formatDateTime(log.created_at) : '—'}
+                        </div>
+                        <div className="d">
+                          {log.comment}
+                          {log.action === 'reject' && (log.rejected_item_ids?.length ?? 0) > 0 && ` · 问题行 ${log.rejected_item_ids?.length} 个`}
+                          {checked > 0 && ` · 复点 ${checked} 行，一致 ${matched} 行`}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })()}
         <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
           {!readonly && isOrder && (activeCheck.status === 'in_progress' || activeCheck.status === 'open') && (
             <Button type="link" size="small" onClick={handleRefreshBom}>补入子BOM物料</Button>
@@ -1579,12 +1855,16 @@ export default function StockCheckWorkbench() {
             message="盘盈生成 K3 盘盈入库单、盘亏生成调拨单（调入库存检查不良仓）；单据为未审核状态，需仓管员在 K3 中审核后库存才会调整，并经 ERP 同步回流本系统。成功单据不会重复生成。" />
           {wbOverview && wbOverview.skipped_items.length > 0 && (
             <Alert type="warning" showIcon style={{ marginBottom: 8 }}
-              message="以下盘差行无仓库信息，未生成 K3 单据"
-              description={wbOverview.skipped_items.map((s, i) => (
-                <span key={i}>
-                  {s.material_code || s.material_name || '-'}（差异 {s.diff_qty}）{i < wbOverview.skipped_items.length - 1 ? '、' : ''}
-                </span>
-              ))} />
+              message="以下盘差行未生成 K3 单据"
+              description={
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {wbOverview.skipped_items.map((s, i) => (
+                    <li key={i} style={{ marginBottom: 2 }}>
+                      {s.material_code || s.material_name || '-'}（差异 {s.diff_qty}） — {s.reason || '原因未填写'}
+                    </li>
+                  ))}
+                </ul>
+              } />
           )}
           {todoCount > 0 ? (
             <Table size="small" rowKey="id" loading={wbLoading}
@@ -1645,6 +1925,9 @@ export default function StockCheckWorkbench() {
             {STATUS_MAP[activeCheck.status || '']?.label || activeCheck.status}
           </ScTag>
           <ScTag variant={typeTag.variant}>{typeTag.label}盘点</ScTag>
+          {activeCheck.audit_status && (activeCheck.audit_status !== 'pending' || activeCheck.status === 'completed') && (
+            <AuditTag status={activeCheck.audit_status} />
+          )}
           {(activeCheck.co_checkers || []).length > 0 && (
             <ScTag variant="plain">
               <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
@@ -1693,11 +1976,29 @@ export default function StockCheckWorkbench() {
             { label: `仅差异 ${segCounts.diff}`, value: 'diff' },
           ]}
         />
+        {items.some((it) => it.audit_failed === 1) && (
+          <Tooltip title="只显示财务抽检标记的问题行（重录实盘数后自动清除）">
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 13, color: '#dc2626', whiteSpace: 'nowrap' }}>
+              仅看问题行 <Switch size="small" checked={auditFailedOnly} onChange={setAuditFailedOnly} />
+            </span>
+          </Tooltip>
+        )}
         {!readonly && selectedItems.length > 0 && (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#eef0fe', border: '1px solid #c6cbfa', borderRadius: 999, padding: '3px 6px 3px 12px', color: '#3f3f9f' }}>
             <Button size="small" onClick={handleBatchMarkEven}>
               按库存盘平 ({selectedItems.length})
             </Button>
+            {activeCheck.status === 'in_progress' && (() => {
+              const appealable = selectedItems.filter((it) => it.audit_failed === 1 && it.appeal_status !== 'pending')
+              const alreadyPending = selectedItems.some((it) => it.appeal_status === 'pending')
+              return (
+                <Tooltip title={alreadyPending ? '勾选行中含复议待裁决的行' : appealable.length === 0 ? '请勾选被标记的问题行（红底行）' : '认为复点有误？对勾选的问题行申请复议'}>
+                  <Button size="small" disabled={appealable.length === 0} onClick={() => { setAppealReason(''); setAppealOpen(true) }}>
+                    申请复议 ({appealable.length})
+                  </Button>
+                </Tooltip>
+              )
+            })()}
             <Button size="small" ghost style={{ color: '#64748b', borderColor: '#e2e8f0' }} onClick={() => setSelectedKeys([])}>
               清除
             </Button>
@@ -1740,9 +2041,12 @@ export default function StockCheckWorkbench() {
                 dataSource={tableItems}
                 columns={columns as any}
                 pagination={false}
-                scroll={{ x: 1300, y: tableScrollY }}
-              onChange={(_pagination, filters) => setColumnFilters(filters as Record<string, unknown>)}
-              rowClassName={(r: StockCheckItem) => (r.actual_qty == null && !hasRecentMark(r) ? 'sc-unchecked' : '')}
+                scroll={{ x: 1400, y: tableScrollY }}
+                onChange={(_pagination, filters) => setColumnFilters(filters as Record<string, unknown>)}
+                rowClassName={(r: StockCheckItem) =>
+                  r.audit_failed === 1 ? 'sc-audit-failed-row'
+                    : (r.actual_qty == null && !hasRecentMark(r) ? 'sc-unchecked' : '')
+                }
               rowSelection={readonly ? undefined : {
                 selectedRowKeys: selectedKeys,
                 onChange: (keys: Key[]) => setSelectedKeys(keys),
@@ -1765,22 +2069,24 @@ export default function StockCheckWorkbench() {
                     </Table.Summary.Cell>
                     {readonly ? (
                       <>
-                        {/* 无选择列：物料..实盘(0-4) 差异5 盘点人6 操作7 */}
+                        {/* 无选择列：物料..实盘(0-4) 差异5 复点6 盘点人7 操作8 */}
                         <Table.Summary.Cell index={5} align="right">{diffCell}</Table.Summary.Cell>
                         <Table.Summary.Cell index={6} />
-                        <Table.Summary.Cell index={7}>
+                        <Table.Summary.Cell index={7} />
+                        <Table.Summary.Cell index={8}>
                           <span className="sc-note">差异 = 实盘 − 快照</span>
                         </Table.Summary.Cell>
                       </>
                     ) : (
                       <>
-                        {/* 有选择列：sel0 物料..即时(1-4) 实盘5 差异6 盘点人7 操作8 */}
+                        {/* 有选择列：sel0 物料..即时(1-4) 实盘5 差异6 复点7 盘点人8 操作9 */}
                         <Table.Summary.Cell index={5} align="right">
                           <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{actualSum}</span>
                         </Table.Summary.Cell>
                         <Table.Summary.Cell index={6} align="right">{diffCell}</Table.Summary.Cell>
                         <Table.Summary.Cell index={7} />
-                        <Table.Summary.Cell index={8}>
+                        <Table.Summary.Cell index={8} />
+                        <Table.Summary.Cell index={9}>
                           <span className="sc-note">差异 = 实盘 − 快照</span>
                         </Table.Summary.Cell>
                       </>
@@ -1808,6 +2114,30 @@ export default function StockCheckWorkbench() {
 
       <Tour open={tourOpen} steps={tourSteps} onClose={handleTourClose} onFinish={handleTourClose} />
 
+      {/* ===== 申请复议弹窗（发回态 · 勾选被标记行后提交） ===== */}
+      <Modal
+        open={appealOpen}
+        title={`申请复议 · ${activeCheck?.check_no ?? ''}`}
+        width={520}
+        maskClosable={false}
+        onCancel={() => { if (!appealing) setAppealOpen(false) }}
+        footer={[
+          <Button key="cancel" onClick={() => setAppealOpen(false)}>取消</Button>,
+          <Button key="ok" type="primary" loading={appealing} onClick={submitAppeal}>提交复议</Button>,
+        ]}
+      >
+        <div style={{ marginBottom: 12, padding: '8px 12px', background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, fontSize: 12.5, color: '#075985', lineHeight: 1.7 }}>
+          对勾选的问题行申请复议后，这些行进入「复议中」，<b>暂无需改数</b>；财务将重新复点裁决——支持则撤销标记，驳回则仍需修正。复议期间本单不能重新完结。
+        </div>
+        <div className="sc-frm-label" style={{ marginBottom: 4 }}>复议原因 <span style={{ color: '#dc2626' }}>*</span></div>
+        <Input.TextArea
+          rows={3}
+          value={appealReason}
+          placeholder="说明为何认为复点有误（如：复点位置/批次不同、按整箱计数口径差异…），将随通知发送给财务。"
+          onChange={(e) => setAppealReason(e.target.value)}
+        />
+      </Modal>
+
       {/* ===== 完结确认弹窗（K3 回写分组预览 · 完结并回写 / 仅完结） ===== */}
       {(() => {
         // source='k3' 的单后端永不回写(plan_writebacks 直接跳过)，不展示回写预览与按钮
@@ -1823,17 +2153,12 @@ export default function StockCheckWorkbench() {
           onCancel={() => { if (!completing) setCompleteOpen(false) }}
           footer={
             <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ marginRight: 'auto', fontSize: 12, color: '#94a3b8' }}>回写失败不影响完结结果</span>
-              {wbAvailable && (
-                <Button loading={completing && completeMode === 'only'} disabled={completing && completeMode !== 'only'} onClick={() => doComplete(false)}>
-                  仅完结，稍后回写
-                </Button>
-              )}
+              <span style={{ marginRight: 'auto', fontSize: 12, color: '#94a3b8' }}>完结后进入财务抽检，抽检通过后回写 K3</span>
               <Button type="primary" icon={<CheckCircleOutlined />}
                 loading={completing && completeMode === 'writeback'}
                 disabled={completing && completeMode !== 'writeback'}
                 onClick={() => doComplete(true)}>
-                {wbAvailable ? '完结并回写 K3' : '完结'}
+                完结
               </Button>
             </span>
           }
@@ -1849,7 +2174,7 @@ export default function StockCheckWorkbench() {
           {wbAvailable ? (
             <>
               <div style={{ fontSize: 12.5, color: '#475569', fontWeight: 500, marginBottom: 6 }}>
-                将按（单据类型 × 仓库）分组生成 <b style={{ color: '#0f172a' }}>{writebackPreview.bills.length} 张 K3 单据</b>（未审核）：
+                财务抽检通过后，将按（单据类型 × 仓库）分组生成 <b style={{ color: '#0f172a' }}>{writebackPreview.bills.length} 张 K3 单据</b>（未审核）：
               </div>
               <Table size="small" rowKey="key" pagination={false} dataSource={writebackPreview.bills}
                 columns={[
@@ -1876,7 +2201,7 @@ export default function StockCheckWorkbench() {
                   ))} />
               )}
               <Alert type="info" showIcon style={{ marginTop: 10 }}
-                message="单据写入 K3 后为未审核状态，需仓管员在 K3 中审核后库存才会调整。若 K3 暂不可用或部分失败，完结不受影响，可稍后在本页「K3 回写」卡片重试（成功单据不会重复生成）。" />
+                message="完结后盘点单进入「待抽检」，由财务在抽检工作台处置；抽检/免检通过后才生成上述 K3 单据（未审核状态，需仓管员在 K3 中审核后库存才会调整）。发回重填时已盘数据保留，仅修正问题行。" />
             </>
           ) : (
             <Alert type="info" showIcon

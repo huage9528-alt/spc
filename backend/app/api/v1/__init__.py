@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import assistant, basicdata, common, dashboard, exception, external, masterdata, material, meeting, npi, order, production, purchase, rules, system, writeback
+from app.api.v1 import approval, assistant, basicdata, common, dashboard, exception, external, masterdata, material, order, production, purchase, quality, rules, system, writeback
 
 api_router = APIRouter()
 
@@ -18,6 +18,7 @@ api_router.include_router(material.purchase_plan_analysis_router, prefix="/mater
 api_router.include_router(material.issues_router, prefix="/materials/issues", tags=["物料齐套中心-问题物料"])
 api_router.include_router(material.long_lead_router, prefix="/materials/long-lead", tags=["物料齐套中心-长交期物料"])
 api_router.include_router(material.kit_analysis_router, prefix="/materials/kit-analysis", tags=["物料齐套中心-齐套分析"])
+api_router.include_router(material.kitting_router, prefix="/materials/kitting", tags=["物料齐套中心-齐套计算"])
 api_router.include_router(material.supplier_risk_router, prefix="/materials/supplier-risk", tags=["物料齐套中心-供应商风险"])
 api_router.include_router(material.supplier_payment_router, prefix="/materials/supplier-payment", tags=["物料齐套中心-供应商付款排程"])
 api_router.include_router(material.supplier_message_router, prefix="/materials/supplier-messages", tags=["物料齐套中心-供应商即时沟通"])
@@ -25,6 +26,8 @@ api_router.include_router(material.subcontract_orders_router, prefix="/materials
 api_router.include_router(material.po_router, prefix="/materials", tags=["物料齐套中心-ERP采购订单"])
 api_router.include_router(material.stock_check_router, prefix="/materials", tags=["物料齐套中心-物料盘点"])
 api_router.include_router(material.scrap_inventory_router, prefix="/materials", tags=["物料齐套中心-报废物料库存查询"])
+api_router.include_router(material.inventory_board_router, prefix="/materials/inventory-board", tags=["物料齐套中心-库存看板"])
+api_router.include_router(material.occupancy_router, prefix="/materials/occupancy", tags=["物料齐套中心-物料占用分析"])
 
 # Production center
 api_router.include_router(production.router, prefix="/production", tags=["生产协同中心"])
@@ -33,21 +36,12 @@ api_router.include_router(production.router, prefix="/production", tags=["生产
 api_router.include_router(exception.issues_router, prefix="/exceptions", tags=["异常与质量中心"])
 api_router.include_router(exception.risk_router, prefix="/exceptions/risk", tags=["风险扫描"])
 api_router.include_router(exception.pool_router, prefix="/exceptions/pool", tags=["异常总池"])
-api_router.include_router(exception.issue_log_router, prefix="/exceptions/issue-log", tags=["问题日志"])
-api_router.include_router(exception.change_log_router, prefix="/exceptions/change-log", tags=["变更日志"])
 api_router.include_router(exception.quality_router, prefix="/exceptions/quality", tags=["品质异常"])
 api_router.include_router(exception.product_samples_router, prefix="/exceptions/product-samples", tags=["产品封样"])
 
-# Meeting and NPI centers
-api_router.include_router(meeting.router, prefix="/meetings", tags=["会议与任务中心"])
-api_router.include_router(npi.router, prefix="/npi", tags=["新品/NPI项目中心"])
-
 # Rules center
 api_router.include_router(rules.rules_router, prefix="/rules", tags=["规则配置中心"])
-api_router.include_router(rules.inspections_router, prefix="/rules/inspections", tags=["点检规则配置"])
 api_router.include_router(rules.node_standards_router, prefix="/rules/node-standards", tags=["节点标准配置"])
-api_router.include_router(rules.responsibilities_router, prefix="/rules/responsibilities", tags=["责任归属配置"])
-api_router.include_router(rules.status_dict_router, prefix="/rules/status-dict", tags=["状态字典配置"])
 api_router.include_router(rules.order_standards_router, prefix="/rules/order-standards", tags=["订单标准"])
 api_router.include_router(rules.work_instructions_router, prefix="/rules/work-instructions", tags=["作业指导书"])
 
@@ -92,3 +86,9 @@ api_router.include_router(purchase.price_change_router, prefix="/purchase/price-
 
 # Writeback center
 api_router.include_router(writeback.router, tags=["数据回写"])
+
+# Quality center（品质管理）
+api_router.include_router(quality.supplier_claims_router, prefix="/quality/supplier-claims", tags=["品质管理-供应商索赔单"])
+
+# Approval center（审批中心：统一待我审批 + 审批链配置）
+api_router.include_router(approval.approvals_router, prefix="/approvals", tags=["审批中心"])

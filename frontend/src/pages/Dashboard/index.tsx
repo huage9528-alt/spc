@@ -8,14 +8,18 @@ import ClosureSparkline from './components/ClosureSparkline'
 import PendingItems from './components/PendingItems'
 import ProcurementBoard from './components/ProcurementBoard'
 import ShipmentBoard from './components/ShipmentBoard'
+import InventoryBoard from './components/InventoryBoard'
 import { dashboardApi, riskApi } from '../../services/api'
+import { useAuthStore } from '../../store/auth'
 import './dashboard.css'
 
-type DashboardTab = 'today' | 'procurement' | 'shipment'
+type DashboardTab = 'today' | 'procurement' | 'shipment' | 'inventory'
 
 const REFRESH_INTERVAL = 30 * 60 * 1000
 
 export default function Dashboard() {
+  const { hasPermission } = useAuthStore()
+  const canViewInventoryBoard = hasPermission('materials.inventory_board', 'read')
   const [activeTab, setActiveTab] = useState<DashboardTab>('today')
   const [scanning, setScanning] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -165,6 +169,11 @@ export default function Dashboard() {
           <div className={`tab ${activeTab === 'shipment' ? 'active' : ''}`} onClick={() => setActiveTab('shipment')}>
             出货计划看板
           </div>
+          {canViewInventoryBoard && (
+            <div className={`tab ${activeTab === 'inventory' ? 'active' : ''}`} onClick={() => setActiveTab('inventory')}>
+              库存看板
+            </div>
+          )}
           <div className="toolbar">
             {activeTab === 'today' && (
               <>
@@ -182,13 +191,15 @@ export default function Dashboard() {
                 </button>
               </>
             )}
-            <button className="btn btn-secondary btn-sm" onClick={handleScan} disabled={scanning}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
-                <path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16" />
-                <path d="M4 12h16" />
-              </svg>
-              {scanning ? '扫描中…' : '立即扫描'}
-            </button>
+            {activeTab === 'today' && (
+              <button className="btn btn-secondary btn-sm" onClick={handleScan} disabled={scanning}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+                  <path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16" />
+                  <path d="M4 12h16" />
+                </svg>
+                {scanning ? '扫描中…' : '立即扫描'}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -225,8 +236,10 @@ export default function Dashboard() {
         </>
       ) : activeTab === 'procurement' ? (
         <ProcurementBoard />
-      ) : (
+      ) : activeTab === 'shipment' ? (
         <ShipmentBoard />
+      ) : (
+        <InventoryBoard />
       )}
     </div>
   )

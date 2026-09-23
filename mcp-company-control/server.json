@@ -1,0 +1,34 @@
+{
+  "name": "company-control",
+  "version": "1.1.0",
+  "description": "公司智能控制中台只读业务能力（订单列表 / 订单明细列表 / BOM 多级树 / 物料齐套结果 / 缺料明细 / 齐套需求 / 库存可用量 / 未来供给 / 质量异常列表 / 质量追溯 / 健康检查；0.1.0 兼容：订单风险列表、指标目录、指标查询、物料检索、供应商详情）",
+  "owner": "company-middle-platform",
+  "transport": ["stdio", "streamable-http"],
+  "read_only": true,
+  "required_permissions": ["CONTROL_PLATFORM_READ"],
+  "dependencies": [
+    "中台 FastAPI 对外接口（/api/v1/external/*，数据供给 HMAC API Key）",
+    "中台销售订单 / 订单明细 / BOM / 物料 / 供应商数据源（只读）",
+    "中台质量异常 / 订单行 / BOM 数据源（只读）"
+  ],
+  "maintainer": "中台平台组（版本负责人待 Registry 提交时填写）",
+  "runtime": "python>=3.12, mcp>=2.0",
+  "tools": [
+    { "name": "get_system_health", "permission_level": "READ_ONLY" },
+    { "name": "orders_list", "permission_level": "READ_ONLY" },
+    { "name": "order_details_list", "permission_level": "READ_ONLY" },
+    { "name": "bom_tree", "permission_level": "READ_ONLY" },
+    { "name": "detail_orders_list", "permission_level": "READ_ONLY" },
+    { "name": "catalog_metrics_list", "permission_level": "READ_ONLY" },
+    { "name": "metric_query", "permission_level": "READ_ONLY" },
+    { "name": "master_material_search", "permission_level": "READ_ONLY" },
+    { "name": "master_supplier_get", "permission_level": "READ_ONLY" },
+    { "name": "material_kitting_results_list", "permission_level": "READ_ONLY" },
+    { "name": "material_shortages_list", "permission_level": "READ_ONLY" },
+    { "name": "material_kitting_demands_list", "permission_level": "READ_ONLY" },
+    { "name": "inventory_availability_list", "permission_level": "READ_ONLY" },
+    { "name": "material_supplies_list", "permission_level": "READ_ONLY" },
+    { "name": "quality_issues_list", "permission_level": "READ_ONLY" },
+    { "name": "quality_trace", "permission_level": "READ_ONLY" }
+  ]
+}

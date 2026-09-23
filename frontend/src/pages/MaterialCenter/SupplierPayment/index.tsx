@@ -378,7 +378,7 @@ export default function SupplierPayment() {
               ]
               return (
                 <Table
-                  rowKey="line_no"
+                  rowKey={(r: InvoiceDetail) => `${r.invoice_no}-${r.line_no}`}
                   dataSource={record.invoices}
                   columns={invCols}
                   size="small"
