@@ -1,0 +1,5 @@
+mcp>=2.0
+httpx>=0.27.0
+python-dotenv>=1.0.1
+# 与 backend fastapi==0.115.6 同环境安装时，防止 starlette 被解析到 >=0.42（会破坏 FastAPI）
+starlette>=0.40,<0.42

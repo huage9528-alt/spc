@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from hashlib import sha1
 from typing import Optional
 
 from sqlalchemy import select
@@ -63,8 +62,6 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "production.packaging": READ,
             "production.exceptions": READ,
             "exceptions.pool": READ,
-            "exceptions.issue_log": READ,
-            "exceptions.change_log": READ,
             "exceptions.quality": READ,
             "exceptions.product_samples": READ,
             "exceptions.closure": READ,
@@ -99,7 +96,6 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "production.packaging": READ_UPDATE_IMPORT,
             "production.exceptions": READ_WRITE,
             "exceptions.pool": READ_UPDATE,
-            "exceptions.issue_log": READ_WRITE,
             "exceptions.closure": READ_UPDATE,
             "rules.order_standards": READ,
             "rules.work_instructions": READ,
@@ -117,11 +113,9 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "production.packaging": READ,
             "production.exceptions": READ_UPDATE,
             "exceptions.pool": READ,
-            "exceptions.issue_log": READ_WRITE,
             "exceptions.quality": ["create", "read", "update", "import"],
             "exceptions.product_samples": READ_UPDATE,
             "exceptions.closure": READ_UPDATE,
-            "rules.inspection": READ,
             "rules.node_standards": READ,
             "rules.order_standards": READ,
             "rules.work_instructions": READ,
@@ -135,12 +129,9 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "production.overview": READ_UPDATE,
             "production.exceptions": READ_UPDATE,
             "exceptions.pool": READ_UPDATE,
-            "exceptions.issue_log": READ_UPDATE,
-            "exceptions.change_log": READ_UPDATE,
             "exceptions.quality": FULL_IMPORT,
             "exceptions.product_samples": FULL,
             "exceptions.closure": READ_UPDATE,
-            "rules.inspection": READ_UPDATE,
             "rules.node_standards": READ_UPDATE,
             "rules.order_standards": READ,
             "rules.work_instructions": READ,
@@ -161,13 +152,9 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "production.packaging": READ_UPDATE,
             "production.exceptions": READ_WRITE,
             "exceptions.pool": READ_UPDATE,
-            "exceptions.issue_log": READ_WRITE,
-            "exceptions.change_log": READ_UPDATE,
             "exceptions.quality": READ_UPDATE,
             "exceptions.product_samples": READ_UPDATE,
             "exceptions.closure": READ_UPDATE,
-            "npi": READ_UPDATE,
-            "rules.inspection": READ_UPDATE,
             "rules.node_standards": READ_UPDATE,
             "rules.order_standards": READ_UPDATE,
             "rules.work_instructions": READ_UPDATE,
@@ -184,7 +171,6 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "production.assembly": READ_UPDATE,
             "production.packaging": READ_UPDATE,
             "production.exceptions": READ_WRITE,
-            "exceptions.issue_log": READ_WRITE,
             "exceptions.quality": READ,
             "rules.work_instructions": READ,
             "basicdata.data": READ,
@@ -201,11 +187,7 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "materials.kit_analysis": READ,
             "materials.supplier_risk": READ,
             "exceptions.pool": READ,
-            "exceptions.issue_log": READ_WRITE,
-            "exceptions.change_log": READ,
             "exceptions.closure": READ,
-            "meetings": READ_UPDATE,
-            "npi": READ,
             "basicdata.data": READ,
         },
     ),
@@ -223,12 +205,8 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "materials.supplier_risk": ["create", "read", "update", "import"],
             "materials.supplier_payment": ["create", "read", "update", "import"],
             "exceptions.pool": READ,
-            "exceptions.issue_log": READ,
-            "exceptions.change_log": READ,
             "exceptions.quality": READ,
             "exceptions.closure": READ,
-            "meetings": READ,
-            "npi": READ,
             "basicdata.import": READ,
             "basicdata.data": READ,
             "audit": READ,
@@ -253,6 +231,8 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "materials.purchase_plan": READ,
             "materials.supplier_risk": READ,
             "materials.supplier_payment": ["create", "read", "update", "import"],
+            "materials.stock_check": READ,
+            "materials.stock_check_audit": ["read", "update"],
             "basicdata.data": READ,
             "audit": READ,
         },
@@ -275,8 +255,6 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "materials.kit_analysis": READ,
             "production.overview": READ,
             "exceptions.pool": READ,
-            "exceptions.issue_log": READ_WRITE,
-            "meetings": READ_UPDATE,
             "basicdata.data": READ,
         },
     ),
@@ -301,13 +279,9 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "production.packaging": READ_UPDATE,
             "production.exceptions": READ_UPDATE,
             "exceptions.pool": READ_UPDATE,
-            "exceptions.issue_log": READ_UPDATE,
-            "exceptions.change_log": READ_UPDATE,
             "exceptions.quality": READ_UPDATE,
             "exceptions.product_samples": READ_UPDATE,
             "exceptions.closure": READ_UPDATE,
-            "meetings": FULL,
-            "npi": READ_UPDATE,
             "rules.order_standards": READ_UPDATE,
             "rules.work_instructions": READ_UPDATE,
             "basicdata.import": READ,
@@ -338,20 +312,13 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "production.packaging": READ,
             "production.exceptions": READ_UPDATE,
             "exceptions.pool": READ_UPDATE,
-            "exceptions.issue_log": READ_UPDATE,
-            "exceptions.change_log": READ_UPDATE,
             "exceptions.quality": READ_UPDATE,
             "exceptions.product_samples": READ_UPDATE,
             "exceptions.closure": READ_UPDATE,
-            "meetings": FULL,
-            "npi": READ_UPDATE,
             "rules.risk_rules": READ,
-            "rules.inspection": READ,
             "rules.node_standards": READ,
             "rules.order_standards": READ,
             "rules.work_instructions": READ,
-            "rules.responsibility": READ,
-            "rules.status_dict": READ,
             "basicdata.import": READ,
             "basicdata.data": READ,
             "basicdata.feedback": READ_UPDATE,
@@ -380,20 +347,13 @@ POSITION_PERMISSION_PRESETS: dict[str, dict[str, list[str]]] = {
             "production.packaging": READ,
             "production.exceptions": READ_UPDATE,
             "exceptions.pool": READ_UPDATE,
-            "exceptions.issue_log": READ_UPDATE,
-            "exceptions.change_log": READ_UPDATE,
             "exceptions.quality": READ_UPDATE,
             "exceptions.product_samples": READ_UPDATE,
             "exceptions.closure": READ_UPDATE,
-            "meetings": FULL,
-            "npi": READ_UPDATE,
             "rules.risk_rules": READ_UPDATE,
-            "rules.inspection": READ_UPDATE,
             "rules.node_standards": READ_UPDATE,
             "rules.order_standards": READ_UPDATE,
             "rules.work_instructions": READ_UPDATE,
-            "rules.responsibility": READ_UPDATE,
-            "rules.status_dict": READ_UPDATE,
             "basicdata.import": READ,
             "basicdata.data": READ,
             "basicdata.feedback": READ_UPDATE,
@@ -488,128 +448,11 @@ def get_position_permissions(position_name: Optional[str]) -> dict[str, list[str
     return deepcopy(POSITION_PERMISSION_PRESETS.get(category, POSITION_PERMISSION_PRESETS["employee"]))
 
 
-def make_position_role_code(position_code: Optional[str], position_name: Optional[str], org_name: Optional[str] = None) -> str:
-    source = (position_name or position_code or "position").strip().lower()
-    if org_name:
-        source = f"{org_name.strip()}_{source}"
-    digest = sha1(source.encode("utf-8")).hexdigest()[:24]
-    return f"pos_{digest}"
-
-
 def make_position_role_name(position_name: Optional[str], org_name: Optional[str] = None) -> str:
     name = (position_name or "未命名岗位").strip()
     if org_name:
         return f"岗位-{org_name.strip()}-{name}"
     return f"岗位-{name}"
-
-
-async def ensure_position_role(db: AsyncSession, position: Position) -> tuple[SysRole, bool, bool]:
-    """Ensure a role exists for a position.
-
-    Returns (role, role_created, position_linked).
-    Existing non-empty permissions are preserved so administrators can tune them.
-    """
-    desired_name = make_position_role_name(position.position_name)
-
-    # 通过 position_id 查找关联的角色
-    if position.id:
-        role_result = await db.execute(
-            select(SysRole).where(SysRole.position_id == str(position.id))
-        )
-        role = role_result.scalar_one_or_none()
-        if role:
-            if role.role_name != desired_name:
-                role.role_name = desired_name
-            if not role.permissions:
-                role.permissions = get_position_permissions(position.position_name)
-            return role, False, False
-
-    role_code = make_position_role_code(position.position_code, position.position_name)
-    role_result = await db.execute(select(SysRole).where(SysRole.role_code == role_code))
-    role = role_result.scalar_one_or_none()
-    role_created = False
-    if role:
-        if role.role_name != desired_name:
-            role.role_name = desired_name
-        if not role.permissions:
-            role.permissions = get_position_permissions(position.position_name)
-        # 回填 position_id
-        if not role.position_id and position.id:
-            role.position_id = str(position.id)
-    else:
-        role = SysRole(
-            role_code=role_code,
-            role_name=desired_name,
-            permissions=get_position_permissions(position.position_name),
-            position_id=str(position.id),
-        )
-        db.add(role)
-        await db.flush()
-        role_created = True
-
-    return role, role_created, True
-
-
-async def ensure_org_position_role(
-    db: AsyncSession,
-    position: Position,
-    org_name: Optional[str] = None,
-    org_id: Optional[int] = None,
-) -> tuple[SysRole, bool]:
-    """Ensure a role exists for a (org, position) combination.
-
-    Returns (role, role_created).
-    Unlike ensure_position_role, this does NOT link position to role via position_id,
-    so the same global Position can map to different org-specific roles.
-    Existing non-empty permissions are preserved so administrators can tune them.
-    """
-    desired_name = make_position_role_name(position.position_name, org_name)
-
-    # 优先通过 org_id + position_id 查找
-    if org_id and position.id:
-        existing = await db.execute(
-            select(SysRole).where(
-                SysRole.org_id == str(org_id),
-                SysRole.position_id == str(position.id),
-            )
-        )
-        role = existing.scalars().first()
-        if role:
-            if role.role_name != desired_name:
-                role.role_name = desired_name
-            if not role.permissions:
-                role.permissions = get_position_permissions(position.position_name)
-            return role, False
-
-    # Fallback: 通过 role_code 查找（兼容旧数据）
-    role_code = make_position_role_code(position.position_code, position.position_name, org_name)
-    role_result = await db.execute(select(SysRole).where(SysRole.role_code == role_code))
-    role = role_result.scalars().first()
-    role_created = False
-
-    if role:
-        if role.role_name != desired_name:
-            role.role_name = desired_name
-        if not role.permissions:
-            role.permissions = get_position_permissions(position.position_name)
-        # 回填 org_id 和 position_id
-        if org_id and not role.org_id:
-            role.org_id = str(org_id)
-        if position.id and not role.position_id:
-            role.position_id = str(position.id)
-    else:
-        role = SysRole(
-            role_code=role_code,
-            role_name=desired_name,
-            permissions=get_position_permissions(position.position_name),
-            org_id=str(org_id) if org_id else None,
-            position_id=str(position.id) if position.id else None,
-        )
-        db.add(role)
-        await db.flush()
-        role_created = True
-
-    return role, role_created
 
 
 async def resolve_position_for_employee(db: AsyncSession, employee: Employee) -> Optional[Position]:
@@ -629,46 +472,6 @@ async def resolve_position_for_employee(db: AsyncSession, employee: Employee) ->
         employee.position_id = positions[0].id
         return positions[0]
     return None
-
-
-async def resolve_role_for_employee(db: AsyncSession, employee: Employee) -> tuple[Optional[SysRole], Optional[Position]]:
-    position = await resolve_position_for_employee(db, employee)
-    if not position:
-        return None, None
-
-    # 获取员工的部门名称和ID，用于生成部门+岗位联合角色
-    org_name = None
-    org_id = None
-    if employee.org_id:
-        from app.models.basicdata.organization import Organization
-        org_result = await db.execute(select(Organization).where(Organization.id == employee.org_id))
-        org = org_result.scalar_one_or_none()
-        if org:
-            org_name = org.org_name
-            org_id = org.id
-
-    # 有部门信息时，使用部门+岗位联合角色；否则使用默认岗位角色
-    if org_name:
-        role, _ = await ensure_org_position_role(db, position, org_name, org_id=org_id)
-    else:
-        role, _, _ = await ensure_position_role(db, position)
-
-    return role, position
-
-
-async def resolve_employee_role_by_code(
-    db: AsyncSession,
-    emp_code: str,
-) -> tuple[Optional[Employee], Optional[Position], Optional[SysRole]]:
-    clean_code = (emp_code or "").strip()
-    if not clean_code:
-        return None, None, None
-    result = await db.execute(select(Employee).where(Employee.emp_code == clean_code))
-    employee = result.scalar_one_or_none()
-    if not employee:
-        return None, None, None
-    role, position = await resolve_role_for_employee(db, employee)
-    return employee, position, role
 
 
 async def resolve_or_create_role(
@@ -771,42 +574,3 @@ async def sync_user_role_from_employee(db: AsyncSession, employee: Employee) -> 
         return False
     user.role_id = role.id
     return True
-
-
-async def backfill_role_org_position(db: AsyncSession) -> int:
-    """回填现有角色的 org_id 和 position_id，返回更新数量"""
-    from app.models.basicdata.organization import Organization
-
-    result = await db.execute(select(SysRole))
-    roles = result.scalars().all()
-    updated = 0
-    for role in roles:
-        changed = False
-        # 通过角色名解析岗位（格式：岗位-{岗位名} 或 岗位-{部门名}-{岗位名}）
-        if not role.position_id:
-            if role.role_name.startswith("岗位-"):
-                parts = role.role_name.split("-", 2)
-                pos_name = parts[-1].strip() if parts else None
-                if pos_name:
-                    pos_result = await db.execute(
-                        select(Position).where(Position.position_name == pos_name)
-                    )
-                    pos = pos_result.scalar_one_or_none()
-                    if pos:
-                        role.position_id = str(pos.id)
-                        changed = True
-        # 通过角色名解析部门（格式：岗位-{部门名}-{岗位名}）
-        if not role.org_id and role.role_name.startswith("岗位-"):
-            parts = role.role_name.split("-", 2)
-            if len(parts) == 3:
-                org_name = parts[1]
-                org_result = await db.execute(
-                    select(Organization).where(Organization.org_name == org_name)
-                )
-                org = org_result.scalars().first()
-                if org:
-                    role.org_id = org.id
-                    changed = True
-        if changed:
-            updated += 1
-    return updated

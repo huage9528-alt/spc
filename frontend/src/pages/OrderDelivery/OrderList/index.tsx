@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Row, Col, Table, Tag, Input, InputNumber, Select, Button, message, Space, Tooltip, Modal, Form, DatePicker, Card, Spin, Progress, Dropdown, Switch, Checkbox, Popover, Drawer } from 'antd'
+import { Row, Col, Table, Tag, Input, InputNumber, Select, Button, message, Space, Tooltip, Modal, Form, DatePicker, Card, Spin, Progress, Dropdown, Switch, Checkbox, Popover, Drawer, Upload, Timeline, Badge } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 const { RangePicker } = DatePicker
 import {
@@ -20,6 +20,8 @@ import {
   SettingOutlined,
   BarChartOutlined,
   LockOutlined,
+  HistoryOutlined,
+  UploadOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import RiskBadge from '../../../components/RiskBadge'
@@ -31,6 +33,7 @@ import { useExport } from '../../../hooks/useExport'
 import ExportColumnSelector, { type ExportColumnOption } from '../../../components/ExportColumnSelector'
 import { useUiPreferencesStore } from '../../../store/uiPreferences'
 import { useAuthStore } from '../../../store/auth'
+import { useThemeStore } from '../../../store/theme'
 import ShippingAnalyticsCharts from './components/ShippingAnalyticsCharts'
 
 interface OrderRow {
@@ -59,6 +62,7 @@ interface OrderRow {
   delivery_completed_date: string | null
   customer_grade: string | null
   shipping_plan: string | null
+  shipping_plan_change_count?: number
   customer_inspection_date: string | null
   inspection_result: string | null
   packaging_status: string | null
@@ -357,6 +361,7 @@ export default function OrderList() {
   const { exporting, exportData } = useExport()
   const getColumnVisibility = useUiPreferencesStore(s => s.getColumnVisibility)
   const setColumnVisibility = useUiPreferencesStore(s => s.setColumnVisibility)
+  const fontSizeScale = useThemeStore(s => s.fontSizeScale)
   const [visibleColumnKeys, setVisibleColumnKeys] = useState<string[]>(
     () => getColumnVisibility(ORDER_LIST_PAGE_KEY, DEFAULT_COLUMN_KEYS)
   )
@@ -417,6 +422,12 @@ export default function OrderList() {
   const [rowEdDraft, setRowEdDraft] = useState<Record<string, any>>({})
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [saving, setSaving] = useState(false)
+  /* 出货计划变更时间线 / 导入 */
+  const [shippingPlanHistory, setShippingPlanHistory] = useState<{ order: OrderRow; items: any[] } | null>(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState<any>(null)
+  const canImport = useAuthStore(s => s.hasPermission('orders.list', 'import'))
   /* 本次会话手工修改过的单元格（圆点标记）与保存绿闪 */
   const [sessionEdited, setSessionEdited] = useState<Set<string>>(new Set())
   const [flashCells, setFlashCells] = useState<Set<string>>(new Set())
@@ -1074,6 +1085,35 @@ export default function OrderList() {
     setExportColumnModalOpen(false)
   }
 
+  /* ── 出货计划变更时间线 ── */
+  const openShippingPlanHistory = async (record: OrderRow) => {
+    setShippingPlanHistory({ order: record, items: [] })
+    setHistoryLoading(true)
+    try {
+      const res: any = await orderApi.getShippingPlanHistory(record.id)
+      setShippingPlanHistory({ order: record, items: res.data || [] })
+    } catch {
+      // 错误已由全局拦截器提示
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  /* ── 出货计划导入 ── */
+  const handleImportShippingPlan = async (file: File) => {
+    setImporting(true)
+    try {
+      const res: any = await orderApi.importShippingPlan(file)
+      setImportResult(res.data)
+      message.success(`导入完成：更新 ${res.data.updated}，未变化 ${res.data.unchanged}，未匹配 ${res.data.not_found}，无效 ${res.data.invalid}`)
+      fetchOrders(pagination.current, pagination.pageSize, filters, sortInfo)
+    } catch {
+      // 错误已由全局拦截器提示
+    } finally {
+      setImporting(false)
+    }
+  }
+
   const handleUnfinishedOrdersToggle = (checked: boolean) => {
     const newFilters = { ...filters, delivery_completed: checked ? ['no'] : [] }
     setFilters(newFilters)
@@ -1399,7 +1439,27 @@ export default function OrderList() {
     },
     {
       title: '出货计划', dataIndex: 'shipping_plan', key: 'shipping_plan', minWidth: 85,
-      render: editableDate('shipping_plan'), sorter: true,
+      render: (value: string | null, record: OrderRow) => {
+        const count = record.shipping_plan_change_count ?? 0
+        return (
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            {editableDate('shipping_plan')(value, record)}
+            {count > 0 && (
+              <Tooltip title={`出货计划已变更 ${count} 次，点击查看时间线`}>
+                <a
+                  onClick={e => { e.stopPropagation(); openShippingPlanHistory(record) }}
+                  style={{ marginLeft: 6, fontSize: 12, color: '#2563eb', flexShrink: 0 }}
+                >
+                  <Badge count={count} size="small" offset={[4, -2]}>
+                    <HistoryOutlined />
+                  </Badge>
+                </a>
+              </Tooltip>
+            )}
+          </div>
+        )
+      },
+      sorter: true,
       filterDropdown: ({ setSelectedKeys, selectedKeys, confirm, clearFilters }: any) => (
         <div style={{ padding: 8 }}>
           <RangePicker
@@ -1991,8 +2051,8 @@ export default function OrderList() {
    .map(col => {
     if (col.key === 'action') return col
     const meta = FIELD_EDIT_META[col.key]
-    /* 列宽需容纳表头（左侧标记预留区 + 标题 + 筛选图标 + 内边距）；剥离 ellipsis，记录不省略（自然换行） */
-    const headerW = (typeof col.title === 'string' ? col.title.length * 13 : 80) + 78
+    /* 列宽需容纳表头（左侧标记预留区 + 标题 + 排序/筛选图标 + 内边距），并随全局字号缩放，表头名永不省略 */
+    const headerW = ((typeof col.title === 'string' ? col.title.length : 6) * 13 + 96) * fontSizeScale
     return {
       ...col,
       ellipsis: undefined,
@@ -2003,7 +2063,7 @@ export default function OrderList() {
           ? () => ({ className: 'sc-hro', title: `🔒 ${meta.ro}` })
           : undefined,
     }
-  }), [editingCell, savingCell, handleCellSave, navigate, filters, pagination, sortInfo, fetchOrders, visibleColumnKeys, sessionEdited, flashCells, fieldRemarks, startRowEd])
+  }), [editingCell, savingCell, handleCellSave, navigate, filters, pagination, sortInfo, fetchOrders, visibleColumnKeys, sessionEdited, flashCells, fieldRemarks, startRowEd, openShippingPlanHistory, fontSizeScale])
 
   // 图例统计（当前可见列中可手工填写 / 只读数量）
   const visMeta = visibleColumnKeys.map(k => FIELD_EDIT_META[k]).filter(Boolean)
@@ -2091,6 +2151,11 @@ export default function OrderList() {
           >
             {showCharts ? '隐藏图表' : '分析图表'}
           </Button>
+          {canImport && (
+            <Upload beforeUpload={(f) => { handleImportShippingPlan(f); return false }} showUploadList={false} accept=".csv,.xlsx">
+              <Button icon={<UploadOutlined />} loading={importing}>导入出货计划</Button>
+            </Upload>
+          )}
           <Dropdown
             menu={{
               items: [
@@ -2576,6 +2641,87 @@ export default function OrderList() {
           )
         })}
       </Drawer>
+
+      {/* ── 出货计划变更时间线 ── */}
+      <Drawer
+        title={`出货计划变更 - ${shippingPlanHistory?.order.order_no || ''}`}
+        open={!!shippingPlanHistory}
+        onClose={() => setShippingPlanHistory(null)}
+        width={520}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <span style={{ color: '#64748b' }}>当前出货计划：</span>
+          <b>{shippingPlanHistory?.order.shipping_plan ? formatDate(shippingPlanHistory.order.shipping_plan) : '未设置'}</b>
+        </div>
+        <Spin spinning={historyLoading}>
+          {shippingPlanHistory?.items.length ? (
+            <Timeline
+              items={shippingPlanHistory.items.map((item: any) => ({
+                color: 'blue',
+                children: (
+                  <div>
+                    <div>
+                      <span style={{ color: '#94a3b8' }}>{item.old_value || '未设置'}</span>
+                      <span style={{ margin: '0 6px' }}>→</span>
+                      <b>{item.new_value || '已清除'}</b>
+                    </div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                      {item.operator || '-'} · {item.operated_at || '-'}
+                    </div>
+                  </div>
+                ),
+              }))}
+            />
+          ) : (
+            !historyLoading && <div style={{ color: '#94a3b8', textAlign: 'center', padding: '24px 0' }}>暂无变更记录</div>
+          )}
+        </Spin>
+      </Drawer>
+
+      {/* ── 出货计划导入结果 ── */}
+      <Modal
+        title="出货计划导入结果"
+        open={!!importResult}
+        onCancel={() => setImportResult(null)}
+        footer={<Button type="primary" onClick={() => setImportResult(null)}>知道了</Button>}
+        width={760}
+      >
+        {importResult && (
+          <>
+            <Space size={16} style={{ marginBottom: 12 }}>
+              <span>更新 <b style={{ color: '#16a34a' }}>{importResult.updated}</b></span>
+              <span>未变化 <b>{importResult.unchanged}</b></span>
+              <span>未匹配 <b style={{ color: '#dc2626' }}>{importResult.not_found}</b></span>
+              <span>无效 <b style={{ color: '#ea580c' }}>{importResult.invalid}</b></span>
+            </Space>
+            <Table
+              size="small"
+              rowKey="row_no"
+              dataSource={(importResult.rows || []).filter((r: any) => r.status !== 'updated')}
+              pagination={{ pageSize: 10, showSizeChanger: false }}
+              locale={{ emptyText: '全部导入成功' }}
+              columns={[
+                { title: '行号', dataIndex: 'row_no', width: 60 },
+                { title: '销售订单号', dataIndex: 'order_no', width: 160 },
+                { title: '客户编号', dataIndex: 'customer_code', width: 130 },
+                { title: '计划时间', dataIndex: 'plan_date', width: 110, render: (v: string) => v || '-' },
+                {
+                  title: '状态', dataIndex: 'status', width: 90,
+                  render: (v: string) => {
+                    const map: Record<string, { text: string; color: string }> = {
+                      unchanged: { text: '未变化', color: 'default' },
+                      not_found: { text: '未匹配', color: 'red' },
+                      invalid: { text: '无效', color: 'orange' },
+                    }
+                    return <Tag color={map[v]?.color}>{map[v]?.text || v}</Tag>
+                  },
+                },
+                { title: '说明', dataIndex: 'message', ellipsis: true },
+              ]}
+            />
+          </>
+        )}
+      </Modal>
 
       {/* ── 风险详情弹窗 ── */}
       <RiskDetailModal

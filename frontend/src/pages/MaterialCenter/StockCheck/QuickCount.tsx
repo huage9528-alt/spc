@@ -95,10 +95,13 @@ export default function QuickCount() {
     setWarehouseLoading(true)
     try {
       const res: any = await materialApi.listCountedWarehouses()
-      const options = (res.data || []).map((wh: any) => ({
-        value: wh.wh_id,
-        label: wh.wh_name,
-      }))
+      // 库存检查不良仓不纳入快捷盘点,不显示在筛选下拉
+      const options = (res.data || [])
+        .filter((wh: any) => (wh.wh_name || '').trim() !== '库存检查不良仓')
+        .map((wh: any) => ({
+          value: wh.wh_id,
+          label: wh.wh_name,
+        }))
       setWarehouseOptions(options)
       // 默认选中赠品仓库（如果存在）
       const giftWarehouse = options.find((opt: any) => 

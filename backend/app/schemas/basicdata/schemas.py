@@ -487,6 +487,7 @@ class EmployeeUpdate(BaseModel):
 class EmployeeOut(EmployeeBase):
     id: int
     create_time: datetime
+    emp_code: Optional[str] = None
     position_name: Optional[str] = None
     manager_name: Optional[str] = None
 

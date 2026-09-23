@@ -19,6 +19,12 @@ ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
         "materials.task_stock_check": ["read"],
         # 部署版本管理：admin 全量（其它角色按需在角色管理授权 read / manage）
         "deploy_versions": ["read", "manage"],
+        "materials.inventory_board": ["read"],
+        "materials.occupancy": ["read"],
+        "quality.supplier_claim": FULL_ACTIONS,
+        "quality.supplier_claim.archive_delete": ["delete"],
+        "approval.pending": ["read"],
+        "approval.config": ["read", "update"],
     },
     "planner": {
         "production.schedule_plans": ["read", "update"],
@@ -26,10 +32,14 @@ ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
         "exceptions.product_samples": ["read", "update"],
         "materials.scrap_inventory": ["read"],
         "materials.task_stock_check": ["read"],
+        "materials.inventory_board": ["read"],
+        "materials.occupancy": ["read"],
     },
     "purchaser": {
         "materials.scrap_inventory": ["read"],
         "materials.task_stock_check": ["read"],
+        "materials.inventory_board": ["read"],
+        "materials.occupancy": ["read"],
     },
     "manager": {
         "production.schedule_plans": ["read", "update"],
@@ -44,17 +54,35 @@ ROLE_PERMISSION_ADDITIONS: Dict[str, Dict[str, List[str]]] = {
         "finance.data": ["read"],
         "materials.scrap_inventory": ["read"],
         "materials.task_stock_check": ["read"],
+        "materials.inventory_board": ["read"],
+        "materials.occupancy": ["read"],
+        "quality.supplier_claim": ["read"],
+        "approval.pending": ["read"],
     },
     "warehouse_Keeper": {
         "materials.subcontract_orders": ["read"],
     },
     "quality": {
         "materials.subcontract_orders": ["read"],
+        "quality.supplier_claim": ["create", "read", "update"],
+        "approval.pending": ["read"],
     },
     "org27_pos76": {
         "production.order_wage_lookup": ["read"],
+    },
     "purchase_manager": {
         "materials.task_stock_check": ["read"],
+        "materials.inventory_board": ["read"],
+        "materials.occupancy": ["read"],
+        "quality.supplier_claim": ["read"],
+        "approval.pending": ["read"],
+    },
+    "finance": {
+        # 抽检工作台需要读取盘点单列表/详情
+        "materials.stock_check": ["read"],
+        "materials.stock_check_audit": ["read", "update"],
+        "quality.supplier_claim": ["read"],
+        "approval.pending": ["read"],
     },
 }
 

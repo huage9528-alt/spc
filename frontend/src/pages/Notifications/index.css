@@ -1,0 +1,144 @@
+/* 站内信 · 邮箱式三栏 —— 视觉规格移植自 docs/prototype/redesign/notifications.html 变体 A
+   （颜色值取自原型 styles.css 的 token：brand-500 #5b5bd6 / slate 系；
+     全部字号接入统一字体管理：calc(Xpx * var(--font-size-scale))） */
+
+.nm-page { height: calc(100vh - 104px); display: flex; flex-direction: column; }
+
+/* ---- 页头 ---- */
+.nm-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-shrink: 0; }
+.nm-head h1 { font-size: calc(20px * var(--font-size-scale)); font-weight: 600; letter-spacing: -.01em; margin: 0; line-height: 1.4; }
+.nm-head .nm-sub { font-size: calc(12px * var(--font-size-scale)); color: #94a3b8; margin-top: 1px; }
+.nm-head-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.nm-unread-strip { font-size: calc(12px * var(--font-size-scale)); color: #94a3b8; }
+.nm-unread-strip b { color: #dc2626; font-size: calc(16px * var(--font-size-scale)); font-weight: 650; font-variant-numeric: tabular-nums; margin-right: 3px; }
+
+/* ---- 按钮（原型 btn 体系） ---- */
+.nm-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px; border-radius: 8px;
+  font-size: calc(12px * var(--font-size-scale)); font-weight: 500; font-family: inherit;
+  border: 1px solid transparent; cursor: pointer; white-space: nowrap;
+  transition: background .12s, border-color .12s;
+}
+.nm-btn:disabled { opacity: .5; cursor: not-allowed; }
+.nm-btn-secondary { background: #fff; color: #334155; border-color: #e2e8f0; }
+.nm-btn-secondary:hover:not(:disabled) { background: #f8fafc; border-color: #cbd5e1; }
+.nm-btn-primary { background: #5b5bd6; color: #fff; }
+.nm-btn-primary:hover { background: #4c4dc2; }
+.nm-icon-btn {
+  width: 28px; height: 28px; border-radius: 8px; border: 1px solid transparent;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #475569; cursor: pointer; background: transparent; font-size: calc(13px * var(--font-size-scale));
+}
+.nm-icon-btn:hover { background: #f1f5f9; }
+
+/* ---- 三栏卡片 ----
+   grid 项目默认 min-height:auto，内容会把行撑高导致内部滚动失效，
+   三个栏目都必须 min-height:0 才能在消息很多时出现滚动条 */
+.nm-card {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 198px 1fr 356px;
+  background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .04); overflow: hidden;
+}
+.nm-nav, .nm-list, .nm-pane { min-height: 0; }
+
+/* ---- 细滚动条（与应用内表格滚动条一致） ---- */
+.nm-nav, .nm-list-body, .nm-pane { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+.nm-nav::-webkit-scrollbar, .nm-list-body::-webkit-scrollbar, .nm-pane::-webkit-scrollbar { width: 6px; }
+.nm-nav::-webkit-scrollbar-thumb, .nm-list-body::-webkit-scrollbar-thumb, .nm-pane::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+.nm-nav::-webkit-scrollbar-track, .nm-list-body::-webkit-scrollbar-track, .nm-pane::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- 左：类型导航 ---- */
+.nm-nav { border-right: 1px solid #f1f5f9; padding: 10px 8px; display: flex; flex-direction: column; overflow-y: auto; }
+.nm-nav-cap { font-size: calc(11px * var(--font-size-scale)); color: #94a3b8; padding: 4px 10px 8px; letter-spacing: .04em; }
+.nm-nav-cap + .nm-nav-cap { padding-top: 14px; }
+.nm-nav-item {
+  display: flex; align-items: center; gap: 8px;
+  height: 30px; padding: 0 10px; border-radius: 8px;
+  font-size: calc(13px * var(--font-size-scale)); color: #475569; cursor: pointer; user-select: none;
+}
+.nm-nav-item:hover { background: #f1f5f9; color: #0f172a; }
+.nm-nav-item.active { background: #eef0fe; color: #4c4dc2; font-weight: 500; }
+.nm-nav-item .nm-ni-icon { font-size: calc(13px * var(--font-size-scale)); opacity: .7; display: inline-flex; }
+.nm-nav-item .cnt { margin-left: auto; font-size: calc(10.5px * var(--font-size-scale)); font-variant-numeric: tabular-nums; }
+.nm-nav-item .cnt.hot { background: #dc2626; color: #fff; border-radius: 999px; padding: 0 6px; line-height: 15px; font-weight: 600; }
+.nm-nav-item .cnt.mid { background: #f1f5f9; color: #64748b; border-radius: 999px; padding: 0 6px; line-height: 15px; }
+.nm-nav-foot { margin-top: auto; padding: 10px 6px 4px; border-top: 1px solid #f1f5f9; }
+.nm-nav-foot .sse { font-size: calc(10.5px * var(--font-size-scale)); color: #94a3b8; display: flex; align-items: center; gap: 5px; margin-bottom: 8px; }
+.nm-nav-foot .sse i { width: 6px; height: 6px; border-radius: 50%; background: #cbd5e1; }
+.nm-nav-foot .sse.on { color: #16a34a; }
+.nm-nav-foot .sse.on i { background: #16a34a; }
+.nm-nav-foot .nm-btn { width: 100%; justify-content: center; }
+
+/* ---- 中：消息列表 ---- */
+.nm-list { display: flex; flex-direction: column; min-width: 0; }
+.nm-list-cap {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  padding: 10px 16px; border-bottom: 1px solid #f1f5f9;
+  font-size: calc(12px * var(--font-size-scale)); color: #94a3b8;
+}
+.nm-list-cap .cap-check { color: #16a34a; font-size: calc(12px * var(--font-size-scale)); display: inline-flex; }
+.nm-list-cap .cap-link { margin-left: auto; cursor: pointer; color: #64748b; }
+.nm-list-cap .cap-link:hover { color: #4c4dc2; }
+.nm-list-body { flex: 1; overflow-y: auto; }
+
+.nm-row {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 11px 14px 11px 16px; border-bottom: 1px solid #f1f5f9;
+  cursor: pointer; transition: background .1s;
+}
+.nm-row:hover { background: #f4f6fb; }
+.nm-row.active { background: #eef0fe; box-shadow: inset 2px 0 0 #5b5bd6; }
+.nm-row.read { opacity: .68; }
+.nm-row .nm-ico {
+  width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; font-size: calc(15px * var(--font-size-scale));
+}
+.nm-row .nm-main { flex: 1; min-width: 0; }
+.nm-row .nm-title { display: flex; align-items: center; gap: 6px; font-size: calc(13px * var(--font-size-scale)); color: #0f172a; }
+.nm-row.unread .nm-title { font-weight: 600; }
+.nm-row .nm-title .tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nm-row .nm-snip { font-size: calc(12px * var(--font-size-scale)); color: #94a3b8; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nm-row .nm-side { display: flex; flex-direction: column; align-items: flex-end; flex-shrink: 0; }
+.nm-row .nm-time { font-size: calc(11px * var(--font-size-scale)); color: #94a3b8; font-variant-numeric: tabular-nums; }
+.nm-udot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: #5b5bd6; box-shadow: 0 0 0 3px rgba(91, 91, 214, .15);
+}
+
+/* ---- 标签（原型 tag 体系） ---- */
+.nm-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 20px; padding: 0 8px; border-radius: 6px;
+  font-size: calc(11.5px * var(--font-size-scale)); font-weight: 500; white-space: nowrap; flex-shrink: 0;
+}
+.nm-tag .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+
+/* ---- 列表底栏 ---- */
+.nm-list-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  border-top: 1px solid #f1f5f9; padding: 6px 16px; flex-shrink: 0;
+}
+.nm-list-foot .nm-total { font-size: calc(12px * var(--font-size-scale)); color: #94a3b8; font-variant-numeric: tabular-nums; }
+
+/* ---- 右：详情栏 ---- */
+.nm-pane { border-left: 1px solid #f1f5f9; overflow-y: auto; background: #fff; }
+.nm-pane-body { padding: 18px 20px; }
+.nm-pane-body .nm-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.nm-pane-body h2 { font-size: calc(16px * var(--font-size-scale)); font-weight: 600; line-height: 1.5; margin: 10px 0 4px; color: #0f172a; }
+.nm-pane-body .nm-meta { font-size: calc(11.5px * var(--font-size-scale)); color: #94a3b8; display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.nm-pane-body .nm-body {
+  font-size: calc(13px * var(--font-size-scale)); color: #0f172a; line-height: 1.9; white-space: pre-line;
+  padding-bottom: 14px; border-bottom: 1px solid #f1f5f9;
+}
+.nm-pane-body .nm-actions { display: flex; gap: 8px; margin-top: 14px; }
+
+/* ---- 来源单据 pill ---- */
+.nm-ref-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px; padding: 0 8px; border-radius: 6px;
+  border: 1px solid #e2e8f0; background: #fff;
+  font-size: calc(11.5px * var(--font-size-scale)); color: #475569; cursor: pointer; white-space: nowrap;
+}
+.nm-ref-pill:hover { border-color: #a3a9f5; color: #4c4dc2; background: #eef0fe; }

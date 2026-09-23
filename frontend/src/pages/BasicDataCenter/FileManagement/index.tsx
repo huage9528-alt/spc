@@ -35,7 +35,6 @@ interface FileStats {
 const namespaceLabel: Record<string, string> = {
   feedback: '问题反馈',
   quality: '品质异常',
-  npi: 'NPI',
   price: '采购变更',
   misc: '其他',
 }
@@ -43,7 +42,6 @@ const namespaceLabel: Record<string, string> = {
 const namespaceClass: Record<string, string> = {
   feedback: 'sys-ns-feedback',
   quality: 'sys-ns-quality',
-  npi: 'sys-ns-npi',
   price: 'sys-ns-price',
   misc: 'sys-ns-misc',
 }

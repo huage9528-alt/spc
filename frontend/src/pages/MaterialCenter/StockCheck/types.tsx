@@ -35,6 +35,10 @@ export interface StockCheckItem {
   checked_by?: string | null
   remark?: string | null
   force_recount?: boolean
+  audit_failed?: number | null
+  appeal_status?: 'pending' | 'accepted' | 'rejected' | null
+  appeal_reason?: string | null
+  appeal_at?: string | null
   version?: number | null
 }
 
@@ -101,13 +105,39 @@ export interface StockCheck {
   loss_count?: number | null
   writeback_pending?: number | null
   writeback_failed?: number | null
+  pending_appeals?: number | null
   remark?: string | null
   covered_products?: CoveredProduct[] | null
   co_checker_user_ids?: number[] | null
   co_checkers?: CoChecker[] | null
   can_edit?: boolean | null
   items?: StockCheckItem[]
+  audit_status?: string | null
+  audit_by?: string | null
+  audit_at?: string | null
+  audit_comment?: string | null
   version?: number | null
+}
+
+// 抽检处置历史（GET /materials/stock-check/{id}/audit-logs）
+export interface StockCheckAuditItemLog {
+  item_id: number
+  audit_qty: number
+  actual_qty_snapshot?: number | null
+  matches?: number | null
+}
+
+export interface StockCheckAuditLog {
+  id: number
+  check_id: number
+  round_no: number
+  action: 'pass' | 'pass_exemption' | 'reject' | 'flag'
+  comment?: string | null
+  rejected_item_ids?: number[] | null
+  operated_by_user_id?: number | null
+  operated_by?: string | null
+  created_at?: string | null
+  items: StockCheckAuditItemLog[]
 }
 
 export interface MaterialCandidate {
@@ -237,6 +267,7 @@ export interface WritebackSkippedItem {
   material_name?: string | null
   unit?: string | null
   diff_qty: number
+  reason?: string | null
 }
 
 export interface WritebackOverview {

@@ -25,7 +25,7 @@ from app.models.basicdata.supplier import Supplier
 from app.models.basicdata.user import SysUser, SysRole
 from app.models.basicdata.announcement import Notification
 from app.schemas.common import ResponseModel
-from app.services.basicdata.position_role_service import resolve_employee_role_by_code, sync_user_role_from_employee, resolve_or_create_role
+from app.services.basicdata.position_role_service import resolve_or_create_role, resolve_position_for_employee, sync_user_role_from_employee
 from app.services.common.export_service import ExportColumn, GenericExportService
 
 router = APIRouter()
@@ -104,17 +104,30 @@ async def _resolve_user_role(
     db: AsyncSession,
 ) -> tuple[SysRole, Optional[Employee], Optional[Position]]:
     clean_emp_code = (emp_code or "").strip()
+    employee: Optional[Employee] = None
+    position: Optional[Position] = None
     if clean_emp_code:
-        employee, position, role = await resolve_employee_role_by_code(db, clean_emp_code)
+        result = await db.execute(select(Employee).where(Employee.emp_code == clean_emp_code))
+        employee = result.scalar_one_or_none()
         if not employee:
             raise HTTPException(status_code=400, detail="关联员工不存在")
+        position = await resolve_position_for_employee(db, employee)
+
+    if employee and position:
+        org = None
+        if employee.org_id:
+            org_result = await db.execute(
+                select(Organization).where(Organization.oa_org_id == str(employee.org_id))
+            )
+            org = org_result.scalars().first()
+        role, _ = await resolve_or_create_role(db, position, org)
         if role:
             return role, employee, position
 
     if role_id is None:
         raise HTTPException(status_code=400, detail="请选择角色或关联有岗位的员工")
 
-    return await _resolve_role(role_id, db), employee if clean_emp_code else None, position if clean_emp_code else None
+    return await _resolve_role(role_id, db), employee, position
 
 
 async def _validate_supplier_binding(role: SysRole, supplier_name: Optional[str], db: AsyncSession) -> Optional[str]:

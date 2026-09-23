@@ -36,6 +36,10 @@ from app.schemas.material.stock_check import (
     StockCheckMyItemOut,
     StockCheckConflictOut,
     StockCheckActionBody,
+    StockCheckAuditActionBody,
+    StockCheckAuditLogOut,
+    StockCheckAppealBody,
+    StockCheckAppealResolveBody,
     K3BillOut,
     K3ImportRequest,
     K3ImportResultOut,
@@ -58,6 +62,10 @@ from app.services.material.stock_check_service import (
     update_stock_check_item,
     batch_update_items,
     complete_stock_check,
+    audit_stock_check,
+    list_check_audit_logs,
+    appeal_check_items,
+    resolve_check_appeal,
     cancel_stock_check,
     set_co_checkers,
     refresh_order_bom,
@@ -91,7 +99,6 @@ from app.services.material.stock_check_k3_service import (
     import_k3_bills_as_stock_checks,
 )
 from app.services.material.stock_check_k3_writeback_service import (
-    plan_writebacks,
     execute_pending_writebacks,
     get_writeback_overview,
 )
@@ -494,18 +501,24 @@ async def recent(
     date_from: Optional[date] = Query(None, description="盘点日期起点 (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="盘点日期终点 (YYYY-MM-DD)"),
     writeback_todo: Optional[bool] = Query(None, description="仅看 K3 待回写(已完结且存在 pending/failed 回写记录)"),
+    audit_status: Optional[str] = Query(None, description="抽检状态筛选,逗号分隔(pending/passed/rejected)"),
+    has_appeal: Optional[bool] = Query(None, description="仅看存在复议待裁决的盘点单"),
     sort_by: Optional[str] = Query(None, description="排序字段:check_no/order_no/check_date/total_materials/checked_materials/total_diff_qty/created_at/updated_at"),
     sort_order: Optional[str] = Query(None, description="asc/desc,默认 desc"),
-    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    # 抽检工作台仅持有 materials.stock_check_audit.read 的角色也可访问
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read", any_of=[("materials.stock_check_audit", "read")])),
     db: AsyncSession = Depends(get_db),
 ):
     statuses = [s.strip() for s in (status or "").split(",") if s.strip()] or None
+    audit_statuses = [s.strip() for s in (audit_status or "").split(",") if s.strip()] or None
     rows = await list_recent_stock_checks(
         db,
         page=page,
         page_size=page_size,
         keyword=keyword,
         status=statuses,
+        audit_status=audit_statuses,
+        has_pending_appeal=bool(has_appeal) or None,
         check_type=check_type,
         source=source,
         date_from=date_from,
@@ -535,6 +548,15 @@ async def recent(
         filter_query = filter_query.where(StockCheck.check_date <= date_to)
     if writeback_todo:
         filter_query = filter_query.where(*writeback_todo_criterion())
+    if audit_statuses:
+        filter_query = filter_query.where(StockCheck.audit_status.in_(audit_statuses))
+    if has_appeal:
+        # 与取数同口径:仅存在待裁决复议行的盘点单
+        appeal_exists = select(StockCheckItem.id).where(
+            StockCheckItem.check_id == StockCheck.id,
+            StockCheckItem.appeal_status == "pending",
+        ).exists()
+        filter_query = filter_query.where(appeal_exists)
     total = (await db.execute(
         select(func.count()).select_from(filter_query.subquery())
     )).scalar() or 0
@@ -650,7 +672,8 @@ async def stock_check_kpi(
 @router.get("/stock-check/{check_id}", response_model=ResponseModel[StockCheckOut])
 async def get_detail(
     check_id: int,
-    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read")),
+    # 抽检工作台仅持有 materials.stock_check_audit.read 的角色也可访问
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read", any_of=[("materials.stock_check_audit", "read")])),
     db: AsyncSession = Depends(get_db),
 ):
     head = await get_stock_check_with_items(db, check_id)
@@ -821,7 +844,6 @@ async def complete(
         head = await complete_stock_check(
             db, check_id, current_user, expected_version=body.expected_version,
         )
-        writebacks = await plan_writebacks(db, head)
     except StockCheckPermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except StockCheckConflictError as e:
@@ -835,9 +857,9 @@ async def complete(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # 完结+回写计划先落库;K3 写入改为手动触发(工作台「K3 回写」卡片),完结请求不触 K3
+    # 完结即入待抽检;K3 回写计划移至财务抽检通过时(plan_writebacks 由 audit 端点触发)
     await db.commit()
-    summary = {"total": len(writebacks), "success": 0, "failed": 0, "pending": len(writebacks)}
+    summary = {"total": 0, "success": 0, "failed": 0, "pending": 0}
     head_out = await get_stock_check_with_items(db, check_id)
     out = await _to_check_out(db, head_out, current_user)
     out.writeback_summary = summary
@@ -897,14 +919,124 @@ async def retry_writebacks(
     head = await db.get(StockCheck, check_id)
     if not head:
         raise HTTPException(status_code=404, detail="盘点单不存在")
-    if head.status != "completed":
-        raise HTTPException(status_code=400, detail="仅已完结的盘点单可重试 K3 回写")
+    if head.status != "completed" or head.audit_status != "passed":
+        raise HTTPException(status_code=400, detail="仅抽检通过的盘点单可重试 K3 回写")
     try:
         await execute_pending_writebacks(db, check_id, current_user)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     overview = await get_writeback_overview(db, check_id)
     return ResponseModel(data=WritebackOverviewOut.model_validate(overview))
+
+
+@router.post("/stock-check/{check_id}/audit/{action}", response_model=ResponseModel[StockCheckOut])
+async def audit_check(
+    check_id: int,
+    action: str,
+    body: StockCheckAuditActionBody = StockCheckAuditActionBody(),
+    current_user: dict = Depends(PermissionChecker("materials.stock_check_audit", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """财务抽检处置: pass=通过 / exempt=免检 / reject=发回重填 / flag=过程标记"""
+    if action not in ("pass", "exempt", "reject", "flag"):
+        raise HTTPException(status_code=404, detail="未知抽检动作")
+    svc_action = "pass_exemption" if action == "exempt" else action
+    try:
+        head, planned = await audit_stock_check(
+            db, check_id, svc_action, current_user,
+            comment=body.comment, item_ids=body.item_ids,
+            audit_items=[a.model_dump() for a in (body.audit_items or [])],
+            expected_version=body.expected_version,
+        )
+    except StockCheckConflictError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": 409,
+                "message": "该盘点单已被处置或刚被修改,请刷新后重试",
+                "data": {"resource": e.resource, "server_version": e.server_version},
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.commit()
+    head_out = await get_stock_check_with_items(db, check_id)
+    out = await _to_check_out(db, head_out, current_user)
+    if svc_action in ("pass", "pass_exemption"):
+        out.writeback_summary = {"total": planned, "success": 0, "failed": 0, "pending": planned}
+    return ResponseModel(data=out)
+
+
+@router.get("/stock-check/{check_id}/audit-logs", response_model=ResponseModel[List[StockCheckAuditLogOut]])
+async def get_audit_logs(
+    check_id: int,
+    # 抽检历史:盘点读权限或抽检读权限任一即可
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "read", any_of=[("materials.stock_check_audit", "read")])),
+    db: AsyncSession = Depends(get_db),
+):
+    """抽检处置历史(按轮次,含每轮复点明细)"""
+    logs = await list_check_audit_logs(db, check_id)
+    return ResponseModel(data=[StockCheckAuditLogOut.model_validate(x) for x in logs])
+
+
+@router.post("/stock-check/{check_id}/appeal", response_model=ResponseModel[StockCheckOut])
+async def appeal_check(
+    check_id: int,
+    body: StockCheckAppealBody,
+    current_user: dict = Depends(PermissionChecker("materials.stock_check", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """盘点人对被标记问题行申请复议(仅发回态;原因必填)"""
+    try:
+        await appeal_check_items(
+            db, check_id, body.item_ids, body.reason, current_user,
+            expected_version=body.expected_version,
+        )
+    except StockCheckConflictError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": 409,
+                "message": "该盘点单刚被修改，请刷新后重试",
+                "data": {"resource": e.resource, "server_version": e.server_version},
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.commit()
+    head_out = await get_stock_check_with_items(db, check_id)
+    out = await _to_check_out(db, head_out, current_user)
+    return ResponseModel(data=out)
+
+
+@router.post("/stock-check/{check_id}/appeal/resolve", response_model=ResponseModel[StockCheckOut])
+async def resolve_appeal(
+    check_id: int,
+    body: StockCheckAppealResolveBody,
+    current_user: dict = Depends(PermissionChecker("materials.stock_check_audit", "update")),
+    db: AsyncSession = Depends(get_db),
+):
+    """财务裁决复议: accept=true 支持(撤销标记) / false 驳回(维持标记)"""
+    try:
+        await resolve_check_appeal(
+            db, check_id, body.item_ids, body.accept, current_user,
+            comment=body.comment, expected_version=body.expected_version,
+        )
+    except StockCheckConflictError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": 409,
+                "message": "该盘点单刚被修改，请刷新后重试",
+                "data": {"resource": e.resource, "server_version": e.server_version},
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.commit()
+    head_out = await get_stock_check_with_items(db, check_id)
+    out = await _to_check_out(db, head_out, current_user)
+    return ResponseModel(data=out)
 
 
 @router.put("/stock-check/{check_id}/co-checkers", response_model=ResponseModel[StockCheckOut])

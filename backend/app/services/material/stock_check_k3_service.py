@@ -316,6 +316,7 @@ async def _build_check_from_rows(
         title=f"{title_prefix} {bill_no} 导入",
         check_type="manual",
         status="completed",
+        audit_status="passed",
         check_date=bill_date or date.today(),
         total_materials=len(items),
         checked_materials=len(items),

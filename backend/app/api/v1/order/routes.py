@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func, asc, desc, case, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,7 +22,7 @@ from app.models.basicdata.customer import Customer
 from app.models.basicdata.audit_log import AuditLog
 from app.schemas.common import ResponseModel, PageResult
 from app.models.exception.risk_issue import RiskIssue
-from app.schemas.order.schemas import SaleOrderOut, SaleOrderUpdate, OrderCreate, OrderDetailOut, MaterialDemandOut, BindingOut, PODetail, RiskIssueOut, SaleOrderListOut, SaleOrderLineOut, OrderProductMaterialsOut
+from app.schemas.order.schemas import SaleOrderOut, SaleOrderUpdate, OrderCreate, OrderDetailOut, MaterialDemandOut, BindingOut, PODetail, RiskIssueOut, SaleOrderListOut, SaleOrderLineOut, OrderProductMaterialsOut, ShippingPlanHistoryItem
 from app.services.common.export_service import GenericExportService, ExportColumn
 from app.services.order.order_materials_service import get_order_product_materials
 
@@ -618,6 +618,21 @@ async def list_orders(
         query = query.options(selectinload(SaleOrder.lines)).order_by(*order_clauses).offset((page - 1) * page_size).limit(page_size)
         result = await db.execute(query)
         orders = result.scalars().all()
+
+        # 出货计划变更次数（来源 audit_log，供总控台历史图标徽标）
+        order_ids = [order.id for order in orders]
+        change_count_map: dict[int, int] = {}
+        if order_ids:
+            change_result = await db.execute(
+                select(AuditLog.record_id, func.count().label("cnt"))
+                .where(
+                    AuditLog.table_name == "sale_order",
+                    AuditLog.field_name == "shipping_plan",
+                    AuditLog.record_id.in_(order_ids),
+                )
+                .group_by(AuditLog.record_id)
+            )
+            change_count_map = {row.record_id: row.cnt for row in change_result.all()}
     
         order_nos = [order.order_no for order in orders]
         customer_codes = {order.customer_code for order in orders if order.customer_code}
@@ -674,6 +689,7 @@ async def list_orders(
                 promised_date=order.promised_date or (min(promised_dates) if promised_dates else None),
                 planned_start_date=order.planned_start_date or (min(planned_dates) if planned_dates else None),
                 material_dates=merged_material_dates,
+                shipping_plan_change_count=change_count_map.get(order.id, 0),
             )
             items.append(SaleOrderListOut(**order_dict))
     
@@ -1331,6 +1347,36 @@ async def get_order_product_materials_view(
     return ResponseModel(data=items)
 
 
+# ── 出货计划变更时间线（来源 audit_log）──
+@router.get("/shipping-plan-history", response_model=ResponseModel[list[ShippingPlanHistoryItem]])
+async def get_shipping_plan_history(
+    record_id: int = Query(..., description="sale_order.id"),
+    current_user: dict = Depends(PermissionChecker("orders.list", "read")),
+    db: AsyncSession = Depends(get_db),
+):
+    """订单出货计划变更时间线，按操作时间倒序"""
+    result = await db.execute(
+        select(AuditLog)
+        .where(
+            AuditLog.table_name == "sale_order",
+            AuditLog.field_name == "shipping_plan",
+            AuditLog.record_id == record_id,
+        )
+        .order_by(AuditLog.operated_at.desc(), AuditLog.id.desc())
+    )
+    items = [
+        ShippingPlanHistoryItem(
+            id=log.id,
+            old_value=log.old_value,
+            new_value=log.new_value,
+            operator=log.operator,
+            operated_at=log.operated_at.strftime("%Y-%m-%d %H:%M:%S") if log.operated_at else None,
+        )
+        for log in result.scalars().all()
+    ]
+    return ResponseModel(data=items)
+
+
 @router.get("/{order_no}", response_model=ResponseModel[OrderDetailOut])
 @router.get("/{order_no}/lines/{line_no}", response_model=ResponseModel[OrderDetailOut])
 async def get_order_detail(
@@ -1526,4 +1572,27 @@ async def import_run_order_csv_endpoint(
     result = await import_run_order_csv(filepath, db)
     await log_audit(db, "run_order", 0, "import", field_name="run_order_csv", new_value=filepath, operator=current_user["username"])
     await db.commit()
+    return ResponseModel(data=result)
+
+
+# ── 出货计划导入 ──
+@router.post("/import/shipping-plan", response_model=ResponseModel[dict])
+async def import_shipping_plan_endpoint(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(PermissionChecker("orders.list", "import")),
+    db: AsyncSession = Depends(get_db),
+):
+    """导入出货计划表（表头含「销售订单号」「计划时间」），只更新订单头 shipping_plan"""
+    from app.services.order.import_csv import import_shipping_plan
+
+    filename = file.filename or ""
+    if not filename.lower().endswith((".csv", ".xlsx")):
+        raise HTTPException(status_code=400, detail="仅支持 .csv 或 .xlsx 文件")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="文件为空")
+    try:
+        result = await import_shipping_plan(content, filename, db, operator=current_user["username"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return ResponseModel(data=result)

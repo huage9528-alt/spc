@@ -16,11 +16,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionLocal
 from app.core.config import get_settings, get_server_identity
 from app.services.basicdata.erp_sync_service import ERPSyncService
+from app.services.material.kitting_calc_service import (
+    KITTING_SOURCE_SYNC_TYPES,
+    calculate_kitting,
+    is_running as kitting_is_running,
+)
 from app.models.basicdata.sync_sql_config import SyncSqlConfig
 from app.models.basicdata.sync_log import SyncLog
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# 持有后台任务强引用，避免 asyncio.create_task 返回的任务被 GC 回收
+_background_tasks: set = set()
+
+
+def _on_background_task_done(task: asyncio.Task) -> None:
+    """后台任务收尾：释放强引用，并记录未捕获异常（否则异常静默丢失）"""
+    _background_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("[调度器] 后台任务异常", exc_info=task.exception())
 
 
 class SyncScheduler:
@@ -58,6 +73,7 @@ class SyncScheduler:
             "subject_balances": "sync_subject_balances",
             "subcontract_orders": "sync_subcontract_orders",
             "subcontract_order_details": "sync_subcontract_order_details",
+            "transfer_orders": "sync_transfer_orders",
         }
 
     async def _load_sync_configs(self, db: AsyncSession) -> list[SyncSqlConfig]:
@@ -276,6 +292,11 @@ class SyncScheduler:
             errors_count, sync_log_status, error_detail,
         )
 
+        # 仅同步成功时回报类型，供 _run_sync 判断是否触发齐套重算
+        if config_status == "success":
+            return sync_type
+        return None
+
     async def _finish_sync(
         self,
         config_id: int,
@@ -340,11 +361,14 @@ class SyncScheduler:
                         due_ids.append(config.id)
                 await db.commit()
 
+            completed_types: set[str] = set()
             for config_id in due_ids:
                 # 逐个隔离异常：单个配置失败（如行锁被其他实例/手动同步短暂占用）
                 # 不能中断本轮其余到期任务；锁冲突降级为 warning，下一轮自然重试。
                 try:
-                    await self._run_single_sync(config_id)
+                    synced_type = await self._run_single_sync(config_id)
+                    if synced_type:
+                        completed_types.add(synced_type)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -358,7 +382,13 @@ class SyncScheduler:
                             f"[调度器] 同步任务 {config_id} 失败，继续执行其余任务: {e}",
                             exc_info=True,
                         )
-                
+
+            if completed_types & set(KITTING_SOURCE_SYNC_TYPES) and not kitting_is_running():
+                logger.info(f"[调度器] 源数据同步完成 {sorted(completed_types)}，触发齐套重算")
+                task = asyncio.create_task(calculate_kitting(trigger_type="sync_hook"))
+                _background_tasks.add(task)
+                task.add_done_callback(_on_background_task_done)
+
             logger.info(f"[调度器] 同步任务检查完成")
                 
         except Exception as e:

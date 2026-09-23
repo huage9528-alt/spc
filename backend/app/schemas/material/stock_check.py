@@ -181,6 +181,10 @@ class StockCheckItemOut(BaseModel):
     wh_code: Optional[str] = None
     recent_checked_check_no: Optional[str] = None
     recent_checked_date: Optional[date] = None
+    audit_failed: Optional[int] = None
+    appeal_status: Optional[str] = None
+    appeal_reason: Optional[str] = None
+    appeal_at: Optional[datetime] = None
     warehouses: Optional[str] = None
     # 运行时计算(读详情时实时查 scm_inventory,不落库)
     live_qty: Optional[Decimal] = None
@@ -217,6 +221,10 @@ class StockCheckOut(BaseModel):
     created_by_user_id: Optional[int] = None
     source: Optional[str] = None
     erp_bill_no: Optional[str] = None
+    audit_status: Optional[str] = None
+    audit_by: Optional[str] = None
+    audit_at: Optional[datetime] = None
+    audit_comment: Optional[str] = None
     # 以下为运行时计算字段
     co_checkers: Optional[List[Dict[str, Any]]] = None  # [{user_id, name}]
     can_edit: Optional[bool] = None
@@ -246,12 +254,19 @@ class StockCheckListOut(BaseModel):
     covered_products: Optional[List[Dict[str, Any]]] = None
     co_checker_user_ids: Optional[List[int]] = None
     updated_at: Optional[datetime] = None
+    audit_status: Optional[str] = None
+    audit_by: Optional[str] = None
+    audit_at: Optional[datetime] = None
+    audit_comment: Optional[str] = None
     # 以下为运行时计算字段(attach_list_extras 写回)
     gain_count: Optional[int] = None      # 已盘行 diff_qty>0 数
     loss_count: Optional[int] = None      # 已盘行 diff_qty<0 数
     co_checkers: Optional[List[Dict[str, Any]]] = None  # [{user_id, name}]
     writeback_pending: Optional[int] = None   # K3 回写 pending 记录数(仅已完结单有)
     writeback_failed: Optional[int] = None    # K3 回写 failed 记录数
+    pending_appeals: Optional[int] = None     # 复议待裁决行数(仅进行中单有)
+    appeal_last_at: Optional[datetime] = None     # 最近一次复议申请时间
+    appeal_last_reason: Optional[str] = None      # 最近一次复议原因(队列摘要)
 
     model_config = {"from_attributes": True}
 
@@ -350,6 +365,62 @@ class StockCheckActionBody(BaseModel):
     expected_version: Optional[int] = None
 
 
+class StockCheckAuditItemIn(BaseModel):
+    """复点行:财务对抽中行录入的复点数"""
+    item_id: int
+    audit_qty: Decimal
+
+
+class StockCheckAppealBody(BaseModel):
+    """盘点人对被标记问题行申请复议"""
+    item_ids: List[int]
+    reason: str
+    expected_version: Optional[int] = None
+
+
+class StockCheckAppealResolveBody(BaseModel):
+    """财务裁决复议: accept=True 支持(撤销标记);False 驳回(维持标记)"""
+    item_ids: List[int]
+    accept: bool
+    comment: Optional[str] = None
+    expected_version: Optional[int] = None
+
+
+class StockCheckAuditActionBody(BaseModel):
+    """财务抽检处置:通过/免检/发回"""
+    comment: Optional[str] = None
+    # 手动补充勾选的问题行(发回时与自动比对不一致行取并集)
+    item_ids: Optional[List[int]] = None
+    # 复点行(通过/发回均可携带;免检不携带)
+    audit_items: Optional[List[StockCheckAuditItemIn]] = None
+    expected_version: Optional[int] = None
+
+
+class StockCheckAuditItemOut(BaseModel):
+    item_id: int
+    audit_qty: Decimal
+    actual_qty_snapshot: Optional[Decimal] = None
+    matches: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+
+class StockCheckAuditLogOut(BaseModel):
+    id: int
+    check_id: int
+    round_no: int
+    action: str
+    comment: Optional[str] = None
+    rejected_item_ids: Optional[List[int]] = None
+    operated_by_user_id: Optional[int] = None
+    operated_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    # 该轮复点明细(audit_item 关联查询后填充)
+    items: List[StockCheckAuditItemOut] = []
+
+    model_config = {"from_attributes": True}
+
+
 class K3BillOut(BaseModel):
     """K3 盘盈盘亏单预览行(来自 ICStockBill FTranType 40/43)"""
     erp_bill_no: str
@@ -396,11 +467,12 @@ class StockCheckWritebackOut(BaseModel):
 
 
 class WritebackSkippedItemOut(BaseModel):
-    """因无仓库(wh_id=NULL)被跳过的盘差行"""
+    """被跳过的盘差行(wh_id=NULL 或 wh_name=库存检查不良仓),不生成 K3 单据"""
     material_code: Optional[str] = None
     material_name: Optional[str] = None
     unit: Optional[str] = None
     diff_qty: Decimal = Decimal("0")
+    reason: Optional[str] = None
 
 
 class WritebackOverviewOut(BaseModel):

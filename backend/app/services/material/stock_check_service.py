@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional, List, Dict, Tuple
 
-from sqlalchemy import select, func, desc, or_, and_, distinct, String as SAString, text, case
+from sqlalchemy import select, func, update, desc, or_, and_, distinct, String as SAString, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -16,7 +16,7 @@ from app.models.basicdata.bom_detail import BomDetail
 from app.models.basicdata.inventory import Inventory
 from app.models.basicdata.material import Material
 from app.models.basicdata.sku import SKU
-from app.models.material.inventory_check import StockCheck, StockCheckItem
+from app.models.material.inventory_check import StockCheck, StockCheckItem, StockCheckAuditLog, StockCheckAuditItem
 from app.models.material.stock_check_writeback import StockCheckK3Writeback
 from app.models.order.sale_order import SaleOrder
 from app.models.production.production_task_order import ProductionTaskOrder
@@ -26,6 +26,7 @@ from app.services.order.order_materials_service import (
     MAX_BOM_LEVEL,
 )
 from app.services.material.stock_check_broker import publish_event
+from app.services.notification.notification_broker import publish_unread_update
 
 
 class StockCheckPermissionError(Exception):
@@ -214,6 +215,10 @@ def _split_stock_by_warehouse(
 # 库存检查不良仓(K3 盘亏调拨目标仓)、赠品仓库
 ORDER_CHECK_EXCLUDED_WH_NAMES = {"库存检查不良仓", "赠品仓库"}
 
+# 手动/快捷盘点同样不纳入库存检查不良仓(K3 盘亏调拨目标仓,非盘点对象):
+# 不显示在候选列表,也不得加入盘点明细(建单/追加/快捷录入/Excel 导入口径一致)
+CHECK_EXCLUDED_WH_NAMES = {"库存检查不良仓"}
+
 
 def _exclude_order_check_warehouses(
     warehouses_by_mid: Dict[int, List[Tuple[int, str, Decimal, Optional[datetime]]]],
@@ -222,6 +227,20 @@ def _exclude_order_check_warehouses(
     return {
         mid: [w for w in whs if (w[1] or "").strip() not in ORDER_CHECK_EXCLUDED_WH_NAMES]
         for mid, whs in warehouses_by_mid.items()
+    }
+
+
+def _exclude_check_wh_from_stock_map(
+    stock_map: Dict[Tuple[int, int], Tuple[str, Decimal, Optional[datetime]]],
+) -> Dict[Tuple[int, int], Tuple[str, Decimal, Optional[datetime]]]:
+    """从 (物料,仓库) 库存快照中剔除手动/快捷盘点不纳入的仓(库存检查不良仓)。
+
+    用于 _build_manual_item_rows / Excel 导入的仓库解析:
+    显式选中被排除仓时查不到快照 → 行不生成(不添加到盘点明细)。
+    """
+    return {
+        key: val for key, val in stock_map.items()
+        if (val[0] or "").strip() not in CHECK_EXCLUDED_WH_NAMES
     }
 
 
@@ -345,12 +364,12 @@ async def enrich_live_qty(db: AsyncSession, items: List[StockCheckItem]) -> None
 
 async def enrich_recent_marks(db: AsyncSession, check_id: int, items: List[StockCheckItem]) -> None:
     """近期已盘动态关联(读时计算,不落库): 对未录实盘的行,按 (物料×仓库) 查最近一次
-    已盘记录(排除本单自身与已取消单),在默认窗口期内则覆盖展示标记 ——
+    已盘记录(排除本单自身与已取消单),不限时间窗口一律覆盖展示标记 ——
     新盘点单盘过的物料,打开任何老盘点单也能看到「近期已盘」标签。
 
     - 仅覆盖 actual_qty IS NULL 的行;已录实盘的行(真实盘点已取代免盘)不动
     - 覆盖用 set_committed_value,不写库;建单时的快照标记不受影响
-    - 窗口天数取配置默认(STOCK_CHECK_RECENT_SKIP_DAYS),与 KPI 口径一致
+    - 不限窗口:只要其他任何单据(不论多久前)盘过即标记「近期已盘」
     """
     targets = [it for it in items if it.actual_qty is None and it.material_id is not None]
     if not targets:
@@ -360,15 +379,9 @@ async def enrich_recent_marks(db: AsyncSession, check_id: int, items: List[Stock
         [(it.material_id, it.wh_id) for it in targets],
         exclude_check_id=int(check_id),
     )
-    skip_days = _resolve_recent_days(None)
-    today = date.today()
     for it in targets:
         recent = recent_map.get((it.material_id, it.wh_id))
-        if (
-            recent is not None
-            and recent["check_date"] is not None
-            and (today - recent["check_date"]).days <= skip_days
-        ):
+        if recent is not None:
             set_committed_value(it, "recent_checked_check_no", recent["check_no"])
             set_committed_value(it, "recent_checked_date", recent["check_date"])
 
@@ -444,7 +457,11 @@ async def _build_live_freeze_cache(
 def _serialize_item(item: StockCheckItem) -> dict:
     """序列化 item 行用于事件 payload(不含关联字段,客户端按 id 合并)。"""
     from app.schemas.material.stock_check import StockCheckItemOut
-    return StockCheckItemOut.model_validate(item).model_dump()
+    return {
+        **StockCheckItemOut.model_validate(item).model_dump(),
+        "audit_failed": int(item.audit_failed or 0),
+        "appeal_status": item.appeal_status,
+    }
 
 
 async def _refresh_check_aggregates(db: AsyncSession, check_id: int) -> None:
@@ -1368,6 +1385,8 @@ async def create_stock_check_from_materials(
     await db.flush()
 
     item_rows = await _build_manual_item_rows(db, head.id, selections, unique_ids)
+    if not item_rows:
+        raise ValueError("所选物料均无可用库存行,请重新选择")
 
     # 可选: 按近期已盘窗口给行打免盘标记(None=不打,保持全部需盘点)
     await _mark_recent_checked(db, item_rows, recent_days)
@@ -1446,7 +1465,9 @@ async def _build_manual_item_rows(
         raise ValueError("所选物料均不存在或已删除,无法创建盘点单")
     mat_map = {m.erp_material_id: m for m in materials}
 
-    stock_map = await _get_stock_by_warehouse(db, [m.erp_material_id for m in materials])
+    stock_map = _exclude_check_wh_from_stock_map(
+        await _get_stock_by_warehouse(db, [m.erp_material_id for m in materials])
+    )
     warehouses_by_mid = _split_stock_by_warehouse(stock_map, [m.erp_material_id for m in materials])
 
     item_rows: List[StockCheckItem] = []
@@ -1601,6 +1622,10 @@ async def _close_stale_quick_checks(db: AsyncSession, current_user: dict) -> Non
         )).scalar_one()
         if int(item_cnt or 0) > 0:
             head.status = "completed"
+            head.audit_status = "pending"
+            head.audit_by = None
+            head.audit_at = None
+            head.audit_comment = None
             head.completed_at = datetime.now()
             head.checked_by = username
         else:
@@ -1613,6 +1638,7 @@ async def _close_stale_quick_checks(db: AsyncSession, current_user: dict) -> Non
             {
                 "check_id": head.id,
                 "status": head.status,
+                "audit_status": head.audit_status,
                 "head_version": int(head.version or 0),
                 "checked_by": head.checked_by,
                 "completed_at": head.completed_at.isoformat() if head.completed_at else None,
@@ -1944,6 +1970,9 @@ async def list_material_candidates(
             wh_name = (r.wh_name or "").strip() or f"WH#{r.whid}"
         else:
             wh_name = "(未入库)"
+        # 手动/快捷盘点不纳入库存检查不良仓,不显示
+        if has_inv and wh_name in CHECK_EXCLUDED_WH_NAMES:
+            continue
         # 过滤库存为0的记录
         system_qty = Decimal(str(r.wh_qty or 0)) if has_inv else Decimal("0")
         if system_qty == 0:
@@ -2273,6 +2302,8 @@ async def update_stock_check_item(
         item.checked_at = None
         item.checked_by = None
     if actual_qty_provided:
+        if item.audit_failed:
+            item.audit_failed = 0
         if actual_qty is None:
             item.actual_qty = None
             item.counted_by_user_id = None
@@ -2442,10 +2473,23 @@ async def complete_stock_check(
     )).scalar_one()
     if int(total or 0) == 0:
         raise ValueError("盘点单无物料行,无法完结")
+    # 复议未裁决的行不允许完结(避免带着未落地争议过终检)
+    pending_appeals = int((await db.execute(
+        select(func.count(StockCheckItem.id)).where(
+            StockCheckItem.check_id == check_id,
+            StockCheckItem.appeal_status == "pending",
+        )
+    )).scalar() or 0)
+    if pending_appeals > 0:
+        raise ValueError(f"有 {pending_appeals} 行复议待财务裁决，处理完毕后再完结")
     # 允许部分盘点完结:未录实盘的行(含动态/快照「近期已盘」免盘行)视为放弃盘点,
     # 保持 is_checked=0、diff=0,不参与 K3 回写分组,完结后不可再录入
 
     head.status = "completed"
+    head.audit_status = "pending"
+    head.audit_by = None
+    head.audit_at = None
+    head.audit_comment = None
     head.completed_at = datetime.now()
     head.checked_by = current_user.get("username", "")
     head.version = int(head.version or 0) + 1
@@ -2456,6 +2500,7 @@ async def complete_stock_check(
         {
             "check_id": check_id,
             "status": "completed",
+            "audit_status": head.audit_status,
             "head_version": int(head.version or 0),
             "checked_by": head.checked_by,
             "completed_at": head.completed_at.isoformat() if head.completed_at else None,
@@ -2463,6 +2508,451 @@ async def complete_stock_check(
         _current_user_id(current_user),
     )
     return head
+
+
+async def audit_stock_check(
+    db: AsyncSession,
+    check_id: int,
+    action: str,
+    current_user: dict,
+    *,
+    comment: Optional[str] = None,
+    item_ids: Optional[List[int]] = None,
+    audit_items: Optional[List[dict]] = None,
+    expected_version: Optional[int] = None,
+) -> tuple[StockCheck, int]:
+    """财务抽检处置: pass / pass_exemption / reject / flag。
+
+    - 复点比对: audit_items=[{item_id, audit_qty}], 与该行 actual_qty 精确比对
+      (actual_qty 为空视为不一致);比对明细写 audit_item(除 exempt 外均写)。
+    - pass / pass_exemption(终检): 前置 completed+pending;置 passed 并计划 K3 回写
+      (返回回写计划条数);允许存在不一致行(财务自行判断,记录留档)。
+    - reject(终检发回): 前置 completed+pending;必填 comment;status 回 in_progress、
+      实盘数保留、version+1;问题行 = 自动比对不一致行 ∪ 手动 item_ids,置
+      audit_failed=1,站内通知创建人+共同盘点人。
+    - flag(过程抽检): 前置 in_progress;不改 status/audit_status/单头终检字段,
+      仅标记问题行(audit_failed=1)+通知+audit_log(action=flag);comment 可选。
+    """
+    from app.services.material.stock_check_k3_writeback_service import plan_writebacks
+
+    if action not in ("pass", "pass_exemption", "reject", "flag"):
+        raise ValueError(f"未知抽检动作 {action}")
+    head = (await db.execute(select(StockCheck).where(StockCheck.id == check_id).with_for_update())).scalar_one_or_none()
+    if not head:
+        raise ValueError(f"盘点单 {check_id} 不存在")
+    if action == "flag":
+        if head.status != "in_progress":
+            raise ValueError("过程抽检仅支持进行中的盘点单")
+    elif head.status != "completed" or head.audit_status != "pending":
+        raise StockCheckConflictError("head", int(head.version or 0), {
+            "check_id": check_id, "audit_status": head.audit_status, "status": head.status,
+        })
+    if expected_version is not None and int(head.version or 0) != int(expected_version):
+        raise StockCheckConflictError("head", int(head.version or 0), {"check_id": check_id})
+    comment = (comment or "").strip() or None
+    if action == "reject" and not comment:
+        raise ValueError("发回重填必须填写原因")
+
+    # ── 复点比对 ──
+    # 免检(pass_exemption)不产生复点明细,携带 audit_items 一律忽略
+    audit_payload = [] if action == "pass_exemption" else [
+        a for a in (audit_items or []) if a.get("item_id") is not None and a.get("audit_qty") is not None
+    ]
+    mismatch_ids: set = set()
+    audit_item_rows: List[StockCheckAuditItem] = []
+    if audit_payload:
+        ref_ids = [int(a["item_id"]) for a in audit_payload]
+        ref_items = {
+            i.id: i for i in (
+                await db.execute(
+                    select(StockCheckItem)
+                    .where(StockCheckItem.check_id == check_id, StockCheckItem.id.in_(ref_ids))
+                )
+            ).scalars().all()
+        }
+        for a in audit_payload:
+            item = ref_items.get(int(a["item_id"]))
+            if item is None:
+                raise ValueError(f"复点行 {a['item_id']} 不属于盘点单 {check_id}")
+            audit_qty = Decimal(str(a["audit_qty"]))
+            actual_snap = Decimal(str(item.actual_qty)) if item.actual_qty is not None else None
+            matches = 1 if (actual_snap is not None and audit_qty == actual_snap) else 0
+            if not matches:
+                mismatch_ids.add(item.id)
+            audit_item_rows.append(StockCheckAuditItem(
+                check_id=check_id,
+                round_no=0,  # 占位,下方确定 round_no 后回填
+                item_id=item.id,
+                audit_qty=audit_qty,
+                actual_qty_snapshot=actual_snap,
+                matches=matches,
+            ))
+
+    username = current_user.get("username", "") if current_user else ""
+    now = datetime.now()
+    round_no = 1 + int((await db.execute(
+        select(func.max(StockCheckAuditLog.round_no)).where(StockCheckAuditLog.check_id == check_id)
+    )).scalar() or 0)
+    rejected_ids: Optional[List[int]] = None
+    writeback_count = 0
+
+    if action == "reject":
+        head.status = "in_progress"
+        head.audit_status = "rejected"
+    elif action == "flag":
+        pass  # 过程抽检:不改单头状态与终检字段
+    else:
+        head.audit_status = "passed"
+    if action != "flag":
+        head.audit_by = username
+        head.audit_at = now
+        head.audit_comment = comment
+    failed_ids = sorted(mismatch_ids | {int(i) for i in (item_ids or [])})
+    if action in ("reject", "flag") and failed_ids:
+        await db.execute(
+            update(StockCheckItem)
+            .where(StockCheckItem.check_id == check_id, StockCheckItem.id.in_(failed_ids))
+            .values(audit_failed=1)
+        )
+        rejected_ids = failed_ids
+    head.version = int(head.version or 0) + 1
+    await db.flush()
+
+    if action in ("pass", "pass_exemption"):
+        # plan_writebacks 读 head.items;本函数只锁单头未载明细,须在此加载(同 complete_stock_check)
+        if getattr(head, "items", None) is None:
+            head.items = list((await db.execute(
+                select(StockCheckItem).where(StockCheckItem.check_id == check_id).order_by(StockCheckItem.id)
+            )).scalars().all())
+        writebacks = await plan_writebacks(db, head)
+        writeback_count = len(writebacks)
+
+    db.add(StockCheckAuditLog(
+        check_id=check_id,
+        round_no=round_no,
+        action=action,
+        comment=comment,
+        rejected_item_ids=rejected_ids,
+        operated_by_user_id=_current_user_id(current_user),
+        operated_by=username,
+    ))
+    for row in audit_item_rows:
+        row.round_no = round_no
+        db.add(row)
+    await db.flush()
+
+    if action in ("reject", "flag"):
+        await _notify_check_audit(db, head, comment, current_user, action, len(rejected_ids or []))
+    if action == "reject":
+        await publish_event(
+            check_id, "status_changed",
+            {
+                "check_id": check_id, "status": "in_progress",
+                "audit_status": "rejected", "head_version": int(head.version or 0),
+                "audit_by": username, "audit_comment": comment,
+            },
+            _current_user_id(current_user),
+        )
+    elif action == "flag":
+        await publish_event(
+            check_id, "audit_changed",
+            {
+                "check_id": check_id, "status": head.status,
+                "audit_action": "flag", "head_version": int(head.version or 0),
+                "audit_by": username, "flagged_items": len(rejected_ids or []),
+            },
+            _current_user_id(current_user),
+        )
+    else:
+        await publish_event(
+            check_id, "audit_changed",
+            {
+                "check_id": check_id, "status": "completed",
+                "audit_status": "passed", "head_version": int(head.version or 0),
+                "audit_by": username, "writeback_planned": writeback_count,
+            },
+            _current_user_id(current_user),
+        )
+    return head, writeback_count
+
+
+async def appeal_check_items(
+    db: AsyncSession,
+    check_id: int,
+    item_ids: List[int],
+    reason: str,
+    current_user: dict,
+    *,
+    expected_version: Optional[int] = None,
+) -> int:
+    """盘点人对被标记行(audit_failed=1)申请复议。
+
+    前置: 单据进行中(过程标记与发回重填的标记均可复议);行属于本单且 audit_failed=1;原因必填。
+    效果: 行 appeal_status=pending + 原因/时间留痕;通知持有抽检权限的角色用户。
+    """
+    head = (await db.execute(select(StockCheck).where(StockCheck.id == check_id).with_for_update())).scalar_one_or_none()
+    if not head:
+        raise ValueError(f"盘点单 {check_id} 不存在")
+    if head.status != "in_progress":
+        raise ValueError("仅进行中的盘点单可申请复议")
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("申请复议必须填写原因")
+    if expected_version is not None and int(head.version or 0) != int(expected_version):
+        raise StockCheckConflictError("head", int(head.version or 0), {"check_id": check_id})
+    ids = [int(i) for i in (item_ids or [])]
+    if not ids:
+        raise ValueError("请勾选要申请复议的问题行")
+    rows = list((await db.execute(
+        select(StockCheckItem)
+        .where(StockCheckItem.check_id == check_id, StockCheckItem.id.in_(ids))
+    )).scalars().all())
+    if len(rows) != len(set(ids)):
+        raise ValueError("存在不属于本盘点单的明细行")
+    bad = [f"{r.material_code}(未被标记)" for r in rows if r.audit_failed != 1]
+    if bad:
+        raise ValueError(f"仅被标记的问题行可申请复议:{'、'.join(bad)}")
+    pending = [r.material_code for r in rows if r.appeal_status == "pending"]
+    if pending:
+        raise ValueError(f"以下行已有待裁决的复议:{'、'.join(pending)}")
+
+    now = datetime.now()
+    username = current_user.get("username", "") if current_user else ""
+    for r in rows:
+        r.appeal_status = "pending"
+        r.appeal_reason = reason
+        r.appeal_at = now
+    head.version = int(head.version or 0) + 1
+    await db.flush()
+    db.add(StockCheckAuditLog(
+        check_id=check_id,
+        round_no=1 + int((await db.execute(
+            select(func.max(StockCheckAuditLog.round_no)).where(StockCheckAuditLog.check_id == check_id)
+        )).scalar() or 0),
+        action="appeal",
+        comment=reason,
+        rejected_item_ids=sorted(ids),
+        operated_by_user_id=_current_user_id(current_user),
+        operated_by=username,
+    ))
+    await db.flush()
+    await _notify_appeal(db, head, reason, current_user, is_apply=True)
+    await publish_event(
+        check_id, "audit_changed",
+        {
+            "check_id": check_id, "status": head.status,
+            "audit_action": "appeal", "head_version": int(head.version or 0),
+            "appeal_items": len(ids),
+        },
+        _current_user_id(current_user),
+    )
+    return len(ids)
+
+
+async def resolve_check_appeal(
+    db: AsyncSession,
+    check_id: int,
+    item_ids: List[int],
+    accept: bool,
+    current_user: dict,
+    *,
+    comment: Optional[str] = None,
+    expected_version: Optional[int] = None,
+) -> int:
+    """财务裁决复议: accept=True 支持复议(撤销标记,认可盘点数);False 驳回(维持标记)。"""
+    head = (await db.execute(select(StockCheck).where(StockCheck.id == check_id).with_for_update())).scalar_one_or_none()
+    if not head:
+        raise ValueError(f"盘点单 {check_id} 不存在")
+    if head.status != "in_progress":
+        raise ValueError("仅进行中的盘点单存在待裁决复议")
+    if expected_version is not None and int(head.version or 0) != int(expected_version):
+        raise StockCheckConflictError("head", int(head.version or 0), {"check_id": check_id})
+    ids = [int(i) for i in (item_ids or [])]
+    if not ids:
+        raise ValueError("请勾选要裁决的复议行")
+    rows = list((await db.execute(
+        select(StockCheckItem)
+        .where(StockCheckItem.check_id == check_id, StockCheckItem.id.in_(ids))
+    )).scalars().all())
+    if len(rows) != len(set(ids)):
+        raise ValueError("存在不属于本盘点单的明细行")
+    not_pending = [r.material_code for r in rows if r.appeal_status != "pending"]
+    if not_pending:
+        raise ValueError(f"以下行没有待裁决的复议:{'、'.join(not_pending)}")
+
+    username = current_user.get("username", "") if current_user else ""
+    for r in rows:
+        r.appeal_status = "accepted" if accept else "rejected"
+        if accept:
+            r.audit_failed = 0
+    head.version = int(head.version or 0) + 1
+    await db.flush()
+    verdict = "支持复议" if accept else "驳回复议"
+    db.add(StockCheckAuditLog(
+        check_id=check_id,
+        round_no=1 + int((await db.execute(
+            select(func.max(StockCheckAuditLog.round_no)).where(StockCheckAuditLog.check_id == check_id)
+        )).scalar() or 0),
+        action="appeal_resolve",
+        comment=(f"{verdict}:{comment}" if comment else verdict),
+        rejected_item_ids=sorted(ids),
+        operated_by_user_id=_current_user_id(current_user),
+        operated_by=username,
+    ))
+    await db.flush()
+    await _notify_appeal(db, head, (comment or f"{verdict}({len(ids)} 行)"), current_user, is_apply=False, accept=accept)
+    await publish_event(
+        check_id, "audit_changed",
+        {
+            "check_id": check_id, "status": head.status,
+            "audit_action": "appeal_resolve", "head_version": int(head.version or 0),
+            "accepted": accept, "appeal_items": len(ids),
+        },
+        _current_user_id(current_user),
+    )
+    return len(ids)
+
+
+async def _notify_appeal(
+    db: AsyncSession,
+    head: StockCheck, reason: str, current_user: Optional[dict],
+    *, is_apply: bool, accept: Optional[bool] = None,
+) -> None:
+    """复议通知:申请→通知持有抽检权限的角色用户;裁决→通知盘点人(创建人+协同人)。"""
+    from app.models.basicdata.announcement import Notification
+    from sqlalchemy import text as _text
+
+    title: str
+    # 复议申请用独立类型: 前端据此跳转「复议待裁决」队列;裁决结果仍用 stock_check_audit(盘点人看工作台)
+    notif_type = "stock_check_appeal" if is_apply else "stock_check_audit"
+    if is_apply:
+        title = f"盘点单 {head.check_no} 收到复议申请"
+    else:
+        title = f"盘点单 {head.check_no} 复议{'已支持，标记已撤销' if accept else '被驳回，请修正数据'}"
+
+    async def recipients_by_permission() -> list[int]:
+        # 持有 materials.stock_check_audit 任一权限的角色 → 其用户(裁決人候选)。
+        # 用独立会话执行:查询失败不能污染主事务(否则上面已 flush 的复议写入会在
+        # commit 时静默丢失,接口却返回 200)。
+        from app.core.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as ndb:
+            rows = (await ndb.execute(_text(
+                "SELECT DISTINCT u.id FROM sys_user u "
+                "JOIN sys_role r ON u.role_id = r.id "
+                "WHERE r.permissions::text LIKE '%materials.stock_check_audit%' "
+                "AND u.is_active"
+            ))).scalars().all()
+            return [int(x) for x in rows]
+
+    if is_apply:
+        try:
+            targets = await recipients_by_permission()
+        except Exception:
+            targets = []
+    else:
+        targets = []
+        if head.created_by_user_id:
+            targets.append(int(head.created_by_user_id))
+        for uid in (head.co_checker_user_ids or []):
+            try:
+                targets.append(int(uid))
+            except (TypeError, ValueError):
+                continue
+
+    operator_id = _current_user_id(current_user)
+    if operator_id is not None:
+        targets = [t for t in targets if int(t) != int(operator_id)]
+    recipients = sorted(set(targets))
+    for uid in recipients:
+        db.add(Notification(
+            user_id=uid,
+            type=notif_type,
+            title=title,
+            content=reason[:512],
+            ref_type="stock_check",
+            ref_id=head.id,
+            sender_id=_current_user_id(current_user),
+            sender_name=(current_user or {}).get("username"),
+            priority="important",
+        ))
+    # 本服务无显式 commit（依赖 get_db 请求结束自动提交），flush 后即推送；
+    # 极端回滚场景计数会偏高，由下一次 unread 事件/刷新自愈
+    await db.flush()
+    for uid in recipients:
+        await publish_unread_update(db, uid)
+
+
+async def _notify_check_audit(
+    db: AsyncSession,
+    head: StockCheck, comment: Optional[str], current_user: Optional[dict],
+    action: str, flagged_count: int = 0,
+) -> None:
+    """抽检问题通知创建人 + 共同盘点人(排除操作人自己)。reject=发回重填,flag=过程抽检标记。"""
+    from app.models.basicdata.announcement import Notification
+
+    if action == "flag":
+        title = f"盘点单 {head.check_no} 过程抽检发现 {flagged_count} 行不符，请修正"
+    else:
+        title = f"盘点单 {head.check_no} 抽检未通过，已发回重填"
+    recipients: set[int] = set()
+    if head.created_by_user_id:
+        recipients.add(int(head.created_by_user_id))
+    for uid in (head.co_checker_user_ids or []):
+        try:
+            recipients.add(int(uid))
+        except (TypeError, ValueError):
+            continue
+    operator_id = _current_user_id(current_user)
+    if operator_id is not None:
+        recipients.discard(int(operator_id))
+    recipient_ids = sorted(recipients)
+    for uid in recipient_ids:
+        db.add(Notification(
+            user_id=uid,
+            type="stock_check_audit",
+            title=title,
+            content=(comment or "")[:512],
+            ref_type="stock_check",
+            ref_id=head.id,
+            sender_id=_current_user_id(current_user),
+            sender_name=(current_user or {}).get("username"),
+            priority="important",
+        ))
+    # 本服务无显式 commit（依赖 get_db 请求结束自动提交），flush 后即推送；
+    # 极端回滚场景计数会偏高，由下一次 unread 事件/刷新自愈
+    await db.flush()
+    for uid in recipient_ids:
+        await publish_unread_update(db, uid)
+
+
+async def list_check_audit_logs(db: AsyncSession, check_id: int) -> List[dict]:
+    """按轮次返回抽检历史,每轮附复点明细 items(供时间线与盘点人侧对比展示)。"""
+    logs = list((await db.execute(
+        select(StockCheckAuditLog)
+        .where(StockCheckAuditLog.check_id == check_id)
+        .order_by(StockCheckAuditLog.round_no)
+    )).scalars().all())
+    items = list((await db.execute(
+        select(StockCheckAuditItem)
+        .where(StockCheckAuditItem.check_id == check_id)
+        .order_by(StockCheckAuditItem.id)
+    )).scalars().all())
+    by_round: dict = {}
+    for it in items:
+        by_round.setdefault(it.round_no, []).append(it)
+    out: List[dict] = []
+    for log in logs:
+        d = {
+            "id": log.id, "check_id": log.check_id, "round_no": log.round_no,
+            "action": log.action, "comment": log.comment,
+            "rejected_item_ids": log.rejected_item_ids,
+            "operated_by_user_id": log.operated_by_user_id,
+            "operated_by": log.operated_by, "created_at": log.created_at,
+            "items": by_round.get(log.round_no, []),
+        }
+        out.append(d)
+    return out
 
 
 async def cancel_stock_check(
@@ -2796,12 +3286,17 @@ async def refresh_check_warehouses(db: AsyncSession, check_id: int, current_user
             "qty": Decimal(str(r.qty or 0)),
             "updated_at": r.wh_updated,
         })
-    if head.check_type == "order":
-        # 订单盘点不纳入特殊仓(库存检查不良仓/赠品仓库),与建单/刷BOM口径一致
-        wh_map = {
-            mid: [w for w in whs if w["wh_name"] not in ORDER_CHECK_EXCLUDED_WH_NAMES]
-            for mid, whs in wh_map.items()
-        }
+    # 盘点不纳入的特殊仓: 订单=库存检查不良仓/赠品仓库(与建单/刷BOM口径一致);
+    # 手动/快捷=库存检查不良仓(与建单/追加明细口径一致)
+    excluded_wh_names = (
+        ORDER_CHECK_EXCLUDED_WH_NAMES
+        if head.check_type == "order"
+        else CHECK_EXCLUDED_WH_NAMES
+    )
+    wh_map = {
+        mid: [w for w in whs if w["wh_name"] not in excluded_wh_names]
+        for mid, whs in wh_map.items()
+    }
     for mid in wh_map:
         wh_map[mid].sort(key=lambda w: (-w["qty"], w["wh_id"]))
 
@@ -2891,6 +3386,7 @@ async def list_recent_stock_checks(
     *,
     keyword: Optional[str] = None,
     status: Optional[List[str]] = None,
+    audit_status: Optional[List[str]] = None,
     check_type: Optional[str] = None,
     source: Optional[str] = None,
     date_from: Optional[date] = None,
@@ -2898,6 +3394,7 @@ async def list_recent_stock_checks(
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
     writeback_todo: bool = False,
+    has_pending_appeal: Optional[bool] = None,
 ) -> List[StockCheck]:
     SORTABLE = {
         'check_no': StockCheck.check_no,
@@ -2921,6 +3418,19 @@ async def list_recent_stock_checks(
         statuses = [s.strip() for s in status if s and s.strip()]
         if statuses:
             query = query.where(StockCheck.status.in_(statuses))
+    if audit_status:
+        query = query.where(StockCheck.audit_status.in_(audit_status))
+    if has_pending_appeal:
+        # 存在待裁决复议行的盘点单(复议待裁决队列)
+        appeal_exists = (
+            select(StockCheckItem.id)
+            .where(
+                StockCheckItem.check_id == StockCheck.id,
+                StockCheckItem.appeal_status == "pending",
+            )
+            .exists()
+        )
+        query = query.where(appeal_exists)
     if check_type:
         query = query.where(StockCheck.check_type == check_type)
     if source:
@@ -3338,12 +3848,44 @@ async def attach_list_extras(db: AsyncSession, rows: List[StockCheck]) -> None:
         .group_by(StockCheckK3Writeback.check_id)
     )
     wb_map = {r.check_id: (int(r.pending or 0), int(r.failed or 0)) for r in wb_res.all()}
+    # 复议待裁决计数(抽检工作台「进行中」队列的复议标识/筛选)
+    appeal_res = await db.execute(
+        select(
+            StockCheckItem.check_id,
+            func.count().label("cnt"),
+        )
+        .where(
+            StockCheckItem.check_id.in_(ids),
+            StockCheckItem.appeal_status == "pending",
+        )
+        .group_by(StockCheckItem.check_id)
+    )
+    appeal_map = {r.check_id: int(r.cnt or 0) for r in appeal_res.all()}
+    # 最近一次复议申请摘要(时间/原因),供队列「复议待裁决」Tab 展示
+    appeal_last: Dict[int, dict] = {}
+    if appeal_map:
+        last_res = await db.execute(
+            text(
+                "SELECT DISTINCT ON (check_id) check_id, appeal_at, appeal_reason "
+                "FROM scm_inventory_check_item "
+                "WHERE appeal_status = 'pending' AND check_id = ANY(CAST(:ids AS bigint[])) "
+                "ORDER BY check_id, appeal_at DESC NULLS LAST"
+            ),
+            {"ids": list(appeal_map.keys())},
+        )
+        for r in last_res.all():
+            appeal_last[int(r.check_id)] = {"appeal_last_at": r.appeal_at, "appeal_last_reason": r.appeal_reason}
     # 协同人姓名: 复用 _resolve_user_names,按批缓存避免重复查询
     name_cache: Dict[int, str] = {}
     for r in rows:
         g = gain_map.get(r.id, (0, 0))
         r.gain_count, r.loss_count = g
         r.writeback_pending, r.writeback_failed = wb_map.get(r.id, (0, 0))
+        r.pending_appeals = appeal_map.get(r.id, 0)
+        if r.pending_appeals:
+            last = appeal_last.get(r.id) or {}
+            r.appeal_last_at = last.get("appeal_last_at")
+            r.appeal_last_reason = last.get("appeal_last_reason")
         uids = (r.co_checker_user_ids or [])
         need = [u for u in uids if u not in name_cache]
         if need:
@@ -3374,6 +3916,8 @@ async def list_scan_warehouses(db: AsyncSession) -> List[Dict]:
             "wh_name": (r.wh_name or "").strip() or f"WH#{r.wh_id}",
         }
         for r in rows
+        # 库存检查不良仓不纳入扫码盘点,不显示
+        if ((r.wh_name or "").strip() or f"WH#{r.wh_id}") not in CHECK_EXCLUDED_WH_NAMES
     ]
 
 
@@ -3434,6 +3978,8 @@ async def resolve_material_by_code(
             "system_qty": Decimal(str(r.wh_qty or 0)),
         }
         for r in inv_rows
+        # 库存检查不良仓不纳入扫码盘点,不显示
+        if ((r.wh_name or "").strip() or f"WH#{r.wh_id}") not in CHECK_EXCLUDED_WH_NAMES
     ]
 
     selected = next((w for w in warehouses if w["wh_id"] == wh_id), None) if wh_id is not None else None
